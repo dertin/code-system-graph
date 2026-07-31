@@ -1,0 +1,31 @@
+[workspace]
+members = ["crates/*"]
+resolver = "3"
+
+[workspace.package]
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.97.1"
+description = "Local system-level code intelligence across repositories."
+license = "Apache-2.0"
+repository = "https://github.com/code-system-graph/code-system-graph"
+
+[workspace.lints.rust]
+future_incompatible = { level = "warn", priority = -1 }
+missing_docs = "deny"
+nonstandard_style = { level = "deny", priority = -1 }
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = 10 }
+pedantic = { level = "warn", priority = 5 }
+clone_on_copy = "deny"
+large_enum_variant = "deny"
+needless_collect = "deny"
+redundant_clone = "deny"
+unwrap_used = "deny"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+strip = "symbols"

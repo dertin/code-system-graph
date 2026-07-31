@@ -1,0 +1,20 @@
+asyncapi: 2.6.0
+info:
+  title: Orders
+  version: 1.0.0
+channels:
+  orders.created:
+    publish:
+      message:
+        $ref: "#/components/messages/OrderCreated"
+components:
+  messages:
+    OrderCreated:
+      name: OrderCreated
+      payload:
+        type: object
+        required:
+          - orderId
+        properties:
+          orderId:
+            type: string

@@ -1,0 +1,8 @@
+type Order {
+  id: ID!
+  status: String!
+}
+
+type Query {
+  order(id: ID!): Order
+}

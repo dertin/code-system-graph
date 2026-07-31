@@ -1,0 +1,25 @@
+asyncapi: 2.6.0
+info:
+  title: Orders events
+  version: 1.0.0
+servers:
+  production:
+    url: kafka.internal:9092
+    protocol: kafka
+channels:
+  orders.created:
+    publish:
+      operationId: publishOrderCreated
+      message:
+        $ref: "#/components/messages/OrderCreated"
+components:
+  messages:
+    OrderCreated:
+      name: OrderCreated
+      payload:
+        type: object
+        required:
+          - orderId
+        properties:
+          orderId:
+            type: string

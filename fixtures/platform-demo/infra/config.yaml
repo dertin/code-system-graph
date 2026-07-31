@@ -1,0 +1,6 @@
+database:
+  url: postgresql://fixture:never-persist@database/orders
+order:
+  topic: orders.created
+api:
+  token: never-persist

@@ -1,0 +1,16 @@
+syntax = "proto3";
+
+package commerce.orders.v1;
+
+message GetOrderRequest {
+  string id = 1;
+}
+
+message OrderReply {
+  string id = 1;
+  string status = 2;
+}
+
+service Orders {
+  rpc GetOrder(GetOrderRequest) returns (OrderReply);
+}

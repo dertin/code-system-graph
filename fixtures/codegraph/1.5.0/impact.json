@@ -1,0 +1,20 @@
+{
+  "symbol": "scan_workspace",
+  "depth": 2,
+  "nodeCount": 2,
+  "edgeCount": 1,
+  "affected": [
+    {
+      "name": "scan_workspace",
+      "kind": "function",
+      "filePath": "crates/code-system-graph-cli/src/lib.rs",
+      "startLine": 270
+    },
+    {
+      "name": "scan_should_publish_snapshot",
+      "kind": "function",
+      "filePath": "crates/code-system-graph-cli/tests/http_trace_e2e.rs",
+      "startLine": 63
+    }
+  ]
+}

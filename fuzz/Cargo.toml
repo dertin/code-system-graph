@@ -1,0 +1,31 @@
+[package]
+name = "code-system-graph-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4.13"
+code-system-graph-core = { path = "../crates/code-system-graph-core" }
+code-system-graph-model = { path = "../crates/code-system-graph-model" }
+serde_json = "1.0.151"
+
+[[bin]]
+name = "parsers"
+path = "fuzz_targets/parsers.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "interfaces"
+path = "fuzz_targets/interfaces.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]

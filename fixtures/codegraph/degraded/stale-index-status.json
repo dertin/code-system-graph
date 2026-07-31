@@ -1,0 +1,17 @@
+{
+  "initialized": true,
+  "version": "1.5.0",
+  "projectPath": "/fixture/stale",
+  "indexPath": "/fixture/stale/.codegraph",
+  "lastIndexed": "2026-07-28T00:00:00.000Z",
+  "pendingChanges": {
+    "added": 0,
+    "modified": 1,
+    "removed": 0
+  },
+  "worktreeMismatch": null,
+  "index": {
+    "reindexRecommended": false,
+    "state": "complete"
+  }
+}

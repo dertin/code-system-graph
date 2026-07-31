@@ -1,0 +1,11 @@
+{
+  "name": "@commerce/orders-client",
+  "version": "1.0.0",
+  "exports": {
+    ".": "./src/index.js",
+    "./testing": "./src/testing.js"
+  },
+  "peerDependencies": {
+    "react": "^18.0.0"
+  }
+}

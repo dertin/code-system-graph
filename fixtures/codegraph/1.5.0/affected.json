@@ -1,0 +1,9 @@
+{
+  "changedFiles": [
+    "crates/code-system-graph-core/src/provider.rs"
+  ],
+  "affectedTests": [
+    "crates/code-system-graph-core/tests/provider_e2e.rs"
+  ],
+  "totalDependentsTraversed": 6
+}

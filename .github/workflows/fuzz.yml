@@ -1,0 +1,25 @@
+name: Fuzz
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - uses: taiki-e/install-action@cargo-fuzz
+      - run: cargo fuzz run parsers -- -max_total_time=120 -max_len=2097152
+        env:
+          RUSTC_BOOTSTRAP: "1"
+      - run: cargo fuzz run interfaces -- -max_total_time=120 -max_len=2097152
+        env:
+          RUSTC_BOOTSTRAP: "1"

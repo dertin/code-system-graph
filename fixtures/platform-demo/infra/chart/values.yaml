@@ -1,0 +1,6 @@
+worker:
+  image: ghcr.io/example/orders-worker:1.0.0
+  environment:
+    ORDER_TOPIC: orders.created
+secrets:
+  databaseUrl: "postgresql://fixture:never-persist@database/orders"

@@ -1,0 +1,11 @@
+title = "Code System Graph Gitleaks configuration"
+
+[allowlist]
+description = "Ignore the synthetic Terraform password fixture used to prove secret-free persistence."
+paths = [
+  '''^fixtures/platform-demo/infra/terraform/main\.tf$''',
+]
+regexes = [
+  '''ghp_012345678901234567890123456789012345''',
+  '''eyJhbGciOiJIUzI1NiJ9\.eyJzdWIiOiIxMjM0NTY3ODkwIn0\.signature123''',
+]

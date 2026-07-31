@@ -1,0 +1,21 @@
+services:
+  api:
+    image: ghcr.io/example/orders-api:1.0.0
+    ports:
+      - "8080:8080"
+    depends_on:
+      - database
+    environment:
+      DATABASE_URL: "postgresql://fixture:never-persist@database/orders"
+      ORDER_TOPIC: "orders.created"
+  worker:
+    image: ghcr.io/example/orders-worker:1.0.0
+    depends_on:
+      - database
+      - api
+    environment:
+      DATABASE_URL: "postgresql://fixture:never-persist@database/orders"
+  database:
+    image: postgres:17
+    environment:
+      POSTGRES_PASSWORD: "never-persist"

@@ -1,0 +1,17 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orders-worker
+  namespace: commerce
+spec:
+  template:
+    spec:
+      containers:
+        - name: worker
+          image: "{{ .Values.worker.image }}"
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: orders-database
+                  key: url

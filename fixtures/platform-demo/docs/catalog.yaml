@@ -1,0 +1,13 @@
+services:
+  - name: orders-api
+    repository: api
+    owner: "@commerce-api"
+    contracts:
+      - "http:POST:/api/orders"
+      - "event:kafka::orders.created"
+      - "rpc:commerce.orders.v1.Orders/GetOrder"
+  - name: orders-worker
+    repository: worker
+    owner: "@commerce-workers"
+    dependencies:
+      - "service:orders-api"

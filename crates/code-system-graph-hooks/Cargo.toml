@@ -1,0 +1,31 @@
+[package]
+name = "code-system-graph-hooks"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/code-system-graph-{ target }-v{ version }{ archive-suffix }"
+bin-dir = "code-system-graph-{ target }-v{ version }/bin/{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+disabled-strategies = ["quick-install", "compile"]
+
+[package.metadata.binstall.overrides.'cfg(windows)']
+pkg-fmt = "zip"
+
+[dependencies]
+atomic-write-file = "0.3.0"
+blake3 = "1.8.5"
+schemars = "1.2.2"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+thiserror = "2.0.19"
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tempfile = "3.27.0"

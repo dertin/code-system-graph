@@ -1,0 +1,11 @@
+{
+  "symbol": "scan_workspace",
+  "callers": [
+    {
+      "name": "scan_should_publish_snapshot",
+      "kind": "function",
+      "filePath": "crates/code-system-graph-cli/tests/http_trace_e2e.rs",
+      "startLine": 63
+    }
+  ]
+}

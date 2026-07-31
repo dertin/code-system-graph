@@ -1,0 +1,12 @@
+{
+  "generator-cli": {
+    "version": "7.12.0",
+    "generators": {
+      "rust-client": {
+        "generatorName": "rust",
+        "inputSpec": "openapi.yaml",
+        "output": "generated/client"
+      }
+    }
+  }
+}

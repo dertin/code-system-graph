@@ -1,0 +1,48 @@
+[package]
+name = "code-system-graph-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+async-trait = "0.1.91"
+atomic-write-file = "0.3.0"
+blake3 = "1.8.5"
+graphql-parser = "0.4.1"
+hcl-rs = "0.19.7"
+proto-parser = "1.14.3"
+pulldown-cmark = "0.13.4"
+code-system-graph-model = { version = "1.0.0", path = "../code-system-graph-model" }
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls"] }
+rmcp = { version = "3.1.0", default-features = false, features = [
+    "client",
+    "transport-async-rw",
+    "which-command",
+] }
+schemars = "1.2.2"
+semver = { version = "1.0.28", features = ["serde"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.151", features = ["preserve_order"] }
+serde-saphyr = "1.0.0"
+sqlparser = "0.62.0"
+thiserror = "2.0.19"
+tokio = { version = "1.53.1", features = ["io-util", "macros", "process", "rt", "sync", "time"] }
+tokio-util = { version = "0.7.19", features = ["rt"] }
+tree-sitter = "0.26.11"
+tree-sitter-go = "0.25.0"
+tree-sitter-java = "0.23.5"
+tree-sitter-javascript = "0.25.0"
+tree-sitter-python = "0.25.0"
+tree-sitter-rust = "0.24.2"
+tree-sitter-typescript = "0.23.2"
+url = "2.5.8"
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tempfile = "3.27.0"
+tokio = { version = "1.53.1", features = ["macros", "rt"] }

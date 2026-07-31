@@ -1,0 +1,24 @@
+[
+  {
+    "name": "codegraph_explore",
+    "description": "Explore relevant symbols, source, and call paths.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string"
+        },
+        "maxFiles": {
+          "type": "number",
+          "default": 12
+        },
+        "projectPath": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "query"
+      ]
+    }
+  }
+]

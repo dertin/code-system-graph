@@ -1,0 +1,10 @@
+{
+  "protocolVersion": "2024-11-05",
+  "capabilities": {
+    "tools": {}
+  },
+  "serverInfo": {
+    "name": "codegraph",
+    "version": "1.5.0"
+  }
+}

@@ -1,0 +1,89 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [master, main]
+
+permissions:
+  contents: read
+
+jobs:
+  nightly-quality:
+    name: Nightly format and Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly
+          components: clippy,rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: nightly-quality
+      - run: cargo +nightly fmt --all -- --check
+      - run: cargo +nightly clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+  stable:
+    name: Stable build and tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: stable
+      - run: cargo +stable check --workspace --all-targets --all-features --locked
+      - run: cargo +stable test --workspace --all-targets --all-features --locked
+      - run: RUSTDOCFLAGS="-D warnings" cargo +stable doc --workspace --all-features --no-deps --locked
+
+  msrv:
+    name: Rust 1.97.1 MSRV
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: msrv
+      - run: cargo check --workspace --all-targets --all-features --locked
+
+  policy:
+    name: Dependency policy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - uses: taiki-e/install-action@cargo-audit
+      - run: cargo audit --deny warnings
+
+  secrets:
+    name: Secret scanning
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+
+  linux-release:
+    name: Linux release smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: anchore/sbom-action/download-syft@v0
+      - run: scripts/package-release.sh
+      - run: scripts/smoke-install.sh "dist/code-system-graph-x86_64-unknown-linux-gnu-v1.0.0"

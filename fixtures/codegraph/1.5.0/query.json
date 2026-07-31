@@ -1,0 +1,15 @@
+[
+  {
+    "node": {
+      "id": "function:fixture",
+      "kind": "function",
+      "name": "scan_workspace",
+      "qualifiedName": "scan_workspace",
+      "filePath": "crates/code-system-graph-cli/src/lib.rs",
+      "language": "rust",
+      "startLine": 270,
+      "endLine": 278
+    },
+    "score": 19.5
+  }
+]

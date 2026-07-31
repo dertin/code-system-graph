@@ -1,0 +1,19 @@
+[package]
+name = "code-system-graph-model"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+blake3 = "1.8.5"
+camino = { version = "1.2.5", features = ["serde1"] }
+schemars = "1.2.2"
+semver = { version = "1.0.28", features = ["serde"] }
+serde = { version = "1.0.229", features = ["derive"] }
+time = { version = "0.3.54", features = ["serde"] }
+
+[lints]
+workspace = true

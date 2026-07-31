@@ -1,0 +1,10 @@
+[
+  {
+    "name": "codegraph_ping",
+    "description": "Report server liveness.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {}
+    }
+  }
+]

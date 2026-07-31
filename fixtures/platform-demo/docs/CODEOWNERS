@@ -1,0 +1,4 @@
+/api/ @commerce-api
+/worker-python/ @commerce-workers
+/infra/ @commerce-platform
+/docs/ @commerce-platform

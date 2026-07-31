@@ -1,0 +1,54 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orders-api
+  namespace: commerce
+spec:
+  template:
+    spec:
+      containers:
+        - name: api
+          image: ghcr.io/example/orders-api:1.0.0
+          ports:
+            - containerPort: 8080
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: orders-database
+                  key: url
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: orders-api
+  namespace: commerce
+spec:
+  ports:
+    - port: 80
+      targetPort: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: orders-api
+  namespace: commerce
+spec:
+  rules:
+    - host: orders.example.test
+      http:
+        paths:
+          - path: /api/orders
+            backend:
+              service:
+                name: orders-api
+                port:
+                  number: 80
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: orders-database
+  namespace: commerce
+stringData:
+  url: "postgresql://fixture:never-persist@database/orders"

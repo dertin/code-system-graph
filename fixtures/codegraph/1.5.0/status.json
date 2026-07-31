@@ -1,0 +1,24 @@
+{
+  "initialized": true,
+  "version": "1.5.0",
+  "projectPath": "/fixture/repository",
+  "indexPath": "/fixture/repository/.codegraph",
+  "lastIndexed": "2026-07-29T00:00:00.000Z",
+  "fileCount": 24,
+  "nodeCount": 649,
+  "edgeCount": 1827,
+  "pendingChanges": {
+    "added": 0,
+    "modified": 0,
+    "removed": 0
+  },
+  "worktreeMismatch": null,
+  "index": {
+    "builtWithVersion": "1.5.0",
+    "builtWithExtractionVersion": 24,
+    "currentExtractionVersion": 24,
+    "reindexRecommended": false,
+    "state": "complete",
+    "pendingRefs": 0
+  }
+}

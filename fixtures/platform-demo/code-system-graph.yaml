@@ -1,0 +1,16 @@
+version: 1
+name: commerce-platform
+repos:
+  web:
+    path: web
+  api:
+    path: api
+    openapi: openapi.yaml
+  tests:
+    path: tests-python
+  worker:
+    path: worker-python
+  infra:
+    path: infra
+  docs:
+    path: docs
