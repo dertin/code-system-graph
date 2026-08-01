@@ -107,9 +107,7 @@ pub fn status(request: &InstallRequest) -> Result<HookStatus, HookError> {
         std::env::consts::EXE_SUFFIX
     ));
     let routing_installed = match spec.protocol {
-        HostProtocol::Json { event } => {
-            json_hook_installed(request, &spec.path, event, &runtime)?
-        }
+        HostProtocol::Json { event } => json_hook_installed(request, &spec.path, event, &runtime)?,
         HostProtocol::Guidance => file_contains(
             &spec.path,
             &guidance_block(request.host, request.codegraph_enabled),
