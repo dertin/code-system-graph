@@ -930,7 +930,11 @@ mod tests {
             .into_iter()
             .find(|tool| tool.name == "source_context")
             .expect("source_context should be advertised");
-        assert!(!source_context.description.contains("explore"));
+        let description = source_context
+            .description
+            .as_deref()
+            .expect("source_context description should be present");
+        assert!(!description.contains("explore"));
     }
 
     #[test]
