@@ -9,8 +9,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::{HookError, RoutingIntent, RoutingRequest, RoutingResponse};
 
-const FEDERATED_GUIDANCE: &str = "Use Code System Graph first for federated contracts, architecture, impact, diff, or PR-overlap context; use explore for repository-local source and symbol detail.";
-const LOCAL_GUIDANCE: &str = "Use Code System Graph explore first for repository-local symbols, callers, tests, and implementation detail; use CodeGraph directly only if the provider is degraded.";
+const FEDERATED_CODEGRAPH_GUIDANCE: &str = "Use Code System Graph first for federated contracts, architecture, impact, diff, or PR-overlap context; use explore for repository-local source and symbol detail.";
+const LOCAL_CODEGRAPH_GUIDANCE: &str = "Use Code System Graph explore first for repository-local symbols, callers, tests, and implementation detail; use CodeGraph directly only if the provider is degraded.";
+const FEDERATED_NATIVE_GUIDANCE: &str = "Use Code System Graph first for federated contracts, architecture, impact, diff, or PR-overlap context. Repository-local source and symbol detail is unavailable in the native-only profile.";
+const LOCAL_NATIVE_GUIDANCE: &str = "Use Code System Graph for persisted repository entities, relationships, and source-free evidence. Repository-local source and symbol detail is unavailable in the native-only profile.";
 
 const FEDERATED_SIGNALS: &[&str] = &[
     "cross-repo",
@@ -91,11 +93,7 @@ pub fn route(request: &RoutingRequest) -> Result<RoutingResponse, HookError> {
         .and_then(serde_json::Value::as_str)
         .ok_or(HookError::MissingPrompt)?;
     let intent = classify_prompt(prompt);
-    let guidance = match intent {
-        RoutingIntent::None => None,
-        RoutingIntent::LocalRepository => Some(LOCAL_GUIDANCE),
-        RoutingIntent::Federated => Some(FEDERATED_GUIDANCE),
-    };
+    let guidance = guidance_for(intent, request.codegraph_enabled);
     let Some(guidance) = guidance else {
         return Ok(RoutingResponse {
             intent,
@@ -131,6 +129,16 @@ pub fn route(request: &RoutingRequest) -> Result<RoutingResponse, HookError> {
         guidance: Some(guidance.to_owned()),
         deduplicated: false,
     })
+}
+
+fn guidance_for(intent: RoutingIntent, codegraph_enabled: bool) -> Option<&'static str> {
+    match (intent, codegraph_enabled) {
+        (RoutingIntent::None, _) => None,
+        (RoutingIntent::LocalRepository, true) => Some(LOCAL_CODEGRAPH_GUIDANCE),
+        (RoutingIntent::Federated, true) => Some(FEDERATED_CODEGRAPH_GUIDANCE),
+        (RoutingIntent::LocalRepository, false) => Some(LOCAL_NATIVE_GUIDANCE),
+        (RoutingIntent::Federated, false) => Some(FEDERATED_NATIVE_GUIDANCE),
+    }
 }
 
 fn dedup_state_path(request: &RoutingRequest) -> std::path::PathBuf {
@@ -212,4 +220,20 @@ fn restrict_file(path: &Path) -> Result<(), HookError> {
 #[cfg(not(unix))]
 fn restrict_file(_path: &Path) -> Result<(), HookError> {
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RoutingIntent, guidance_for};
+
+    #[test]
+    fn guidance_should_follow_codegraph_policy() {
+        for intent in [RoutingIntent::LocalRepository, RoutingIntent::Federated] {
+            let native = guidance_for(intent, false).expect("native guidance");
+            let enriched = guidance_for(intent, true).expect("CodeGraph guidance");
+
+            assert!(!native.contains("explore"));
+            assert!(enriched.contains("explore"));
+        }
+    }
 }

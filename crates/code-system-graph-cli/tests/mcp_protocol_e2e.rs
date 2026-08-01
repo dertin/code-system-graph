@@ -63,6 +63,7 @@ async fn stdio_should_initialize_without_noise_and_hide_admin_tools() -> anyhow:
 
     assert!(names.contains(&"status"));
     assert!(names.contains(&"contracts"));
+    assert!(!names.contains(&"explore"));
     assert!(!names.contains(&"scan"));
     assert!(!names.contains(&"update_workspace"));
     assert!(!names.contains(&"write_manual_link"));

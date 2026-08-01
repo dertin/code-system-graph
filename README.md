@@ -63,6 +63,11 @@ with Code System Graph. The two projects solve different levels of the same prob
 | Contracts, dependencies, ownership, and impact across repositories | Code System Graph |
 | One end-to-end answer with both levels | Code System Graph with optional CodeGraph enrichment |
 
+CodeGraph does not add its private nodes or relationships to the persisted Code System Graph.
+When enabled, it can add evidence to existing implementation links and provides bounded,
+request-time `explore` context and local impact. Without it, the federated graph remains available,
+but repository-local implementation detail does not.
+
 Code System Graph is useful on its own. It does not install, initialize, or read CodeGraph's private
 database. See the [CodeGraph integration notes](docs/CODEGRAPH_INTEGRATION.md) for the supported
 public interface and attribution details.
@@ -183,7 +188,7 @@ is ready to share.
 
 `init` does **not** scan, create the database, detect sibling repositories, or configure an agent.
 
-### 3. Build the graph
+### 3. Build the system graph
 
 Run this from the directory containing `code-system-graph.yaml`:
 
@@ -192,37 +197,61 @@ mkdir -p .code-system-graph && csgraph scan --config code-system-graph.yaml --da
 ```
 
 The first scan discovers supported boundaries and publishes an atomic SQLite snapshot. Later scans
-reuse unchanged extraction results. Use `sync` for the same incremental publication plus a public
-`codegraph sync` pass for each repository that already has a local CodeGraph index:
+reuse unchanged extraction results.
+
+### 4. Add repository-level CodeGraph context (optional)
+
+Install the independent CodeGraph CLI from its official repository:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/colbymchenry/codegraph/main/install.sh | sh
+codegraph --version
+```
+
+Initialize it once in every repository declared in `code-system-graph.yaml`:
+
+```bash
+codegraph init ./repo_1
+codegraph init ./repo_2
+```
+
+Each command creates a local `.codegraph/` index inside that repository. Then one Code System Graph
+command keeps the initialized CodeGraph indexes and the federated graph current:
 
 ```bash
 csgraph sync --config code-system-graph.yaml --database .code-system-graph/code-system-graph.db
 ```
 
-Add `--watch` to keep both index layers current after relevant edits. Use
-`--poll-interval-ms 2000` on network filesystems or other environments where native filesystem
-notifications are unavailable. `sync` never initializes or reads CodeGraph's private database;
-repositories without `.codegraph/` are reported as skipped. `--no-codegraph` keeps only the native
-Code System Graph layer current.
+Run `sync` after relevant changes or use `sync --watch` during a development session. Repositories
+without `.codegraph/` are skipped; `--no-codegraph` updates only Code System Graph.
 
-`scan` and plain `sync` are one-shot commands that must be started explicitly. `sync --watch`
-performs an initial pass and then repeats synchronization automatically after relevant file or
-manifest changes while the foreground process remains active. It does not install a background
-service and stops on Ctrl-C or process termination.
-
-Check freshness and health at any time:
+Verify both layers:
 
 ```bash
 csgraph status --config code-system-graph.yaml --database .code-system-graph/code-system-graph.db
+codegraph status ./repo_1
+codegraph status ./repo_2
 ```
 
-### 4. Connect your coding agent
+Code System Graph never reads CodeGraph's private database. It uses CodeGraph's public CLI and MCP
+interfaces. See [Use CodeGraph with a workspace](docs/CODEGRAPH_INTEGRATION.md) for Windows, npm,
+custom binary, watch mode, and troubleshooting instructions.
+
+### 5. Connect your coding agent
 
 Code System Graph exposes a local MCP server. For Codex:
 
 ```bash
-codex mcp add code-system-graph -- csgraph mcp --workspace my-project --database .code-system-graph/code-system-graph.db
+codex mcp add code-system-graph -- \
+  csgraph mcp \
+  --codegraph \
+  --workspace my-project \
+  --database /absolute/path/to/my-project/.code-system-graph/code-system-graph.db
 ```
+
+`--codegraph` exposes bounded repository-local `explore` context through Code System Graph. Omit it
+when CodeGraph is not installed; `explore` then remains unavailable while the federated tools keep
+working.
 
 Claude Code, Codex, Gemini CLI, Antigravity, and Cursor are supported. Each agent uses its own MCP
 configuration format; optional routing hooks are a separate step. Follow
@@ -327,6 +356,7 @@ non-loopback HTTP access.
 - [First workspace](docs/GETTING_STARTED.md)
 - [Supported languages, frameworks, contracts, and relationships](docs/SUPPORTED_TECHNOLOGIES.md)
 - [Configuration](docs/CONFIGURATION.md)
+- [Use CodeGraph with every repository in a workspace](docs/CODEGRAPH_INTEGRATION.md)
 - [Connect Claude Code, Codex, Gemini, Antigravity, or Cursor](docs/AGENT_SETUP.md)
 - [CLI reference](docs/CLI.md)
 - [Troubleshooting with `doctor`](docs/GETTING_STARTED.md#troubleshooting)

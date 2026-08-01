@@ -115,6 +115,40 @@ impl RunningServer {
         })
     }
 
+    #[cfg(unix)]
+    async fn start_with_disabled_codegraph() -> anyhow::Result<(Self, PathBuf)> {
+        let fixture = Fixture::create()?;
+        let binary = fixture.temporary.path().join("codegraph-marker");
+        let marker = fixture.temporary.path().join("codegraph-invoked");
+        std::fs::write(
+            &binary,
+            "#!/bin/sh\n: > \"$(dirname \"$0\")/codegraph-invoked\"\nexit 1\n",
+        )?;
+        let mut permissions = std::fs::metadata(&binary)?.permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&binary, permissions)?;
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+        let address = listener.local_addr()?;
+        let config = fixture
+            .server_config()
+            .with_bind(address)
+            .with_codegraph(false, Some(binary.into_os_string()));
+        let cancellation = CancellationToken::new();
+        let task_cancellation = cancellation.clone();
+        let task = tokio::spawn(async move {
+            serve_http_on_listener(listener, config, task_cancellation).await
+        });
+        Ok((
+            Self {
+                address,
+                cancellation,
+                task,
+                fixture,
+            },
+            marker,
+        ))
+    }
+
     fn url(&self, path: &str) -> String {
         format!("http://{}{path}", self.address)
     }
@@ -294,6 +328,28 @@ async fn explore_route_should_return_ephemeral_local_context() -> anyhow::Result
     let (impact_status, impact_body) = response_json(impact).await?;
     assert!(
         impact_status == StatusCode::OK && impact_body["data"]["local_impact_summaries"].is_array()
+    );
+    server.stop().await
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn explore_route_should_reject_disabled_codegraph_before_execution() -> anyhow::Result<()> {
+    let (server, marker) = RunningServer::start_with_disabled_codegraph().await?;
+    let response = Client::new()
+        .post(server.url("/v1/tools/explore"))
+        .json(&json!({
+            "workspace": "http-test",
+            "query": "orders implementation",
+            "max_files": 4
+        }))
+        .send()
+        .await?;
+    let (status, body) = response_json(response).await?;
+
+    assert_eq!(
+        (status, body["data"]["code"].as_str(), marker.exists()),
+        (StatusCode::FORBIDDEN, Some("codegraph_disabled"), false)
     );
     server.stop().await
 }

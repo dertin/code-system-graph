@@ -31,6 +31,7 @@ fn run() -> Result<(), String> {
 
     let mut host = None;
     let mut root = None;
+    let mut codegraph_enabled = None;
     let mut marker_seen = false;
     while let Some(flag) = args.next() {
         let value = args
@@ -41,6 +42,12 @@ fn run() -> Result<(), String> {
                 host = Some(HostKind::from_str(&value).map_err(|error| error.to_string())?);
             }
             "--root" => root = Some(PathBuf::from(value)),
+            "--codegraph-enabled" => {
+                codegraph_enabled =
+                    Some(value.parse::<bool>().map_err(|_| {
+                        "`--codegraph-enabled` must be `true` or `false`".to_owned()
+                    })?);
+            }
             "--marker" => {
                 if value != "code-system-graph-hooks:v1" {
                     return Err("unsupported generated hook marker".to_owned());
@@ -52,6 +59,8 @@ fn run() -> Result<(), String> {
     }
     let host = host.ok_or_else(|| "missing `--host`".to_owned())?;
     let root = root.ok_or_else(|| "missing `--root`".to_owned())?;
+    let codegraph_enabled =
+        codegraph_enabled.ok_or_else(|| "missing `--codegraph-enabled`".to_owned())?;
     if !marker_seen {
         return Err("missing `--marker`".to_owned());
     }
@@ -78,6 +87,7 @@ fn run() -> Result<(), String> {
         host,
         root,
         event,
+        codegraph_enabled,
         ttl_seconds: 300,
     }) {
         Ok(response) => response,

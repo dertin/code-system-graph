@@ -9,15 +9,19 @@ reads source, or enables a network provider.
 ## Lifecycle
 
 ```text
-csgraph hooks install --host <host> --workspace <name> --repository <alias> [--root <path>]
-csgraph hooks status --host <host> --workspace <name> --repository <alias> [--root <path>]
-csgraph hooks uninstall --host <host> --workspace <name> --repository <alias> [--root <path>]
+csgraph hooks install --host <host> --workspace <name> --repository <alias> [--root <path>] [--codegraph]
+csgraph hooks status --host <host> --workspace <name> --repository <alias> [--root <path>] [--codegraph]
+csgraph hooks uninstall --host <host> --workspace <name> --repository <alias> [--root <path>] [--codegraph]
 ```
 
 Supported host identifiers are `claude-code`, `codex`, `gemini`, `antigravity`, and `cursor`.
 Claude Code, Codex, and Gemini receive marker-owned JSON hook entries. Antigravity and Cursor
 receive marker-owned routing guidance because their supported contracts do not expose the same
 prompt event.
+
+Pass `--codegraph` only when the MCP server for that agent also uses `--codegraph` and advertises
+`explore`. The hook cannot inspect another process's MCP tool list. Omit the flag for both commands
+in the native-only profile, and reinstall the hook whenever this policy changes.
 
 Install is atomic, idempotent, and surgical. Existing unrelated configuration is preserved and
 changed existing files receive timestamped backups. State files are owner-readable only on Unix.
@@ -31,10 +35,10 @@ reusable ignore rule in place.
 The `code-system-graph-hooks` runtime accepts a bounded top-level host event on stdin, reads only `prompt`
 and `session_id`, and emits host-shaped static guidance:
 
-- repository-local symbols, callers, tests, and implementation detail route to Code System Graph
-  `explore` first, with direct CodeGraph use only when the provider is degraded;
-- cross-repository contracts, architecture, impact, changes, and PR overlap route to Code System Graph
-  first and use `explore` for local detail;
+- with `--codegraph`, repository-local symbols and implementation detail route to `explore`,
+  while cross-repository work uses Code System Graph first and `explore` only for local detail;
+- without `--codegraph`, guidance never recommends `explore` and stays within persisted,
+  source-free Code System Graph context;
 - exact source returned by `explore` remains ephemeral and is never persisted by Code System Graph.
 
 Prompt text is never persisted or repeated in output. A hash of host, root, and session is retained

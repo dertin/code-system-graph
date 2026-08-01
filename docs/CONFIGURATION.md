@@ -11,8 +11,8 @@ name: commerce
 repos:
   web:
     path: ./web
-  api:
-    path: ./api
+  orders-service:
+    path: ./orders-service
 ```
 
 Required fields:
@@ -49,8 +49,8 @@ user-facing language, framework, and relationship matrix. Parser-level validatio
 version: 1
 name: commerce
 repos:
-  api:
-    path: ./api
+  orders-service:
+    path: ./orders-service
     openapi: ./contracts/openapi.yaml
     httpConsumers:
       - method: POST
@@ -80,7 +80,7 @@ openapi: ./contracts/openapi.yaml
 
 Effective values use this precedence, from highest to lowest:
 
-1. an explicit CLI override such as `--repo-openapi api=contracts/openapi.yaml`;
+1. an explicit CLI override such as `--repo-openapi orders-service=contracts/openapi.yaml`;
 2. the repository entry in the workspace manifest;
 3. the repository's local `.code-system-graph.yaml`;
 4. deterministic auto-detection;
@@ -101,8 +101,8 @@ name: commerce
 allowedRoots:
   - ../shared-services
 repos:
-  api:
-    path: ./api
+  orders-service:
+    path: ./orders-service
   identity:
     path: ../shared-services/identity
 ```
@@ -134,14 +134,14 @@ name: commerce
 repos:
   web:
     path: ./web
-  api:
-    path: ./api
+  orders-service:
+    path: ./orders-service
 manualLinks:
   - from: service:web
-    to: service:api
+    to: service:orders-service
     relation: consumes
     contract: POST /orders
-    reason: Legacy gateway rewrites this route before it reaches the API
+    reason: Legacy gateway rewrites this route before it reaches the orders service
 ```
 
 Each endpoint must resolve to one exact node ID or stable key. `reason` is required so the override
@@ -199,8 +199,10 @@ csgraph mcp \
 ```
 
 CodeGraph must already be installed and each repository must already have its own CodeGraph index.
-Normal scans and server processes do not create or update those indexes. The explicit sync workflow
-updates initialized indexes through CodeGraph's public CLI before publishing the federated graph:
+There is no CodeGraph field in the workspace manifest. Initialize each declared repository once
+with `codegraph init <repository-path>`. Normal scans and server processes do not create or update
+those indexes. The explicit sync workflow updates initialized indexes through CodeGraph's public
+CLI before publishing the federated graph:
 
 ```bash
 csgraph sync \

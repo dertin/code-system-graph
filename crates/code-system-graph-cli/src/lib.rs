@@ -37,6 +37,9 @@ const LOSSY_FOCUSED_EXTRACTOR_VERSION: &str = "1.0.0+extractor.4.lossy";
 const MAX_DISCOVERED_FILES_PER_REPOSITORY: usize = 100_000;
 const MAX_SCAN_DEGRADATIONS: usize = 25;
 const GENERATED_STATE_IGNORE_RULE: &[u8] = b".code-system-graph/";
+pub(crate) const CODEGRAPH_DISABLED_CODE: &str = "codegraph_disabled";
+pub(crate) const CODEGRAPH_DISABLED_MESSAGE: &str =
+    "CodeGraph is disabled by the trusted process policy.";
 
 /// Error returned while executing delivery-layer application operations.
 #[derive(Debug, Error)]

@@ -96,7 +96,7 @@ email variable selected by `--user-env`. Overlap is local and source-free.
 ```text
 csgraph mcp --workspace <name> --database <db>
 csgraph serve --workspace <name> [--host 127.0.0.1] [--port 4767]
-csgraph hooks install|status|uninstall ...
+csgraph hooks install|status|uninstall ... [--codegraph]
 csgraph completions <shell>
 ```
 
@@ -105,6 +105,9 @@ policy. When enabled, impact requests are enriched automatically and administrat
 same bounded corroboration. `CODE_SYSTEM_GRAPH_CODEGRAPH=1` enables the policy from the environment;
 `CODE_SYSTEM_GRAPH_CODEGRAPH_BINARY` both enables it and selects the executable. Tool callers cannot
 override either setting.
+
+The hook `--codegraph` flag controls only installed routing guidance; use it exactly when the
+agent's MCP command enables CodeGraph, and reinstall after changing that policy.
 
 MCP reserves stdout for protocol traffic. HTTP is never started implicitly and non-loopback binds
 require an ephemeral bearer token. Stable failure exit codes are documented by the generated

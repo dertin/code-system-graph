@@ -810,6 +810,7 @@ fn hook_request(target: HookTarget) -> anyhow::Result<InstallRequest> {
         database: target.database,
         workspace: target.workspace,
         repository: target.repository,
+        codegraph_enabled: target.codegraph,
     })
 }
 
@@ -1106,6 +1107,9 @@ struct HookTarget {
     /// Enable the explicit fail-closed staged pre-commit gate.
     #[arg(long)]
     strict: bool,
+    /// Allow routing guidance to recommend the MCP `explore` tool.
+    #[arg(long)]
+    codegraph: bool,
     /// `Code System Graph` executable path; defaults to the running executable.
     #[arg(long = "csgraph-binary")]
     code_system_graph_binary: Option<PathBuf>,
