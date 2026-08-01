@@ -147,7 +147,7 @@ supported source languages. If one normalized table identity matches, the enclos
 as a reader or writer:
 
 ```text
-api repository: INSERT INTO orders -> writes to table orders
+orders-service repository: INSERT INTO orders -> writes to table orders
 worker repository: SELECT ... FROM orders -> reads from table orders
 ```
 
