@@ -16,6 +16,9 @@ use atomic_write_file::AtomicWriteFile;
 use code_system_graph_core::{
     AffectedTestsRequest, AnalyzerVersions, ArtifactKey, BatchAction, BatchPlanError, BitbucketProvider, ChangeAnalysisError, ChangeAnalysisOptions, ChangeError, ChangeImpactReport, ChangeProvider, ChangeRequest, ChangeScope, ChangeSet, CodeGraphConfig, CodeGraphProvider, CommunityError, ConfigDoctorInput, ConfigError, ConfigExtractionError, ContractReport, ContractRequest, CorroborationReport, DataDocument, DataExtractionError, DeclaredImplementation, DeclaredTestCase, DoctorReport, DoctorRequest, DocumentationDocument, DocumentationExtractionError, EffectiveRepositoryConfig, EventDocument, EventExtractionError, EventGraphFacts, ExitCode, ExportReport, ExportRequest, ExtractionGraphFacts, ExtractorBatch, ExtractorBatchPlan, FederatedGraph, FreshnessDoctorInput, GeneratedClientError, GeneratedClientMetadata, GitCliChangeProvider, GitHubProvider, GraphqlDocument, GraphqlExtractionError, GraphqlGraphFacts, HttpBoundary, HttpExtractionError, ImpactContext, ImpactError, ImpactReport, ImpactRequest, ImpactTarget, IncrementalPlan, InfrastructureDocument, InfrastructureExtractionError, IntegrityDoctorInput, InterfaceError, LinkError, LocalCodeIntelligenceProvider, LocalContextRequest, LocalContextResult, LocalEnrichmentInput, LocalEnrichmentStatus, LocalImpactItem, LocalImpactRequest, ManifestEdit, ManifestEditError, ManifestError, ManualLinkConfig, ManualLinkError, PackageGraphFacts, PackageManifest, PackageManifestError, PrAuthToken, ProtobufDocument, ProtobufExtractionError, ProtobufGraphFacts, ProviderBudget, ProviderCapability, ProviderDoctorInput, ProviderDoctorStatus, ProviderError, ProviderRequest, ProviderStatus, PullRequestCoordinates, PullRequestError, PullRequestInspectRequest, PullRequestInspection, PullRequestListPage, PullRequestListRequest, PullRequestListState, PullRequestProvider, PullRequestProviderConfig, PullRequestProviderKind, QueryError, RecommendedCommand, RegisteredWorkspace, RegistryError, ReqwestPrHttpTransport, SafeConfigDocument, SchemaDoctorInput, SearchFilters, SearchReport, SearchRequest, SourceEpistemicStatus, SourceGraphFacts, SourceLanguage, SourceObservation, SourceRole, SourceSyntaxError, SourceSyntaxLanguage, SourceWarning, SymbolAnchor, SymbolCorroboration, TraceError, TraversalReport, TraversalRequest, WorkspaceManifest, affected_link_keys, analyze_changes, analyze_communities, analyze_impact, apply_openapi_override, classify_interface_error, commit_manifest_edit, compare_community_snapshots, corroborate_repository, declared_implementation, declared_test_case, doctor, documents_to_graph, encode_native_path, event_documents_to_graph, export_graph, extract_asyncapi, extract_codeowners, extract_data_artifact, extract_docker_compose, extract_generated_client_metadata, extract_graphql_document, extract_graphql_persisted_operations, extract_helm, extract_kubernetes, extract_markdown, extract_openapi, extract_package_manifest, extract_protobuf, extract_safe_config, extract_service_catalog, extract_terraform, graphql_documents_to_graph, inspect_contracts, inspect_source_syntax, link_declared_implementations, link_declared_tests, link_http_boundaries, link_registered_package_owners, load_extractor_batch, merge_affected_link_neighborhoods, package_manifest_to_graph, parse_event_source, parse_go_source, parse_graphql_source, parse_java_source, parse_javascript_source_at_path, parse_literal_sql_source_at_root, parse_manifest, parse_protobuf_generated_source, parse_python_source, parse_rust_source, parse_typescript_source_at_path, plan_extractor_batches, plan_incremental_scan, preview_add_manual_link, preview_add_repository, preview_remove_repository, protobuf_documents_to_graph, register_workspace, resolve_manual_links, resolve_repository_config, search, source_observations_to_graph, store_extractor_batch, traverse
 };
+pub use code_system_graph_core::{
+    ConfigSource, DEFAULT_EXCLUDES, IgnorePolicy, PROTECTED_EXCLUDES
+};
 use code_system_graph_model::{
     ArtifactFingerprint, CheckoutId, Community, CommunityAlgorithm, CommunityConfig, CommunityDelta, CommunityId, CommunityScope, Edge, EdgeId, EdgeKind, EpistemicStatus, Evidence, EvidenceId, ExtractorRun, ExtractorRunStatus, FreshnessSummary, LinkDecision, LinkStatus, Node, NodeId, NodeKind, OverallFreshness, Provenance, RepoFreshness, RepoFreshnessState, RepoId, RepositoryRecord, StoredExtractorBatch, ToolEnvelope, ToolStatus, TraceReport, WorkspaceRecord, stable_id, stable_id_bytes
 };
@@ -304,6 +307,87 @@ pub struct ScanOverrides {
     pub force: bool,
 }
 
+/// Action performed by one effective repository discovery rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum IgnoreRuleAction {
+    /// Omit matching paths from automatic discovery.
+    Exclude,
+    /// Re-enable paths otherwise matched by a built-in default exclusion.
+    Include,
+}
+
+/// Origin of one effective repository discovery rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum IgnoreRuleSource {
+    /// Non-overridable generated-state or version-control protection.
+    Protected,
+    /// Reactivable rule compiled into the binary.
+    BuiltInDefault,
+    /// Rule selected from the workspace manifest.
+    WorkspaceManifest,
+    /// Rule selected from repository-local configuration.
+    RepositoryLocal,
+}
+
+/// One ordered effective discovery rule returned by `config show`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct EffectiveIgnoreRule {
+    /// Rule action.
+    pub action: IgnoreRuleAction,
+    /// Rule origin.
+    pub source: IgnoreRuleSource,
+    /// Portable repository-relative glob.
+    pub pattern: String,
+}
+
+/// Configured pattern list and the precedence layer that selected it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ConfiguredPatterns {
+    /// Selected configuration layer.
+    pub source: ConfigSource,
+    /// Canonical configured patterns in deterministic order.
+    pub patterns: Vec<String>,
+}
+
+/// Complete observable ignore policy for one registered repository.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct IgnorePolicyReport {
+    /// Non-overridable exclusions compiled into the binary.
+    pub protected_excludes: Vec<String>,
+    /// Reactivable exclusions compiled into the binary.
+    pub default_excludes: Vec<String>,
+    /// Additional exclusions selected from configuration.
+    pub configured_excludes: ConfiguredPatterns,
+    /// Exceptions to built-in default exclusions selected from configuration.
+    pub include_defaults: ConfiguredPatterns,
+    /// Rules ordered from lowest to highest precedence.
+    pub effective_rules: Vec<EffectiveIgnoreRule>,
+}
+
+/// Effective configuration report for one repository alias.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RepositoryConfigReport {
+    /// Workspace manifest alias.
+    pub alias: String,
+    /// Canonical checkout display path.
+    pub path: String,
+    /// Effective native automatic-discovery exclusions.
+    pub ignore_policy: IgnorePolicyReport,
+}
+
+/// Versioned read-only result returned by `csgraph config show`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ConfigReport {
+    /// Output schema version.
+    pub schema_version: u8,
+    /// Workspace name from the manifest.
+    pub workspace: String,
+    /// Effective per-repository configuration in alias order.
+    pub repositories: Vec<RepositoryConfigReport>,
+}
+
 /// Current workspace registry and snapshot health.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct WorkspaceStatus {
@@ -577,6 +661,123 @@ struct WorkspaceContext {
     manifest: WorkspaceManifest,
     registry: RegisteredWorkspace,
     repository_configs: BTreeMap<String, EffectiveRepositoryConfig>,
+}
+
+/// Resolves and reports native discovery exclusions without opening a graph database.
+///
+/// # Errors
+///
+/// Returns [`ApplicationError`] when the manifest, repository-local configuration, checkout, or
+/// optional repository selection is invalid.
+pub fn show_config(
+    config_path: &Path,
+    selected_repository: Option<&str>,
+) -> Result<ConfigReport, ApplicationError> {
+    let context = load_workspace_context(config_path, &ScanOverrides::default())?;
+    if let Some(selected) = selected_repository
+        && !context.manifest.repos.contains_key(selected)
+    {
+        return Err(ApplicationError::UnknownOverrideRepository(
+            selected.to_owned(),
+        ));
+    }
+    let repositories = context
+        .manifest
+        .repos
+        .keys()
+        .filter(|alias| selected_repository.is_none_or(|selected| selected == alias.as_str()))
+        .map(|alias| {
+            let path = context
+                .registry
+                .checkout_path(alias)
+                .ok_or_else(|| ApplicationError::RegistryAliasMissing(alias.clone()))?;
+            let effective = context
+                .repository_configs
+                .get(alias)
+                .ok_or_else(|| ApplicationError::RegistryAliasMissing(alias.clone()))?;
+            Ok(RepositoryConfigReport {
+                alias: alias.clone(),
+                path: path.display().to_string(),
+                ignore_policy: ignore_policy_report(&effective.ignore_policy),
+            })
+        })
+        .collect::<Result<Vec<_>, ApplicationError>>()?;
+    Ok(ConfigReport {
+        schema_version: 1,
+        workspace: context.manifest.name,
+        repositories,
+    })
+}
+
+fn ignore_policy_report(policy: &IgnorePolicy) -> IgnorePolicyReport {
+    let configured_source = rule_source(policy.configured_excludes_source());
+    let include_source = rule_source(policy.include_defaults_source());
+    let mut effective_rules = DEFAULT_EXCLUDES
+        .iter()
+        .map(|pattern| EffectiveIgnoreRule {
+            action: IgnoreRuleAction::Exclude,
+            source: IgnoreRuleSource::BuiltInDefault,
+            pattern: (*pattern).to_owned(),
+        })
+        .chain(
+            policy
+                .include_defaults()
+                .iter()
+                .map(|pattern| EffectiveIgnoreRule {
+                    action: IgnoreRuleAction::Include,
+                    source: include_source,
+                    pattern: pattern.clone(),
+                }),
+        )
+        .chain(
+            policy
+                .configured_excludes()
+                .iter()
+                .map(|pattern| EffectiveIgnoreRule {
+                    action: IgnoreRuleAction::Exclude,
+                    source: configured_source,
+                    pattern: pattern.clone(),
+                }),
+        )
+        .collect::<Vec<_>>();
+    effective_rules.extend(
+        PROTECTED_EXCLUDES
+            .iter()
+            .map(|pattern| EffectiveIgnoreRule {
+                action: IgnoreRuleAction::Exclude,
+                source: IgnoreRuleSource::Protected,
+                pattern: (*pattern).to_owned(),
+            }),
+    );
+    IgnorePolicyReport {
+        protected_excludes: PROTECTED_EXCLUDES
+            .iter()
+            .map(|pattern| (*pattern).to_owned())
+            .collect(),
+        default_excludes: DEFAULT_EXCLUDES
+            .iter()
+            .map(|pattern| (*pattern).to_owned())
+            .collect(),
+        configured_excludes: ConfiguredPatterns {
+            source: policy.configured_excludes_source(),
+            patterns: policy.configured_excludes().to_vec(),
+        },
+        include_defaults: ConfiguredPatterns {
+            source: policy.include_defaults_source(),
+            patterns: policy.include_defaults().to_vec(),
+        },
+        effective_rules,
+    }
+}
+
+const fn rule_source(source: ConfigSource) -> IgnoreRuleSource {
+    match source {
+        ConfigSource::WorkspaceManifest => IgnoreRuleSource::WorkspaceManifest,
+        ConfigSource::RepositoryLocal => IgnoreRuleSource::RepositoryLocal,
+        ConfigSource::CliOverride | ConfigSource::AutoDetected | ConfigSource::Default => {
+            IgnoreRuleSource::BuiltInDefault
+        }
+    }
 }
 
 struct GraphAssembly {
@@ -4635,7 +4836,9 @@ fn discover_artifact_fingerprints(
             )?;
             fingerprints.insert(artifact_key(&fingerprint), fingerprint);
         }
-        for (relative_path, extractor) in discover_focused_artifacts(checkout_path, alias)? {
+        for (relative_path, extractor) in
+            discover_focused_artifacts(checkout_path, alias, &effective.ignore_policy)?
+        {
             let fingerprint =
                 fingerprint_artifact(repository, checkout_path, &relative_path, extractor)?;
             fingerprints.insert(artifact_key(&fingerprint), fingerprint);
@@ -4647,6 +4850,7 @@ fn discover_artifact_fingerprints(
 fn discover_focused_artifacts(
     checkout_path: &Path,
     repository_alias: &str,
+    ignore_policy: &IgnorePolicy,
 ) -> Result<Vec<(PathBuf, &'static str)>, ApplicationError> {
     let mut pending = vec![checkout_path.to_path_buf()];
     let mut discovered = Vec::new();
@@ -4670,21 +4874,21 @@ fn discover_focused_artifacts(
                 continue;
             }
             let path = entry.path();
-            if file_type.is_dir() {
-                if !ignored_discovery_directory(&entry.file_name()) {
-                    pending.push(path);
-                }
-                continue;
-            }
-            if !file_type.is_file() {
-                continue;
-            }
             let relative = path.strip_prefix(checkout_path).map_err(|_| {
                 ApplicationError::ArtifactOutsideCheckout {
                     path: path.clone(),
                     checkout: checkout_path.to_path_buf(),
                 }
             })?;
+            if file_type.is_dir() {
+                if !ignore_policy.excludes(relative, true) {
+                    pending.push(path);
+                }
+                continue;
+            }
+            if !file_type.is_file() || ignore_policy.excludes(relative, false) {
+                continue;
+            }
             for extractor in focused_extractors_for_path(&path) {
                 discovered.push((relative.to_path_buf(), extractor));
                 if discovered.len() > MAX_DISCOVERED_FILES_PER_REPOSITORY {
@@ -4698,35 +4902,6 @@ fn discover_focused_artifacts(
     }
     discovered.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(right.1)));
     Ok(discovered)
-}
-
-fn ignored_discovery_directory(name: &std::ffi::OsStr) -> bool {
-    matches!(
-        name.to_str(),
-        Some(
-            ".git"
-                | ".codegraph"
-                | ".code-system-graph"
-                | ".next"
-                | ".hg"
-                | ".svn"
-                | ".venv"
-                | ".mypy_cache"
-                | ".nox"
-                | ".pytest_cache"
-                | ".ruff_cache"
-                | ".tox"
-                | "venv"
-                | "env"
-                | "site-packages"
-                | "node_modules"
-                | "vendor"
-                | "target"
-                | "dist"
-                | "build"
-                | "__pycache__"
-        )
-    )
 }
 
 fn focused_extractors_for_path(path: &Path) -> Vec<&'static str> {

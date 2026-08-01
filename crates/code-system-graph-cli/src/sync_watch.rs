@@ -1,12 +1,15 @@
 //! Portable filesystem watching for the `sync --watch` command.
 
-use std::ffi::OsStr;
+#[cfg(target_os = "linux")]
+use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::Context;
-use code_system_graph::{ScanOverrides, sync_workspace_with_overrides, workspace_sync_targets};
+use code_system_graph::{
+    IgnorePolicy, ScanOverrides, sync_workspace_with_overrides, workspace_sync_targets
+};
 use notify::{Config, Event, PollWatcher, RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::sync::mpsc;
 
@@ -17,17 +20,48 @@ const MAX_SYNC_ATTEMPTS: usize = 3;
 struct WatchScope {
     config: PathBuf,
     database: PathBuf,
-    repositories: Vec<PathBuf>,
+    repositories: Vec<WatchRepository>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WatchRepository {
+    root: PathBuf,
+    ignore_policy: IgnorePolicy,
+    explicit_paths: Vec<PathBuf>,
+}
+
+impl WatchRepository {
+    fn relevant(&self, path: &Path) -> bool {
+        path.strip_prefix(&self.root).is_ok_and(|relative| {
+            self.explicit_paths.iter().any(|explicit| {
+                relative == explicit
+                    || explicit.starts_with(relative)
+                    || relative.starts_with(explicit)
+            }) || !self.ignore_policy.excludes(relative, path.is_dir())
+        })
+    }
+
+    fn should_watch_directory(&self, path: &Path) -> bool {
+        path.strip_prefix(&self.root).is_ok_and(|relative| {
+            self.explicit_paths
+                .iter()
+                .any(|explicit| explicit.starts_with(relative))
+                || !self.ignore_policy.excludes(relative, true)
+        })
+    }
 }
 
 impl WatchScope {
     fn load(config: &Path, database: &Path, overrides: &ScanOverrides) -> anyhow::Result<Self> {
         let mut repositories = workspace_sync_targets(config, overrides)?
             .into_iter()
-            .map(|target| target.path)
+            .map(|target| WatchRepository {
+                root: target.path,
+                ignore_policy: target.ignore_policy,
+                explicit_paths: target.explicit_paths,
+            })
             .collect::<Vec<_>>();
-        repositories.sort();
-        repositories.dedup();
+        repositories.sort_by(|left, right| left.root.cmp(&right.root));
         Ok(Self {
             config: absolute_path(config)?,
             database: absolute_path(database)?,
@@ -46,10 +80,15 @@ impl WatchScope {
         if database_artifact(path, &self.database) {
             return false;
         }
-        self.repositories.iter().any(|repository| {
-            path.strip_prefix(repository)
-                .is_ok_and(|relative| !relative.components().any(ignored_component))
-        })
+        self.repositories
+            .iter()
+            .any(|repository| repository.relevant(path))
+    }
+
+    fn should_watch_directory(&self, path: &Path) -> bool {
+        self.repositories
+            .iter()
+            .any(|repository| repository.should_watch_directory(path))
     }
 
     fn watch_entries(&self) -> Vec<(PathBuf, RecursiveMode)> {
@@ -58,7 +97,11 @@ impl WatchScope {
             entries.push((parent.to_path_buf(), RecursiveMode::NonRecursive));
         }
         for repository in &self.repositories {
-            add_watch_entry(&mut entries, repository.clone(), RecursiveMode::Recursive);
+            add_watch_entry(
+                &mut entries,
+                repository.root.clone(),
+                RecursiveMode::Recursive,
+            );
         }
         entries.sort_by(|left, right| left.0.cmp(&right.0));
         entries
@@ -288,19 +331,35 @@ fn add_watch_entries<W: Watcher>(watcher: &mut W, scope: &WatchScope) -> notify:
 
 #[cfg(target_os = "linux")]
 fn add_native_watch_entries<W: Watcher>(watcher: &mut W, scope: &WatchScope) -> notify::Result<()> {
+    let mut installed = BTreeSet::new();
     if let Some(parent) = scope.config.parent() {
         watcher.watch(parent, RecursiveMode::NonRecursive)?;
+        installed.insert(parent.to_path_buf());
     }
-    let mut pending = scope.repositories.clone();
-    pending.sort();
-    pending.dedup();
+    let mut pending = scope
+        .repositories
+        .iter()
+        .map(|repository| repository.root.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>();
+    let mut visited = BTreeSet::new();
     while let Some(directory) = pending.pop() {
-        watcher.watch(&directory, RecursiveMode::NonRecursive)?;
+        if !visited.insert(directory.clone()) {
+            continue;
+        }
+        if installed.insert(directory.clone()) {
+            watcher.watch(&directory, RecursiveMode::NonRecursive)?;
+        }
         let entries = std::fs::read_dir(&directory).map_err(notify::Error::io)?;
         for entry in entries {
             let entry = entry.map_err(notify::Error::io)?;
             let file_type = entry.file_type().map_err(notify::Error::io)?;
-            if file_type.is_dir() && !file_type.is_symlink() && !ignored_name(&entry.file_name()) {
+            if file_type.is_dir()
+                && !file_type.is_symlink()
+                && scope.should_watch_directory(&entry.path())
+            {
                 pending.push(entry.path());
             }
         }
@@ -348,42 +407,6 @@ fn add_watch_entry(
     entries.push((path, mode));
 }
 
-fn ignored_component(component: Component<'_>) -> bool {
-    let Component::Normal(name) = component else {
-        return false;
-    };
-    ignored_name(name)
-}
-
-fn ignored_name(name: &OsStr) -> bool {
-    let name = name.to_string_lossy();
-    [
-        ".git",
-        ".codegraph",
-        ".code-system-graph",
-        ".next",
-        ".hg",
-        ".svn",
-        ".venv",
-        ".mypy_cache",
-        ".nox",
-        ".pytest_cache",
-        ".ruff_cache",
-        ".tox",
-        "venv",
-        "env",
-        "site-packages",
-        "node_modules",
-        "vendor",
-        "target",
-        "dist",
-        "build",
-        "__pycache__",
-    ]
-    .iter()
-    .any(|ignored| name.eq_ignore_ascii_case(ignored))
-}
-
 fn database_artifact(path: &Path, database: &Path) -> bool {
     if path == database {
         return true;
@@ -422,8 +445,8 @@ fn wsl_windows_mount(scope: &WatchScope) -> bool {
     let is_wsl = std::fs::read_to_string("/proc/sys/kernel/osrelease")
         .is_ok_and(|release| release.to_ascii_lowercase().contains("microsoft"));
     is_wsl
-        && scope.repositories.iter().any(|path| {
-            let mut components = path.components();
+        && scope.repositories.iter().any(|repository| {
+            let mut components = repository.root.components();
             matches!(components.next(), Some(Component::RootDir))
                 && components
                     .next()
@@ -444,17 +467,79 @@ const fn wsl_windows_mount(_scope: &WatchScope) -> bool {
 mod tests {
     use super::*;
 
+    fn policy(excludes: &[&str], includes: &[&str]) -> IgnorePolicy {
+        IgnorePolicy::new(
+            excludes.iter().map(ToString::to_string).collect(),
+            code_system_graph::ConfigSource::Default,
+            includes.iter().map(ToString::to_string).collect(),
+            code_system_graph::ConfigSource::Default,
+        )
+        .expect("built-in ignore policy")
+    }
+
     #[test]
     fn scope_should_ignore_generated_state_and_database_sidecars() {
         let scope = WatchScope {
             config: PathBuf::from("/workspace/code-system-graph.yaml"),
             database: PathBuf::from("/workspace/.state/graph.db"),
-            repositories: vec![PathBuf::from("/workspace/repo")],
+            repositories: vec![WatchRepository {
+                root: PathBuf::from("/workspace/repo"),
+                ignore_policy: policy(&[], &[]),
+                explicit_paths: vec![PathBuf::from(".code-system-graph.yaml")],
+            }],
         };
         assert!(scope.relevant_path(Path::new("/workspace/repo/src/lib.rs")));
         assert!(scope.relevant_path(Path::new("/workspace/code-system-graph.yaml")));
         assert!(!scope.relevant_path(Path::new("/workspace/repo/.codegraph/codegraph.db-wal")));
         assert!(!scope.relevant_path(Path::new("/workspace/.state/graph.db-wal")));
+    }
+
+    #[test]
+    fn scope_should_apply_custom_excludes_and_default_includes() {
+        let scope = WatchScope {
+            config: PathBuf::from("/workspace/code-system-graph.yaml"),
+            database: PathBuf::from("/workspace/.state/graph.db"),
+            repositories: vec![WatchRepository {
+                root: PathBuf::from("/workspace/repo"),
+                ignore_policy: policy(&["./generated//./**"], &["./vendor//internal-sdk/./**"]),
+                explicit_paths: vec![PathBuf::from("generated/explicit.yaml")],
+            }],
+        };
+
+        assert_eq!(
+            (
+                scope.relevant_path(Path::new("/workspace/repo/generated/output.rs")),
+                scope.relevant_path(Path::new("/workspace/repo/vendor/internal-sdk/src/lib.rs")),
+                scope.relevant_path(Path::new("/workspace/repo/vendor/external/lib.rs")),
+                scope.relevant_path(Path::new("/workspace/repo/generated/explicit.yaml")),
+            ),
+            (false, true, false, true)
+        );
+    }
+
+    #[test]
+    fn scope_should_preserve_policies_for_aliases_with_the_same_checkout() -> anyhow::Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let repository = temporary.path().join("repo/generated/output");
+        std::fs::create_dir_all(&repository)?;
+        let source = repository.join("lib.rs");
+        std::fs::write(&source, "pub fn observed() {}\n")?;
+        let config = temporary.path().join("code-system-graph.yaml");
+        std::fs::write(
+            &config,
+            "version: 1\nname: shared-checkout\nrepos:\n  a-restrictive:\n    path: repo\n    excludes:\n      - generated/*\n  b-permissive:\n    path: repo\n",
+        )?;
+
+        let scope = WatchScope::load(
+            &config,
+            &temporary.path().join("graph.db"),
+            &ScanOverrides::default(),
+        )?;
+
+        assert_eq!(scope.repositories.len(), 2);
+        assert!(scope.relevant_path(&source));
+        assert!(scope.should_watch_directory(&repository));
+        Ok(())
     }
 
     #[test]

@@ -52,6 +52,11 @@ repos:
   orders-service:
     path: ./orders-service
     openapi: ./contracts/openapi.yaml
+    excludes:
+      - coverage/**
+      - "**/generated/**"
+    includeDefaults:
+      - vendor/internal-sdk/**
     httpConsumers:
       - method: POST
         path: /orders
@@ -64,9 +69,50 @@ repos:
 | `httpConsumers` | A real HTTP consumer cannot yet be observed from supported source patterns |
 | `integrationTests` | A cross-language test-to-contract relation needs an explicit declaration |
 | `implementations` | A contract implementation anchor cannot be linked exactly from source |
+| `excludes` | Additional repository-relative paths must be omitted from automatic discovery |
+| `includeDefaults` | A specific path inside a default dependency or build exclusion must be discovered |
 
 These fields add explicit evidence. They are not required for supported, unambiguous source
 patterns.
+
+## Discovery exclusions
+
+`excludes` and `includeDefaults` accept repository-relative globs with `*`, `?`, and `**`. The
+recursive `**` wildcard must occupy a complete path component. Character classes, alternations,
+and other glob syntax are rejected. Use `/` as the separator on every operating system.
+
+Patterns are canonicalized before matching, reporting, deduplication, and fingerprinting. Leading
+or internal `.` components and repeated `/` separators are removed, so `./coverage//**` is reported
+and evaluated as `coverage/**`. A terminal `/` remains directory-specific. Absolute paths, parent
+traversal with `..`, patterns without a path component, malformed globs, and unsafe terminal
+characters are rejected.
+
+Ordinary patterns match both files and directories. For example, `generated/*` prunes a
+`generated/output` directory and everything below it. Add a terminal `/` only when the pattern
+must match a directory and not a file with the same repository-relative path.
+
+Built-in protected exclusions cover `.git`, `.hg`, `.svn`, `.codegraph`, and
+`.code-system-graph`. They prevent version-control metadata, local indexes, and generated graph
+state from entering discovery and cannot be re-enabled. Reactivable defaults cover common
+dependency, environment, cache, and build trees including `node_modules`, `vendor`, `target`,
+`dist`, `build`, Python virtual environments and tool caches, `.next`, and `__pycache__`.
+
+`includeDefaults` reopens only matching paths inside reactivable defaults. An explicit `excludes`
+match still wins. Explicit `openapi`, `httpConsumers`, `integrationTests`, and `implementations`
+artifacts remain authoritative and observable even when their containing tree is excluded from
+automatic discovery.
+
+Inspect the complete effective policy, including rules not present in YAML, without creating or
+opening a database:
+
+```bash
+csgraph config show --config code-system-graph.yaml
+csgraph config show --config code-system-graph.yaml --repo orders-service
+```
+
+The JSON result reports protected defaults, reactivable defaults, configured values and their
+source, and effective rules in precedence order. This policy applies to native scanning, OpenAPI
+auto-detection, and `sync --watch`; the independent CodeGraph executable manages its own files.
 
 ## Repository-local configuration and precedence
 
@@ -76,6 +122,8 @@ checkout root:
 ```yaml
 version: 1
 openapi: ./contracts/openapi.yaml
+excludes:
+  - coverage/**
 ```
 
 Effective values use this precedence, from highest to lowest:

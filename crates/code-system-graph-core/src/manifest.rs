@@ -5,6 +5,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::ignore_policy::{IgnorePatternError, validate_excludes, validate_include_defaults};
+
 const MANUAL_ENDPOINT_MAX_BYTES: usize = 2_048;
 const MANUAL_CONTRACT_MAX_BYTES: usize = 1_024;
 const MANUAL_REASON_MAX_BYTES: usize = 4_096;
@@ -41,6 +43,10 @@ pub struct RepositoryConfig {
     pub integration_tests: Option<Vec<IntegrationTestConfig>>,
     /// Explicit contract-to-source implementation anchors.
     pub implementations: Option<Vec<ContractImplementationConfig>>,
+    /// Additional repository-relative globs omitted from automatic discovery.
+    pub excludes: Option<Vec<String>>,
+    /// Repository-relative exceptions to reactivable built-in exclusions.
+    pub include_defaults: Option<Vec<String>>,
 }
 
 /// Exact manual relationship or automatic-link suppression.
@@ -145,6 +151,15 @@ pub enum ManifestError {
         field: String,
         /// Non-overridable maximum UTF-8 byte length.
         maximum: usize,
+    },
+    /// A repository discovery pattern is malformed or unsafe.
+    #[error("manifest field `{field}` is invalid: {source}")]
+    InvalidIgnorePattern {
+        /// Dot-style field location.
+        field: String,
+        /// Pattern validation failure.
+        #[source]
+        source: IgnorePatternError,
     },
     /// The workspace does not register any repositories.
     #[error("manifest field `repos` must contain at least one repository")]
@@ -254,8 +269,30 @@ pub fn parse_manifest(input: &str) -> Result<WorkspaceManifest, ManifestError> {
                 )?;
             }
         }
+        validate_repository_ignore_patterns(alias, repository)?;
     }
     Ok(manifest)
+}
+
+fn validate_repository_ignore_patterns(
+    alias: &str,
+    repository: &RepositoryConfig,
+) -> Result<(), ManifestError> {
+    if let Some(patterns) = &repository.excludes {
+        validate_excludes(patterns).map_err(|source| ManifestError::InvalidIgnorePattern {
+            field: format!("repos.{alias}.excludes"),
+            source,
+        })?;
+    }
+    if let Some(patterns) = &repository.include_defaults {
+        validate_include_defaults(patterns).map_err(|source| {
+            ManifestError::InvalidIgnorePattern {
+                field: format!("repos.{alias}.includeDefaults"),
+                source,
+            }
+        })?;
+    }
+    Ok(())
 }
 
 /// Validates manually constructed relationship declarations.
@@ -345,6 +382,7 @@ mod tests {
     use code_system_graph_model::EdgeKind;
 
     use super::{MANUAL_REASON_MAX_BYTES, ManifestError, parse_manifest};
+    use crate::IgnorePatternError;
 
     const VALID: &str = r"
 version: 1
@@ -363,6 +401,52 @@ repos:
         let result = parse_manifest(VALID);
 
         assert!(result.is_ok(), "unexpected manifest error: {result:?}");
+    }
+
+    #[test]
+    fn parse_manifest_should_accept_repository_ignore_patterns() {
+        let input = VALID.replace(
+            "    path: ../web",
+            "    path: ../web\n    excludes: [coverage/**]\n    includeDefaults: [vendor/internal/**]",
+        );
+
+        let result = parse_manifest(&input);
+
+        assert!(result.is_ok(), "unexpected manifest error: {result:?}");
+    }
+
+    #[test]
+    fn parse_manifest_should_reject_protected_default_include() {
+        let input = VALID.replace(
+            "    path: ../web",
+            "    path: ../web\n    includeDefaults: [.codegraph/**]",
+        );
+
+        let result = parse_manifest(&input);
+
+        assert!(matches!(
+            result,
+            Err(ManifestError::InvalidIgnorePattern { field, .. })
+                if field == "repos.web.includeDefaults"
+        ));
+    }
+
+    #[test]
+    fn parse_manifest_should_reject_unsupported_ignore_syntax() {
+        let input = VALID.replace(
+            "    path: ../web",
+            "    path: ../web\n    excludes: [\"src/[ab]/**\"]",
+        );
+
+        let result = parse_manifest(&input);
+
+        assert!(matches!(
+            result,
+            Err(ManifestError::InvalidIgnorePattern {
+                source: IgnorePatternError::UnsupportedSyntax(_),
+                ..
+            })
+        ));
     }
 
     #[test]

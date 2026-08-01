@@ -4,6 +4,7 @@ use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use code_system_graph_core::{EffectiveRepositoryConfig, IgnorePolicy};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -16,6 +17,10 @@ pub struct SyncTarget {
     pub alias: String,
     /// Canonical local checkout path.
     pub path: PathBuf,
+    /// Effective native discovery policy for this checkout.
+    pub ignore_policy: IgnorePolicy,
+    /// Explicit repository-relative artifacts that must remain observable through exclusions.
+    pub explicit_paths: Vec<PathBuf>,
 }
 
 /// Outcome of synchronizing one repository's local `CodeGraph` index.
@@ -117,12 +122,44 @@ pub fn workspace_sync_targets(
                 .registry
                 .checkout_path(&repository.alias)
                 .ok_or_else(|| ApplicationError::RegistryAliasMissing(repository.alias.clone()))?;
+            let effective = context
+                .repository_configs
+                .get(&repository.alias)
+                .ok_or_else(|| ApplicationError::RegistryAliasMissing(repository.alias.clone()))?;
             Ok(SyncTarget {
                 alias: repository.alias.clone(),
                 path: path.to_path_buf(),
+                ignore_policy: effective.ignore_policy.clone(),
+                explicit_paths: explicit_watch_paths(effective),
             })
         })
         .collect()
+}
+
+fn explicit_watch_paths(config: &EffectiveRepositoryConfig) -> Vec<PathBuf> {
+    let mut paths = vec![PathBuf::from(".code-system-graph.yaml")];
+    paths.extend(config.openapi.iter().map(PathBuf::from));
+    paths.extend(
+        config
+            .http_consumers
+            .iter()
+            .map(|consumer| PathBuf::from(&consumer.source)),
+    );
+    paths.extend(
+        config
+            .integration_tests
+            .iter()
+            .map(|test| PathBuf::from(&test.path)),
+    );
+    paths.extend(
+        config
+            .implementations
+            .iter()
+            .map(|implementation| PathBuf::from(&implementation.path)),
+    );
+    paths.sort();
+    paths.dedup();
+    paths
 }
 
 /// Synchronizes initialized local `CodeGraph` indexes and then publishes an incremental graph
@@ -252,6 +289,21 @@ mod tests {
 
     use super::*;
 
+    fn target(alias: &str, path: PathBuf) -> SyncTarget {
+        SyncTarget {
+            alias: alias.to_owned(),
+            path,
+            ignore_policy: IgnorePolicy::new(
+                Vec::new(),
+                code_system_graph_core::ConfigSource::Default,
+                Vec::new(),
+                code_system_graph_core::ConfigSource::Default,
+            )
+            .expect("built-in ignore policy"),
+            explicit_paths: Vec::new(),
+        }
+    }
+
     #[test]
     fn synchronization_should_skip_uninitialized_indexes_and_bound_failures() -> anyhow::Result<()>
     {
@@ -261,16 +313,7 @@ mod tests {
         std::fs::create_dir_all(initialized.join(".codegraph"))?;
         std::fs::create_dir(&absent)?;
         let called = RefCell::new(Vec::new());
-        let targets = vec![
-            SyncTarget {
-                alias: "zeta".to_owned(),
-                path: initialized.clone(),
-            },
-            SyncTarget {
-                alias: "alpha".to_owned(),
-                path: absent,
-            },
-        ];
+        let targets = vec![target("zeta", initialized.clone()), target("alpha", absent)];
 
         let report = synchronize_codegraph_targets(&targets, true, |path| {
             called.borrow_mut().push(path.to_path_buf());
@@ -298,10 +341,7 @@ mod tests {
 
     #[test]
     fn disabled_codegraph_sync_should_not_invoke_runner() {
-        let target = SyncTarget {
-            alias: "repo".to_owned(),
-            path: PathBuf::from("repo"),
-        };
+        let target = target("repo", PathBuf::from("repo"));
         let report = synchronize_codegraph_targets(&[target], false, |_| {
             panic!("disabled synchronization must not invoke CodeGraph")
         });

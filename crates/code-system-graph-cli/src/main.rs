@@ -13,7 +13,7 @@ use clap::{ArgAction, CommandFactory, Parser, Subcommand, ValueEnum};
 use code_system_graph::http_server::{BearerToken, HttpServerConfig, serve_http};
 use code_system_graph::mcp::CodeSystemGraphServer;
 use code_system_graph::{
-    ApplicationError, ChangesInput, CommunityInput, PullRequestInput, PullRequestListInput, ScanOverrides, SearchInput, TraceInput, add_repository_to_manifest, add_workspace_to_registry, analyze_workspace_changes_with_cancellation, application_exit_code, backup_database, communities_workspace, contracts_workspace, create_diagnostic_bundle, doctor_workspace, export_workspace, impact_workspace, impact_workspace_with_codegraph, initialize_workspace, inspect_pull_request_with_cancellation, list_pull_requests, list_repository_registry, list_workspace_registry, migrate_database, remove_repository_from_manifest, remove_workspace_from_registry, restore_database, scan_workspace_with_overrides, search_workspace, status_workspace, sync_workspace_with_overrides, trace_workspace, traverse_workspace
+    ApplicationError, ChangesInput, CommunityInput, PullRequestInput, PullRequestListInput, ScanOverrides, SearchInput, TraceInput, add_repository_to_manifest, add_workspace_to_registry, analyze_workspace_changes_with_cancellation, application_exit_code, backup_database, communities_workspace, contracts_workspace, create_diagnostic_bundle, doctor_workspace, export_workspace, impact_workspace, impact_workspace_with_codegraph, initialize_workspace, inspect_pull_request_with_cancellation, list_pull_requests, list_repository_registry, list_workspace_registry, migrate_database, remove_repository_from_manifest, remove_workspace_from_registry, restore_database, scan_workspace_with_overrides, search_workspace, show_config, status_workspace, sync_workspace_with_overrides, trace_workspace, traverse_workspace
 };
 use code_system_graph_core::{
     ChangeAnalysisOptions, ChangeScope, ContractAction, ContractRequest, ExitCode, ExportFormat, ExportRequest, ImpactDirection, ImpactOptions, ImpactRequest, ImpactTarget, PullRequestListState, PullRequestOrderSuggestion, PullRequestOverlap, PullRequestProviderKind, PullRequestSemanticInput, TraversalAlgorithm, TraversalDirection, TraversalFilters, TraversalOptions, TraversalRequest, semantic_pull_request_overlap, suggest_pull_request_order
@@ -140,6 +140,12 @@ enum Command {
         /// `SQLite` database path.
         #[arg(long)]
         database: PathBuf,
+    },
+    /// Inspect effective workspace configuration without opening a graph database.
+    Config {
+        /// Configuration inspection operation.
+        #[command(subcommand)]
+        action: ConfigCommand,
     },
     /// Create a validated online database backup.
     Backup {
@@ -513,6 +519,7 @@ const fn command_name(command: &Command) -> &'static str {
         Command::Scan { .. } => "scan",
         Command::Sync { .. } => "sync",
         Command::Status { .. } => "status",
+        Command::Config { .. } => "config",
         Command::Backup { .. } => "backup",
         Command::Restore { .. } => "restore",
         Command::Migrate { .. } => "migrate",
@@ -929,6 +936,19 @@ enum WorkspaceCommand {
         /// Confirm destructive registry removal.
         #[arg(long)]
         yes: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ConfigCommand {
+    /// Show configured and built-in native discovery exclusions.
+    Show {
+        /// Workspace manifest path.
+        #[arg(long, default_value = "code-system-graph.yaml")]
+        config: PathBuf,
+        /// Restrict output to one repository alias.
+        #[arg(long)]
+        repo: Option<String>,
     },
 }
 
@@ -1537,6 +1557,12 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                 );
             }
             println!("{}", serde_json::to_string(&status)?);
+        }
+        Command::Config {
+            action: ConfigCommand::Show { config, repo },
+        } => {
+            let report = show_config(&config, repo.as_deref())?;
+            println!("{}", serde_json::to_string(&report)?);
         }
         Command::Backup { database, output } => {
             let summary = backup_database(&database, &output)?;
