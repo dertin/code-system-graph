@@ -919,7 +919,6 @@ fn make_executable(_path: &Path) -> Result<(), HookError> {
     Ok(())
 }
 
-
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
