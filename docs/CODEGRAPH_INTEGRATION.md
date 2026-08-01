@@ -46,15 +46,15 @@ name: commerce
 repos:
   web:
     path: ./web
-  api:
-    path: ./api
+  orders-service:
+    path: ./orders-service
 ```
 
 Run from the directory containing the manifest:
 
 ```bash
 codegraph init ./web
-codegraph init ./api
+codegraph init ./orders-service
 ```
 
 Each repository must contain its own `.codegraph/` directory. Code System Graph does not create
@@ -101,7 +101,7 @@ Restart the agent and verify that its MCP tool list includes `explore`. Then ask
 question such as:
 
 ```text
-In repository api, trace the request handler to the service and database call.
+In repository orders-service, trace the request handler to the service and database call.
 ```
 
 CodeGraph is disabled for MCP and HTTP unless the trusted process enables it with `--codegraph`,
@@ -116,7 +116,7 @@ csgraph status \
   --config code-system-graph.yaml \
   --database .code-system-graph/code-system-graph.db
 codegraph status ./web
-codegraph status ./api
+codegraph status ./orders-service
 ```
 
 The Code System Graph check and one CodeGraph check per repository must succeed. If one repository
