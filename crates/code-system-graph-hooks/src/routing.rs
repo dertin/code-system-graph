@@ -224,7 +224,7 @@ fn restrict_file(_path: &Path) -> Result<(), HookError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{guidance_for, RoutingIntent};
+    use super::{RoutingIntent, guidance_for};
 
     #[test]
     fn guidance_should_follow_codegraph_policy() {
