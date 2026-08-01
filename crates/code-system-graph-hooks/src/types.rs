@@ -84,6 +84,9 @@ pub struct InstallRequest {
     pub workspace: String,
     /// Registered repository alias for the selected root.
     pub repository: String,
+    /// Whether installed guidance may recommend CodeGraph-backed local exploration.
+    #[serde(default)]
+    pub codegraph_enabled: bool,
 }
 
 /// Result of an installation attempt.
@@ -161,6 +164,9 @@ pub struct RoutingRequest {
     pub root: PathBuf,
     /// Raw host event. Only the top-level `prompt` and session identifier are read.
     pub event: serde_json::Value,
+    /// Whether guidance may recommend CodeGraph-backed local exploration.
+    #[serde(default)]
+    pub codegraph_enabled: bool,
     /// Session/repository deduplication lifetime in seconds.
     #[serde(default = "default_ttl_seconds")]
     pub ttl_seconds: u64,
