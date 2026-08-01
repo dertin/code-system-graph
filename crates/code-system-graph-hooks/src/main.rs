@@ -43,11 +43,10 @@ fn run() -> Result<(), String> {
             }
             "--root" => root = Some(PathBuf::from(value)),
             "--codegraph-enabled" => {
-                codegraph_enabled = Some(
-                    value
-                        .parse::<bool>()
-                        .map_err(|_| "`--codegraph-enabled` must be `true` or `false`".to_owned())?,
-                );
+                codegraph_enabled =
+                    Some(value.parse::<bool>().map_err(|_| {
+                        "`--codegraph-enabled` must be `true` or `false`".to_owned()
+                    })?);
             }
             "--marker" => {
                 if value != "code-system-graph-hooks:v1" {
