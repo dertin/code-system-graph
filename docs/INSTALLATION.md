@@ -80,7 +80,8 @@ Installing the binaries does not:
 - install the independent [CodeGraph](https://github.com/colbymchenry/codegraph) project;
 - access the network or a remote pull-request provider.
 
-Continue with [Create your first workspace](GETTING_STARTED.md).
+Continue with [Create your first workspace](GETTING_STARTED.md). To add repository-level symbol and
+implementation context afterward, follow [Use CodeGraph with a workspace](CODEGRAPH_INTEGRATION.md).
 
 ## Upgrade
 

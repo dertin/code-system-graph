@@ -131,7 +131,21 @@ csgraph status \
 Use `status` before trusting an impact or change answer. A missing or stale observation means
 coverage is incomplete; it does not mean that the repositories are independent.
 
-## 4. Ask a direct question
+## 4. Add CodeGraph context (optional)
+
+CodeGraph adds symbols, callers, callees, and implementation flow inside each repository. Follow
+[Use CodeGraph with a workspace](CODEGRAPH_INTEGRATION.md#set-up-codegraph-for-a-workspace) to
+install it, then initialize every repository declared in the manifest:
+
+```bash
+codegraph init ./repo_1
+codegraph init ./repo_2
+```
+
+The same guide includes verification and the exact MCP setup. Skip this step if you only need the
+federated graph.
+
+## 5. Ask a direct question
 
 Search is the usual entry point:
 
@@ -159,12 +173,13 @@ csgraph trace \
   --database .code-system-graph/code-system-graph.db
 ```
 
-## 5. Connect an agent
+## 6. Connect an agent
 
 The MCP server runs over stdio and is started by the agent when needed:
 
 ```bash
 csgraph mcp \
+  --codegraph \
   --workspace my-project \
   --database .code-system-graph/code-system-graph.db
 ```
@@ -173,8 +188,14 @@ Do not run that command manually and leave it waiting. Register it with the agen
 example, Codex can write its configuration with:
 
 ```bash
-codex mcp add code-system-graph -- csgraph mcp --workspace my-project --database .code-system-graph/code-system-graph.db
+codex mcp add code-system-graph -- \
+  csgraph mcp \
+  --codegraph \
+  --workspace my-project \
+  --database /absolute/path/to/my-project/.code-system-graph/code-system-graph.db
 ```
+
+Remove `--codegraph` from these commands if you skipped step 4.
 
 See [Connect a coding agent](AGENT_SETUP.md) for every supported agent and the optional routing
 hook.

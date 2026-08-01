@@ -199,8 +199,10 @@ csgraph mcp \
 ```
 
 CodeGraph must already be installed and each repository must already have its own CodeGraph index.
-Normal scans and server processes do not create or update those indexes. The explicit sync workflow
-updates initialized indexes through CodeGraph's public CLI before publishing the federated graph:
+There is no CodeGraph field in the workspace manifest. Initialize each declared repository once
+with `codegraph init <repository-path>`. Normal scans and server processes do not create or update
+those indexes. The explicit sync workflow updates initialized indexes through CodeGraph's public
+CLI before publishing the federated graph:
 
 ```bash
 csgraph sync \

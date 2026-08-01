@@ -20,7 +20,7 @@ use rmcp::service::{RequestContext, RoleServer};
 use rmcp::{ErrorData as McpError, Json, ServerHandler, tool, tool_handler, tool_router};
 
 use crate::{
-    ChangesInput, CommunityReport, ExploreInput, PullRequestInput, ScanOverrides, SearchInput, TraceInput, add_manual_link_to_manifest, add_repository_to_manifest, analyze_workspace_changes, communities_workspace, explore_repository, impact_workspace, impact_workspace_with_codegraph, inspect_pull_request, remove_repository_from_manifest, scan_workspace_with_overrides, search_workspace, trace_workspace
+    CODEGRAPH_DISABLED_CODE, CODEGRAPH_DISABLED_MESSAGE, ChangesInput, CommunityReport, ExploreInput, PullRequestInput, ScanOverrides, SearchInput, TraceInput, add_manual_link_to_manifest, add_repository_to_manifest, analyze_workspace_changes, communities_workspace, explore_repository, impact_workspace, impact_workspace_with_codegraph, inspect_pull_request, remove_repository_from_manifest, scan_workspace_with_overrides, search_workspace, trace_workspace
 };
 
 #[path = "mcp_support/mod.rs"]
@@ -29,6 +29,8 @@ mod mcp_support;
 use mcp_support::{
     ADMIN_TOOL_NAMES, AdminAudit, CacheCleanInput, CacheCleanReport, CommunitiesInput, ContractsInput, GraphStatusReport, JSON_MIME_TYPE, ManifestAdminReport, ManualLinkWriteInput, ResourceErrorKind, SourceContextInput, SourceContextReport, WorkspaceInput, WorkspaceUpdateInput, admin_audit_envelope, admin_mutation_envelope, configured_manifest_path, contracts_envelope, read_resource, resource_uris, source_context_envelope, status_envelope
 };
+
+const EXPLORE_TOOL_NAME: &str = "explore";
 
 /// Trusted process-level policy for bounded local intelligence.
 #[derive(Debug, Clone, Default)]
@@ -58,6 +60,7 @@ impl CodeSystemGraphServer {
         for name in ADMIN_TOOL_NAMES {
             tool_router.disable_route(name);
         }
+        tool_router.disable_route(EXPLORE_TOOL_NAME);
         Self {
             database_path,
             workspace,
@@ -90,6 +93,11 @@ impl CodeSystemGraphServer {
     /// Applies trusted process-level `CodeGraph` policy to exploration, impact, and scans.
     #[must_use]
     pub fn with_codegraph(mut self, enabled: bool, binary: Option<OsString>) -> Self {
+        if enabled {
+            self.tool_router.enable_route(EXPLORE_TOOL_NAME);
+        } else {
+            self.tool_router.disable_route(EXPLORE_TOOL_NAME);
+        }
         self.codegraph = CodeGraphPolicy { enabled, binary };
         self
     }
@@ -174,8 +182,11 @@ impl CodeSystemGraphServer {
     pub async fn explore(
         &self,
         Parameters(input): Parameters<ExploreInput>,
-    ) -> Json<ToolEnvelope<LocalContextResult>> {
-        Json(
+    ) -> Result<Json<ToolEnvelope<LocalContextResult>>, McpError> {
+        if !self.codegraph.enabled {
+            return Err(codegraph_disabled_error());
+        }
+        Ok(Json(
             explore_repository(
                 &self.database_path,
                 &self.workspace,
@@ -183,7 +194,7 @@ impl CodeSystemGraphServer {
                 self.codegraph.binary.clone(),
             )
             .await,
-        )
+        ))
     }
 
     /// Lists, inspects, or compares persisted deterministic communities.
@@ -704,6 +715,13 @@ fn error_envelope<T>(reason: &str, error: impl std::fmt::Display) -> ToolEnvelop
     }
 }
 
+fn codegraph_disabled_error() -> McpError {
+    McpError::invalid_request(
+        CODEGRAPH_DISABLED_MESSAGE,
+        Some(serde_json::json!({ "code": CODEGRAPH_DISABLED_CODE })),
+    )
+}
+
 #[expect(
     clippy::unused_async_trait_impl,
     reason = "rmcp defines these ServerHandler methods as asynchronous"
@@ -761,16 +779,23 @@ impl ServerHandler for CodeSystemGraphServer {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
 
     use code_system_graph_store_sqlite::SqliteStore;
     use rmcp::ServerHandler;
+    #[cfg(unix)]
+    use rmcp::handler::server::wrapper::Parameters;
 
     use super::{CodeSystemGraphServer, mcp_support};
+    #[cfg(unix)]
+    use crate::{CODEGRAPH_DISABLED_CODE, ExploreInput, scan_workspace};
 
     #[test]
     fn server_should_publish_read_only_tools() {
-        let server = CodeSystemGraphServer::new(PathBuf::from("graph.db"), "commerce".to_owned());
+        let server = CodeSystemGraphServer::new(PathBuf::from("graph.db"), "commerce".to_owned())
+            .with_codegraph(true, None);
         let tools = server.tool_router.list_all();
         let names = tools
             .iter()
@@ -798,6 +823,70 @@ mod tests {
                     && annotations.destructive_hint == Some(false)
             })
         }));
+    }
+
+    #[test]
+    fn explore_should_be_hidden_until_codegraph_is_enabled() {
+        let disabled = CodeSystemGraphServer::new(PathBuf::from("graph.db"), "commerce".to_owned());
+        let enabled = disabled.clone().with_codegraph(true, None);
+
+        assert!(
+            disabled
+                .tool_router
+                .list_all()
+                .iter()
+                .all(|tool| tool.name != "explore")
+        );
+        assert!(
+            enabled
+                .tool_router
+                .list_all()
+                .iter()
+                .any(|tool| tool.name == "explore")
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn explore_handler_should_reject_disabled_codegraph_before_execution()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temporary = tempfile::tempdir()?;
+        let database = temporary.path().join("graph.db");
+        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/platform-demo/code-system-graph.yaml");
+        scan_workspace(&manifest, &database)?;
+        let binary = temporary.path().join("codegraph-marker");
+        let marker = temporary.path().join("codegraph-invoked");
+        std::fs::write(
+            &binary,
+            "#!/bin/sh\n: > \"$(dirname \"$0\")/codegraph-invoked\"\nexit 1\n",
+        )?;
+        let mut permissions = std::fs::metadata(&binary)?.permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&binary, permissions)?;
+        let server = CodeSystemGraphServer::new(database, "commerce-platform".to_owned())
+            .with_codegraph(false, Some(binary.into_os_string()));
+
+        let result = server
+            .explore(Parameters(ExploreInput {
+                workspace: "commerce-platform".to_owned(),
+                repository: Some("orders".to_owned()),
+                query: "create_order callers".to_owned(),
+                max_files: 4,
+            }))
+            .await;
+        let Err(error) = result else {
+            panic!("disabled CodeGraph policy must reject direct handler calls");
+        };
+
+        assert_eq!(
+            (
+                error.data.as_ref().and_then(|data| data["code"].as_str()),
+                marker.exists()
+            ),
+            (Some(CODEGRAPH_DISABLED_CODE), false)
+        );
+        Ok(())
     }
 
     #[test]
