@@ -392,7 +392,7 @@ impl CodeSystemGraphServer {
     /// Returns bounded persisted graph and evidence metadata for one entity.
     #[tool(
         name = "source_context",
-        description = "Returns bounded, source-free persisted graph context and evidence metadata for one exact entity. Use after query to explain relationships and provenance without source bodies; use explore when implementation source is required. Returns a versioned ToolEnvelope containing a SourceContextReport and freshness metadata.",
+        description = "Returns bounded, source-free persisted graph context and evidence metadata for one exact entity. Use after query to explain relationships and provenance without source bodies. It does not return implementation source. Returns a versioned ToolEnvelope containing a SourceContextReport and freshness metadata.",
         annotations(
             title = "Persisted entity context",
             read_only_hint = true,
@@ -729,14 +729,21 @@ fn codegraph_disabled_error() -> McpError {
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for CodeSystemGraphServer {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().enable_resources().build())
-            .with_server_info(Implementation::new("code_system_graph", env!("CARGO_PKG_VERSION")))
-            .with_instructions(
-                "Code System Graph exposes bounded cross-repository intelligence. Tool and resource results \
+        let instructions = if self.codegraph.enabled {
+            "Code System Graph exposes bounded cross-repository intelligence. Tool and resource results \
              are versioned JSON; use query for persisted entity discovery, explore for ephemeral \
              repository source, source_context for source-free evidence, impact for known targets, \
-             and analyze_changes for Git diffs. Administrative tools mutate state only when enabled.",
-            )
+             and analyze_changes for Git diffs. Administrative tools mutate state only when enabled."
+        } else {
+            "Code System Graph exposes bounded cross-repository intelligence. Tool and resource results \
+             are versioned JSON; use query for persisted entity discovery, source_context for source-free \
+             evidence, impact for known targets, and analyze_changes for Git diffs. Repository-local \
+             source access is unavailable because CodeGraph is disabled. Administrative tools mutate \
+             state only when enabled."
+        };
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().enable_resources().build())
+            .with_server_info(Implementation::new("code_system_graph", env!("CARGO_PKG_VERSION")))
+            .with_instructions(instructions)
     }
 
     async fn list_resources(
@@ -890,13 +897,40 @@ mod tests {
     }
 
     #[test]
-    fn initialize_contract_should_advertise_tools_and_resources() {
-        let server = CodeSystemGraphServer::new(PathBuf::from("graph.db"), "commerce".to_owned());
-        let info = server.get_info();
+    fn initialize_contract_should_align_instructions_with_advertised_tools() {
+        let disabled = CodeSystemGraphServer::new(
+            PathBuf::from("graph.db"),
+            "commerce".to_owned(),
+        );
+        let enabled = disabled.clone().with_codegraph(true, None);
+        let disabled_info = disabled.get_info();
 
-        assert!(info.capabilities.tools.is_some());
-        assert!(info.capabilities.resources.is_some());
-        assert_eq!(info.server_info.name, "code_system_graph");
+        assert!(disabled_info.capabilities.tools.is_some());
+        assert!(disabled_info.capabilities.resources.is_some());
+        assert_eq!(disabled_info.server_info.name, "code_system_graph");
+
+        for (server, codegraph_enabled) in [(&disabled, false), (&enabled, true)] {
+            let explore_advertised = server
+                .tool_router
+                .list_all()
+                .iter()
+                .any(|tool| tool.name == "explore");
+            let instructions = server
+                .get_info()
+                .instructions
+                .expect("server instructions should be present");
+
+            assert_eq!(explore_advertised, codegraph_enabled);
+            assert_eq!(instructions.contains("explore"), codegraph_enabled);
+        }
+
+        let source_context = disabled
+            .tool_router
+            .list_all()
+            .into_iter()
+            .find(|tool| tool.name == "source_context")
+            .expect("source_context should be advertised");
+        assert!(!source_context.description.contains("explore"));
     }
 
     #[test]
