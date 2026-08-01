@@ -102,16 +102,23 @@ pub fn install(request: &InstallRequest) -> Result<InstallReport, HookError> {
 pub fn status(request: &InstallRequest) -> Result<HookStatus, HookError> {
     validate_request(request)?;
     let spec = host_spec(request);
+    let state_path = state_file(request);
+    let installed_state = read_install_state(&state_path)?;
+    let policy = installed_state
+        .as_ref()
+        .map(|state| state.codegraph_enabled)
+        .unwrap_or(request.codegraph_enabled);
     let runtime = request.code_system_graph_binary.with_file_name(format!(
         "code-system-graph-hooks{}",
         std::env::consts::EXE_SUFFIX
     ));
     let routing_installed = match spec.protocol {
-        HostProtocol::Json { event } => json_hook_installed(request, &spec.path, event, &runtime)?,
-        HostProtocol::Guidance => file_contains(
-            &spec.path,
-            &guidance_block(request.host, request.codegraph_enabled),
-        )?,
+        HostProtocol::Json { event } => {
+            json_hook_installed(request, &spec.path, event, &runtime, policy)?
+        }
+        HostProtocol::Guidance => {
+            file_contains(&spec.path, &guidance_block(request.host, policy))?
+        }
     };
     let strict_gate_installed = if request.mode == HookMode::Strict {
         file_contains(&git_pre_commit(request)?, &begin_marker(request.host))?
@@ -120,9 +127,13 @@ pub fn status(request: &InstallRequest) -> Result<HookStatus, HookError> {
     } else {
         false
     };
+    let policy_matches = installed_state
+        .as_ref()
+        .is_none_or(|state| state.codegraph_enabled == request.codegraph_enabled);
     let installed = routing_installed
         && (request.mode == HookMode::Advisory || strict_gate_installed)
-        && state_file(request).is_file();
+        && installed_state.is_some()
+        && policy_matches;
     let warnings = duplicate_warnings(request, &spec)?;
 
     Ok(HookStatus {
@@ -130,7 +141,7 @@ pub fn status(request: &InstallRequest) -> Result<HookStatus, HookError> {
         routing_installed,
         strict_gate_installed,
         host_file: spec.path,
-        state_file: state_file(request),
+        state_file: state_path,
         warnings,
         limitation: spec.limitation.map(str::to_owned),
     })
@@ -254,6 +265,21 @@ fn state_file(request: &InstallRequest) -> PathBuf {
         .join(format!("install-{}.json", request.host.as_str()))
 }
 
+fn read_install_state(path: &Path) -> Result<Option<InstallState>, HookError> {
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let content = fs::read_to_string(path).map_err(|source| HookError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let state = serde_json::from_str(&content).map_err(|error| HookError::InvalidConfiguration {
+        path: path.to_path_buf(),
+        message: error.to_string(),
+    })?;
+    Ok(Some(state))
+}
+
 fn configure_generated_state_ignore(root: &Path) -> Result<(Option<PathBuf>, bool), HookError> {
     let canonical_root = fs::canonicalize(root).map_err(|source| HookError::Io {
         path: root.to_path_buf(),
@@ -332,12 +358,20 @@ fn install_json_hook(
 }
 
 fn owned_json_entry(request: &InstallRequest, runtime: &Path) -> Value {
+    owned_json_entry_with_policy(request, runtime, request.codegraph_enabled)
+}
+
+fn owned_json_entry_with_policy(
+    request: &InstallRequest,
+    runtime: &Path,
+    codegraph_enabled: bool,
+) -> Value {
     let command = format!(
         "{} route --host {} --root {} --codegraph-enabled {} --marker {}",
         shell_quote(runtime.as_os_str().to_string_lossy().as_ref()),
         request.host.as_str(),
         shell_quote(request.root.as_os_str().to_string_lossy().as_ref()),
-        request.codegraph_enabled,
+        codegraph_enabled,
         PRODUCT_MARKER
     );
     match request.host {
@@ -397,11 +431,12 @@ fn json_hook_installed(
     path: &Path,
     event: &str,
     runtime: &Path,
+    policy: bool,
 ) -> Result<bool, HookError> {
     if !path.exists() {
         return Ok(false);
     }
-    let owned = owned_json_entry(request, runtime);
+    let owned = owned_json_entry_with_policy(request, runtime, policy);
     let (root, _) = read_json_object(path)?;
     Ok(root
         .get("hooks")

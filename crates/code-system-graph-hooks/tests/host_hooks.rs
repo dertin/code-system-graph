@@ -211,6 +211,28 @@ fn every_host_routes_with_ttl_without_persisting_prompt_source() -> Result<(), B
 }
 
 #[test]
+fn status_should_detect_routing_when_request_policy_differs_from_install_state(
+) -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new(HostKind::Codex)?;
+    let enriched = InstallRequest {
+        codegraph_enabled: true,
+        ..fixture.request(HookMode::Advisory)
+    };
+    install(&enriched)?;
+    let mismatched = InstallRequest {
+        codegraph_enabled: false,
+        ..enriched.clone()
+    };
+    let observed = status(&mismatched)?;
+
+    assert!(observed.routing_installed);
+    assert!(!observed.installed);
+    assert!(status(&enriched)?.installed);
+
+    Ok(())
+}
+
+#[test]
 fn every_host_runtime_fails_open_on_invalid_input() -> Result<(), Box<dyn Error>> {
     let binary = env!("CARGO_BIN_EXE_code-system-graph-hooks");
     for &host in HOSTS {

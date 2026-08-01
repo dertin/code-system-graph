@@ -68,6 +68,8 @@ jobs:
     name: Release policy
     needs: validate
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
 
     steps:
       - name: Checkout repository
@@ -91,6 +93,10 @@ jobs:
 
       - name: Scan for secrets
         uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          # Automatic read-only job token; never replace with a PAT.
+          GITHUB_TOKEN: ${{ github.token }}
+          GITLEAKS_ENABLE_COMMENTS: "false"
 
   build:
     name: Build ${{ matrix.target }}

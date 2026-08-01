@@ -11,13 +11,15 @@ has been published yet.
 ### CodeGraph delivery
 
 - Added the read-only `explore` MCP tool and HTTP endpoint for bounded, ephemeral
-  repository-local source and flow context.
+  repository-local source and flow context. The tool is advertised only when CodeGraph is
+  explicitly enabled through `--codegraph` or `CODE_SYSTEM_GRAPH_CODEGRAPH=1`.
 - Added server-configured automatic CodeGraph enrichment to MCP and HTTP impact requests.
 - Added server-configured CodeGraph corroboration to administrative scans without tool-call
   controls.
 - Added action-discriminated MCP contracts, communities, workspace updates, and manual-link
   mutations; impact options support partial overrides.
-- Added host routing guidance that prefers Code System Graph for both federated and local exploration.
+- Added host routing guidance that prefers Code System Graph for both federated and local
+  exploration. Hook installation accepts `--codegraph` so static guidance matches the MCP profile.
 
 ### Federated graph
 
