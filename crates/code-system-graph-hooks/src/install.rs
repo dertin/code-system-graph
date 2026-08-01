@@ -36,6 +36,8 @@ struct InstallState {
     host: HostKind,
     mode: HookMode,
     host_file: PathBuf,
+    #[serde(default)]
+    codegraph_enabled: bool,
 }
 
 /// Installs or updates one host integration with atomic, marker-scoped writes.
@@ -74,6 +76,7 @@ pub fn install(request: &InstallRequest) -> Result<InstallReport, HookError> {
         host: request.host,
         mode: request.mode,
         host_file: spec.path.clone(),
+        codegraph_enabled: request.codegraph_enabled,
     };
     let state_changed = write_json_if_changed(&state_file, &state, false, &mut backups)?;
     restrict_file(&state_file)?;
@@ -99,9 +102,18 @@ pub fn install(request: &InstallRequest) -> Result<InstallReport, HookError> {
 pub fn status(request: &InstallRequest) -> Result<HookStatus, HookError> {
     validate_request(request)?;
     let spec = host_spec(request);
+    let runtime = request.code_system_graph_binary.with_file_name(format!(
+        "code-system-graph-hooks{}",
+        std::env::consts::EXE_SUFFIX
+    ));
     let routing_installed = match spec.protocol {
-        HostProtocol::Json { event } => json_hook_installed(&spec.path, event)?,
-        HostProtocol::Guidance => file_contains(&spec.path, &begin_marker(request.host))?,
+        HostProtocol::Json { event } => {
+            json_hook_installed(request, &spec.path, event, &runtime)?
+        }
+        HostProtocol::Guidance => file_contains(
+            &spec.path,
+            &guidance_block(request.host, request.codegraph_enabled),
+        )?,
     };
     let strict_gate_installed = if request.mode == HookMode::Strict {
         file_contains(&git_pre_commit(request)?, &begin_marker(request.host))?
@@ -323,10 +335,11 @@ fn install_json_hook(
 
 fn owned_json_entry(request: &InstallRequest, runtime: &Path) -> Value {
     let command = format!(
-        "{} route --host {} --root {} --marker {}",
+        "{} route --host {} --root {} --codegraph-enabled {} --marker {}",
         shell_quote(runtime.as_os_str().to_string_lossy().as_ref()),
         request.host.as_str(),
         shell_quote(request.root.as_os_str().to_string_lossy().as_ref()),
+        request.codegraph_enabled,
         PRODUCT_MARKER
     );
     match request.host {
@@ -381,16 +394,22 @@ fn uninstall_json_hook(
     write_value(path, &root, true, backups)
 }
 
-fn json_hook_installed(path: &Path, event: &str) -> Result<bool, HookError> {
+fn json_hook_installed(
+    request: &InstallRequest,
+    path: &Path,
+    event: &str,
+    runtime: &Path,
+) -> Result<bool, HookError> {
     if !path.exists() {
         return Ok(false);
     }
+    let owned = owned_json_entry(request, runtime);
     let (root, _) = read_json_object(path)?;
     Ok(root
         .get("hooks")
         .and_then(|hooks| hooks.get(event))
         .and_then(Value::as_array)
-        .is_some_and(|entries| entries.iter().any(is_owned_json)))
+        .is_some_and(|entries| entries.iter().any(|entry| entry == &owned)))
 }
 
 fn install_guidance(
@@ -400,13 +419,25 @@ fn install_guidance(
 ) -> Result<bool, HookError> {
     let existing = read_optional_string(path)?;
     let marker = begin_marker(request.host);
+    let block = guidance_block(request.host, request.codegraph_enabled);
     if existing
         .as_deref()
-        .is_some_and(|content| content.contains(&marker))
+        .is_some_and(|content| content.contains(&block))
     {
         return Ok(false);
     }
-    let block = guidance_block(request.host);
+    let existing = match existing {
+        Some(content) if content.contains(&marker) => {
+            let without_owned = remove_marked_block(&content, request.host).ok_or_else(|| {
+                HookError::InvalidConfiguration {
+                    path: path.to_path_buf(),
+                    message: "managed guidance has an incomplete marker block".to_owned(),
+                }
+            })?;
+            (!without_owned.trim().is_empty()).then_some(without_owned)
+        }
+        other => other,
+    };
     let updated = match existing {
         Some(mut content) => {
             if !content.ends_with('\n') {
@@ -431,9 +462,14 @@ fn guidance_scaffold(host: HostKind, block: &str) -> String {
     }
 }
 
-fn guidance_block(host: HostKind) -> String {
+fn guidance_block(host: HostKind, codegraph_enabled: bool) -> String {
+    let routing = if codegraph_enabled {
+        "- For work local to this repository, use Code System Graph explore first and use CodeGraph directly only if the provider is degraded.\n- For cross-repository work, contracts, architecture, impact, diffs, or pull-request overlap, use Code System Graph first and explore for local symbol detail."
+    } else {
+        "- For repository-local work, use Code System Graph only for persisted entities, relationships, and source-free evidence; local source and symbol detail is unavailable in the native-only profile.\n- For cross-repository work, contracts, architecture, impact, diffs, or pull-request overlap, use Code System Graph first."
+    };
     format!(
-        "{begin}\n# Code System Graph intelligence routing\n\nClassify only the user's submitted prompt. Do not quote, copy, or inject the prompt itself.\n\n- For work local to this repository, use Code System Graph explore first and use CodeGraph directly only if the provider is degraded.\n- For cross-repository work, contracts, architecture, impact, diffs, or pull-request overlap, use Code System Graph first and explore for local symbol detail.\n- Never automatically run scans, CodeGraph init or sync, source queries, or mutations because of this rule.\n- Keep routing guidance brief and advisory.\n{end}\n",
+        "{begin}\n# Code System Graph intelligence routing\n\nClassify only the user's submitted prompt. Do not quote, copy, or inject the prompt itself.\n\n{routing}\n- Never automatically run scans, CodeGraph init or sync, source queries, or mutations because of this rule.\n- Keep routing guidance brief and advisory.\n{end}\n",
         begin = begin_marker(host),
         end = end_marker(host)
     )
@@ -881,4 +917,40 @@ fn make_executable(path: &Path) -> Result<(), HookError> {
 #[cfg(not(unix))]
 fn make_executable(_path: &Path) -> Result<(), HookError> {
     Ok(())
+}
+
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::{guidance_block, owned_json_entry};
+    use crate::types::{HookMode, HostKind, InstallRequest};
+
+    fn request(host: HostKind, codegraph_enabled: bool) -> InstallRequest {
+        InstallRequest {
+            root: PathBuf::from("/workspace/api"),
+            host,
+            mode: HookMode::Advisory,
+            code_system_graph_binary: PathBuf::from("/bin/csgraph"),
+            database: PathBuf::from("/workspace/graph.db"),
+            workspace: "commerce".to_owned(),
+            repository: "api".to_owned(),
+            codegraph_enabled,
+        }
+    }
+
+    #[test]
+    fn generated_routing_should_follow_codegraph_policy() {
+        let native = guidance_block(HostKind::Cursor, false);
+        let enriched = guidance_block(HostKind::Cursor, true);
+        assert!(!native.contains("explore"));
+        assert!(enriched.contains("explore"));
+
+        let runtime = PathBuf::from("/bin/code-system-graph-hooks");
+        let native_hook = owned_json_entry(&request(HostKind::Codex, false), &runtime).to_string();
+        let enriched_hook = owned_json_entry(&request(HostKind::Codex, true), &runtime).to_string();
+        assert!(native_hook.contains("--codegraph-enabled false"));
+        assert!(enriched_hook.contains("--codegraph-enabled true"));
+    }
 }
