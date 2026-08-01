@@ -183,13 +183,19 @@ Run one explicit command for each agent and repository where routing guidance sh
 cd /absolute/path/to/workspace/api
 csgraph hooks install \
   --host codex \
+  --codegraph \
   --workspace commerce \
   --repository api \
   --database ../.code-system-graph/code-system-graph.db
 ```
 
 The hook writes project-local agent configuration and private state under
-`.code-system-graph/hooks/`. When that root belongs to a Git worktree, the installer preserves its
+`.code-system-graph/hooks/`. The hook cannot inspect another process's MCP tool list, so its
+policy is explicit: pass `--codegraph` only when the registered MCP command also uses
+`--codegraph` and advertises `explore`. Omit both flags for the native-only profile. Reinstall the
+hook after changing that MCP policy.
+
+When that root belongs to a Git worktree, the installer preserves its
 `.gitignore` and adds `.code-system-graph/` automatically. Review the agent configuration
 separately: commit it when the team should share the routing behavior, or keep it local according
 to the agent's conventions.
@@ -204,12 +210,14 @@ antigravity
 cursor
 ```
 
-The default advisory mode:
+The default advisory mode follows the install-time policy:
 
-- guides local symbol and implementation questions through Code System Graph's bounded `explore`
-  handoff, with direct CodeGraph use only if that provider is degraded;
-- guides contracts, architecture, impact, changes, and cross-repository questions toward Code
-  System Graph;
+- with `--codegraph`, guides local symbol and implementation questions through Code System Graph's
+  bounded `explore` handoff;
+- without `--codegraph`, never recommends `explore` and limits guidance to persisted,
+  source-free graph context;
+- in both profiles, guides contracts, architecture, impact, changes, and cross-repository questions
+  toward Code System Graph;
 - fails open and never blocks normal agent work;
 - does not run a scan or query for every prompt.
 
@@ -219,9 +227,9 @@ settings, creates backups before changing existing files, and is safe to rerun.
 Inspect or remove it with the same target arguments:
 
 ```bash
-csgraph hooks status --host codex --workspace commerce --repository api \
+csgraph hooks status --host codex --codegraph --workspace commerce --repository api \
   --database ../.code-system-graph/code-system-graph.db
-csgraph hooks uninstall --host codex --workspace commerce --repository api \
+csgraph hooks uninstall --host codex --codegraph --workspace commerce --repository api \
   --database ../.code-system-graph/code-system-graph.db
 ```
 
@@ -232,7 +240,8 @@ gate.
 
 With `--codegraph`, the agent receives bounded local source context through the `explore` tool and
 CodeGraph-backed impact enrichment. Without it, `explore` is not advertised and all native
-federated tools remain available. CodeGraph's private nodes and relationships are never merged into
+federated tools remain available. Use the same choice for `csgraph hooks install`; reinstall the
+hook if the MCP policy changes. CodeGraph's private nodes and relationships are never merged into
 the persisted Code System Graph.
 
 ## What the agent can and cannot do by default
