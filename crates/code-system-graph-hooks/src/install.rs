@@ -116,9 +116,7 @@ pub fn status(request: &InstallRequest) -> Result<HookStatus, HookError> {
         HostProtocol::Json { event } => {
             json_hook_installed(request, &spec.path, event, &runtime, policy)?
         }
-        HostProtocol::Guidance => {
-            file_contains(&spec.path, &guidance_block(request.host, policy))?
-        }
+        HostProtocol::Guidance => file_contains(&spec.path, &guidance_block(request.host, policy))?,
     };
     let strict_gate_installed = if request.mode == HookMode::Strict {
         file_contains(&git_pre_commit(request)?, &begin_marker(request.host))?
@@ -273,10 +271,11 @@ fn read_install_state(path: &Path) -> Result<Option<InstallState>, HookError> {
         path: path.to_path_buf(),
         source,
     })?;
-    let state = serde_json::from_str(&content).map_err(|error| HookError::InvalidConfiguration {
-        path: path.to_path_buf(),
-        message: error.to_string(),
-    })?;
+    let state =
+        serde_json::from_str(&content).map_err(|error| HookError::InvalidConfiguration {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        })?;
     Ok(Some(state))
 }
 

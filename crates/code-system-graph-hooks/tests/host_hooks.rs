@@ -211,8 +211,8 @@ fn every_host_routes_with_ttl_without_persisting_prompt_source() -> Result<(), B
 }
 
 #[test]
-fn status_should_detect_routing_when_request_policy_differs_from_install_state(
-) -> Result<(), Box<dyn Error>> {
+fn status_should_detect_routing_when_request_policy_differs_from_install_state()
+-> Result<(), Box<dyn Error>> {
     let fixture = Fixture::new(HostKind::Codex)?;
     let enriched = InstallRequest {
         codegraph_enabled: true,
