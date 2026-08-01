@@ -28,7 +28,8 @@ has been published yet.
 - Added per-repository `excludes` and `includeDefaults` glob policies shared by native scanning,
   OpenAPI autodetection, and watched synchronization. Protected metadata directories remain
   excluded, default dependency and build directories can be selectively reopened, explicit
-  artifacts are retained, and policy changes invalidate incremental scan fingerprints.
+  artifacts are retained, configured patterns are canonicalized under a strict portable glob
+  grammar, and policy changes invalidate incremental scan fingerprints.
 - Added atomic SQLite snapshots, online backup and restore, explicit migrations, integrity checks,
   writer locks, historical snapshots, and per-checkout freshness.
 - Added deterministic evidence-backed linking with explicit ambiguity, coverage, provenance, and

@@ -484,7 +484,7 @@ mod tests {
             database: PathBuf::from("/workspace/.state/graph.db"),
             repositories: vec![WatchRepository {
                 root: PathBuf::from("/workspace/repo"),
-                ignore_policy: policy(&["generated/**"], &["vendor/internal-sdk/**"]),
+                ignore_policy: policy(&["./generated//./**"], &["./vendor//internal-sdk/./**"]),
                 explicit_paths: vec![PathBuf::from("generated/explicit.yaml")],
             }],
         };

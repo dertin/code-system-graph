@@ -347,7 +347,7 @@ pub struct EffectiveIgnoreRule {
 pub struct ConfiguredPatterns {
     /// Selected configuration layer.
     pub source: ConfigSource,
-    /// Deterministic configured patterns.
+    /// Canonical configured patterns in deterministic order.
     pub patterns: Vec<String>,
 }
 

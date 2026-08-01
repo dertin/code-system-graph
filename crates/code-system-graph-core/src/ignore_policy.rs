@@ -49,6 +49,9 @@ pub enum IgnorePatternError {
     /// An empty pattern has no deterministic discovery meaning.
     #[error("ignore pattern must not be empty")]
     Empty,
+    /// Dot-only and separator-only patterns do not identify a repository path.
+    #[error("ignore pattern `{0}` must contain a repository-relative path component")]
+    MissingPathComponent(String),
     /// Patterns are always resolved relative to one checkout.
     #[error("ignore pattern `{0}` must be repository-relative")]
     Absolute(String),
@@ -61,6 +64,11 @@ pub enum IgnorePatternError {
     /// Terminal control and bidirectional characters are unsafe in reported rules.
     #[error("ignore pattern contains unsafe control or bidirectional characters")]
     UnsafeCharacters,
+    /// The public glob contract is intentionally limited to portable wildcard syntax.
+    #[error(
+        "ignore pattern `{0}` uses unsupported glob syntax; only `*`, `?`, and whole-component `**` are supported"
+    )]
+    UnsupportedSyntax(String),
     /// The glob expression is malformed.
     #[error("invalid ignore pattern `{pattern}`: {detail}")]
     InvalidGlob {
@@ -130,13 +138,14 @@ impl IgnorePolicy {
     /// Returns [`IgnorePatternError`] when a pattern is unsafe, malformed, or attempts to include
     /// protected generated state.
     pub fn new(
-        mut configured_excludes: Vec<String>,
+        configured_excludes: Vec<String>,
         configured_excludes_source: ConfigSource,
-        mut include_defaults: Vec<String>,
+        include_defaults: Vec<String>,
         include_defaults_source: ConfigSource,
     ) -> Result<Self, IgnorePatternError> {
-        validate_excludes(&configured_excludes)?;
-        validate_include_defaults(&include_defaults)?;
+        let mut configured_excludes = normalize_patterns(configured_excludes)?;
+        let mut include_defaults = normalize_patterns(include_defaults)?;
+        validate_protected_includes(&include_defaults)?;
         configured_excludes.sort();
         configured_excludes.dedup();
         include_defaults.sort();
@@ -223,8 +232,8 @@ impl IgnorePolicy {
 ///
 /// Returns [`IgnorePatternError`] for unsafe or malformed patterns.
 pub fn validate_excludes(patterns: &[String]) -> Result<(), IgnorePatternError> {
-    validate_patterns(patterns)?;
-    compile(patterns.iter().map(String::as_str)).map(|_| ())
+    let normalized = normalize_patterns(patterns)?;
+    compile(normalized.iter().map(String::as_str)).map(|_| ())
 }
 
 /// Validates exceptions to default exclusions.
@@ -234,7 +243,12 @@ pub fn validate_excludes(patterns: &[String]) -> Result<(), IgnorePatternError> 
 /// Returns [`IgnorePatternError`] for unsafe or malformed patterns, including attempts to include
 /// protected repository metadata.
 pub fn validate_include_defaults(patterns: &[String]) -> Result<(), IgnorePatternError> {
-    validate_patterns(patterns)?;
+    let normalized = normalize_patterns(patterns)?;
+    validate_protected_includes(&normalized)?;
+    compile(normalized.iter().map(String::as_str)).map(|_| ())
+}
+
+fn validate_protected_includes(patterns: &[String]) -> Result<(), IgnorePatternError> {
     for pattern in patterns {
         for component in pattern.split('/') {
             if PROTECTED_DIRECTORY_NAMES.contains(&component) {
@@ -245,33 +259,78 @@ pub fn validate_include_defaults(patterns: &[String]) -> Result<(), IgnorePatter
             }
         }
     }
-    compile(patterns.iter().map(String::as_str)).map(|_| ())
+    Ok(())
 }
 
-fn validate_patterns(patterns: &[String]) -> Result<(), IgnorePatternError> {
-    for pattern in patterns {
-        if pattern.trim().is_empty() {
-            return Err(IgnorePatternError::Empty);
-        }
-        if pattern.starts_with('/')
-            || pattern
-                .as_bytes()
-                .get(1)
-                .is_some_and(|separator| *separator == b':')
-        {
-            return Err(IgnorePatternError::Absolute(pattern.clone()));
-        }
-        if pattern.contains('\\') {
-            return Err(IgnorePatternError::Backslash(pattern.clone()));
-        }
-        if pattern.split('/').any(|component| component == "..") {
-            return Err(IgnorePatternError::ParentTraversal(pattern.clone()));
-        }
-        if pattern.chars().any(unsafe_character) {
-            return Err(IgnorePatternError::UnsafeCharacters);
-        }
+fn normalize_patterns<I, S>(patterns: I) -> Result<Vec<String>, IgnorePatternError>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    patterns
+        .into_iter()
+        .map(|pattern| normalize_pattern(pattern.as_ref()))
+        .collect()
+}
+
+fn normalize_pattern(pattern: &str) -> Result<String, IgnorePatternError> {
+    if pattern.trim().is_empty() {
+        return Err(IgnorePatternError::Empty);
+    }
+    if absolute_pattern(pattern) {
+        return Err(IgnorePatternError::Absolute(pattern.to_owned()));
+    }
+    if pattern.contains('\\') {
+        return Err(IgnorePatternError::Backslash(pattern.to_owned()));
+    }
+    if pattern.split('/').any(|component| component == "..") {
+        return Err(IgnorePatternError::ParentTraversal(pattern.to_owned()));
+    }
+    if pattern.chars().any(unsafe_character) {
+        return Err(IgnorePatternError::UnsafeCharacters);
+    }
+
+    let directory_only = pattern.ends_with('/')
+        || pattern
+            .split('/')
+            .rfind(|component| !component.is_empty())
+            .is_some_and(|component| component == ".");
+    let components = pattern
+        .split('/')
+        .filter(|component| !component.is_empty() && *component != ".")
+        .collect::<Vec<_>>();
+    if components.is_empty() {
+        return Err(IgnorePatternError::MissingPathComponent(pattern.to_owned()));
+    }
+    validate_supported_syntax(pattern, &components)?;
+
+    let mut normalized = components.join("/");
+    if absolute_pattern(&normalized) {
+        return Err(IgnorePatternError::Absolute(pattern.to_owned()));
+    }
+    if directory_only {
+        normalized.push('/');
+    }
+    Ok(normalized)
+}
+
+fn validate_supported_syntax(pattern: &str, components: &[&str]) -> Result<(), IgnorePatternError> {
+    let unsupported_delimiter = pattern.contains(['[', ']', '{', '}']);
+    let unsupported_recursive = components
+        .iter()
+        .any(|component| component.contains("**") && *component != "**");
+    if unsupported_delimiter || unsupported_recursive {
+        return Err(IgnorePatternError::UnsupportedSyntax(pattern.to_owned()));
     }
     Ok(())
+}
+
+fn absolute_pattern(pattern: &str) -> bool {
+    pattern.starts_with('/')
+        || pattern
+            .as_bytes()
+            .get(1)
+            .is_some_and(|separator| *separator == b':')
 }
 
 fn compile<'a>(patterns: impl Iterator<Item = &'a str>) -> Result<GlobSet, IgnorePatternError> {
@@ -301,7 +360,7 @@ fn include_prefixes(patterns: &[String]) -> (Vec<PathBuf>, bool) {
     for pattern in patterns {
         let mut prefix = PathBuf::new();
         for component in pattern.split('/') {
-            if component.contains(['*', '?', '[', '{']) {
+            if component.contains(['*', '?']) {
                 break;
             }
             if !component.is_empty() {
@@ -371,8 +430,32 @@ mod tests {
     }
 
     #[test]
+    fn configured_excludes_should_support_single_component_wildcards() {
+        assert!(policy(&["src/*/?.rs"], &[]).excludes(Path::new("src/api/x.rs"), false));
+    }
+
+    #[test]
+    fn configured_excludes_should_normalize_and_deduplicate_patterns() {
+        let policy = policy(&["./coverage//**", "coverage/./**", "coverage/**"], &[]);
+
+        assert_eq!(policy.configured_excludes(), &["coverage/**"]);
+    }
+
+    #[test]
+    fn configured_excludes_should_match_normalized_patterns() {
+        assert!(policy(&["./coverage/./**"], &[]).excludes(Path::new("coverage/lcov.info"), false));
+    }
+
+    #[test]
+    fn directory_patterns_should_preserve_their_terminal_separator() {
+        let policy = policy(&["./coverage//"], &[]);
+
+        assert!(policy.excludes(Path::new("coverage"), true));
+    }
+
+    #[test]
     fn include_defaults_should_reopen_only_selected_subtree() {
-        let policy = policy(&[], &["vendor/internal-sdk/**"]);
+        let policy = policy(&[], &["./vendor//internal-sdk/./**"]);
         assert_eq!(
             (
                 policy.excludes(Path::new("vendor/internal-sdk/src/lib.rs"), false),
@@ -395,13 +478,24 @@ mod tests {
 
     #[test]
     fn include_defaults_should_keep_ancestor_traversable() {
-        assert!(!policy(&[], &["vendor/internal-sdk/**"]).excludes(Path::new("vendor"), true));
+        assert!(!policy(&[], &["./vendor//internal-sdk/./**"]).excludes(Path::new("vendor"), true));
+    }
+
+    #[test]
+    fn canonical_equivalent_policies_should_have_the_same_fingerprint() {
+        let canonical = policy(&["coverage/**"], &["vendor/internal-sdk/**"]);
+        let redundant = policy(&["./coverage//./**"], &["./vendor//internal-sdk/./**"]);
+
+        assert_eq!(
+            canonical.fingerprint_material(),
+            redundant.fingerprint_material()
+        );
     }
 
     #[test]
     fn include_defaults_should_reject_protected_directories() {
         assert!(matches!(
-            validate_include_defaults(&[".git/config".to_owned()]),
+            validate_include_defaults(&["./.git//config".to_owned()]),
             Err(IgnorePatternError::ProtectedInclude { .. })
         ));
     }
@@ -409,8 +503,16 @@ mod tests {
     #[test]
     fn patterns_should_reject_parent_traversal() {
         assert!(matches!(
-            validate_excludes(&["../outside/**".to_owned()]),
+            validate_excludes(&["./safe/../outside/**".to_owned()]),
             Err(IgnorePatternError::ParentTraversal(_))
+        ));
+    }
+
+    #[test]
+    fn patterns_should_reject_windows_absolute_paths_after_normalization() {
+        assert!(matches!(
+            validate_excludes(&["./C:/outside/**".to_owned()]),
+            Err(IgnorePatternError::Absolute(_))
         ));
     }
 
@@ -419,6 +521,46 @@ mod tests {
         assert!(matches!(
             validate_excludes(&["   ".to_owned()]),
             Err(IgnorePatternError::Empty)
+        ));
+    }
+
+    #[test]
+    fn patterns_should_reject_values_without_path_components() {
+        assert!(matches!(
+            validate_excludes(&["././".to_owned()]),
+            Err(IgnorePatternError::MissingPathComponent(_))
+        ));
+    }
+
+    #[test]
+    fn patterns_should_reject_character_classes() {
+        assert!(matches!(
+            validate_excludes(&["src/[ab]/**".to_owned()]),
+            Err(IgnorePatternError::UnsupportedSyntax(_))
+        ));
+    }
+
+    #[test]
+    fn patterns_should_reject_alternations() {
+        assert!(matches!(
+            validate_excludes(&["{src,test}/**".to_owned()]),
+            Err(IgnorePatternError::UnsupportedSyntax(_))
+        ));
+    }
+
+    #[test]
+    fn patterns_should_reject_non_component_recursive_wildcards() {
+        assert!(matches!(
+            validate_excludes(&["src/**generated/**".to_owned()]),
+            Err(IgnorePatternError::UnsupportedSyntax(_))
+        ));
+    }
+
+    #[test]
+    fn patterns_should_reject_three_star_wildcards() {
+        assert!(matches!(
+            validate_excludes(&["src/***/generated".to_owned()]),
+            Err(IgnorePatternError::UnsupportedSyntax(_))
         ));
     }
 }

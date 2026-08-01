@@ -77,9 +77,15 @@ patterns.
 
 ## Discovery exclusions
 
-`excludes` and `includeDefaults` accept repository-relative globs with `*`, `?`, and `**`. Use `/`
-as the separator on every operating system. Absolute paths, parent traversal with `..`, malformed
-globs, and unsafe terminal characters are rejected.
+`excludes` and `includeDefaults` accept repository-relative globs with `*`, `?`, and `**`. The
+recursive `**` wildcard must occupy a complete path component. Character classes, alternations,
+and other glob syntax are rejected. Use `/` as the separator on every operating system.
+
+Patterns are canonicalized before matching, reporting, deduplication, and fingerprinting. Leading
+or internal `.` components and repeated `/` separators are removed, so `./coverage//**` is reported
+and evaluated as `coverage/**`. A terminal `/` remains directory-specific. Absolute paths, parent
+traversal with `..`, patterns without a path component, malformed globs, and unsafe terminal
+characters are rejected.
 
 Built-in protected exclusions cover `.git`, `.hg`, `.svn`, `.codegraph`, and
 `.code-system-graph`. They prevent version-control metadata, local indexes, and generated graph

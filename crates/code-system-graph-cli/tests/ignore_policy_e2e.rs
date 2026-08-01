@@ -31,7 +31,7 @@ fn scan_should_apply_excludes_reopen_defaults_and_keep_explicit_artifacts() -> a
     let manifest = temporary.path().join("code-system-graph.yaml");
     std::fs::write(
         &manifest,
-        "version: 1\nname: ignored\nrepos:\n  app:\n    path: repo\n    openapi: vendor/contracts/openapi.yaml\n    excludes:\n      - coverage/**\n    includeDefaults:\n      - vendor/internal-sdk/**\n",
+        "version: 1\nname: ignored\nrepos:\n  app:\n    path: repo\n    openapi: vendor/contracts/openapi.yaml\n    excludes:\n      - ./coverage//./**\n    includeDefaults:\n      - ./vendor//internal-sdk/./**\n",
     )?;
     let database = temporary.path().join("graph.db");
 

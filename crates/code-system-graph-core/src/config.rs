@@ -554,6 +554,32 @@ mod tests {
     }
 
     #[test]
+    fn canonical_equivalent_patterns_should_produce_the_same_repository_fingerprint()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let repository = tempfile::tempdir()?;
+        let canonical = RepositoryConfig {
+            path: ".".to_owned(),
+            openapi: None,
+            http_consumers: None,
+            integration_tests: None,
+            implementations: None,
+            excludes: Some(vec!["coverage/**".to_owned()]),
+            include_defaults: Some(vec!["vendor/internal-sdk/**".to_owned()]),
+        };
+        let redundant = RepositoryConfig {
+            excludes: Some(vec!["./coverage//./**".to_owned()]),
+            include_defaults: Some(vec!["./vendor//internal-sdk/./**".to_owned()]),
+            ..canonical.clone()
+        };
+
+        let canonical = resolve_repository_config(repository.path(), &canonical)?;
+        let redundant = resolve_repository_config(repository.path(), &redundant)?;
+
+        assert_eq!(canonical.fingerprint, redundant.fingerprint);
+        Ok(())
+    }
+
+    #[test]
     fn openapi_auto_detection_should_respect_reopened_default_subtree()
     -> Result<(), Box<dyn std::error::Error>> {
         let repository = tempfile::tempdir()?;

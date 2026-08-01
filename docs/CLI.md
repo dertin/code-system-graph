@@ -44,8 +44,8 @@ scope. Doctor reports unavailable observations as unknown rather than healthy.
 
 `config show` resolves workspace and repository-local configuration without opening a database. Its
 deterministic JSON reports protected exclusions, reactivable built-in defaults, configured
-`excludes` and `includeDefaults` with their source, and the ordered effective rules. The optional
-`--repo` filter requires one exact manifest alias.
+`excludes` and `includeDefaults` in canonical form with their source, and the ordered effective
+rules. The optional `--repo` filter requires one exact manifest alias.
 
 `scan` and plain `sync` each perform one pass and exit. Neither command installs a watcher or
 background service. `sync` is incremental, but first runs `codegraph sync --quiet` with direct

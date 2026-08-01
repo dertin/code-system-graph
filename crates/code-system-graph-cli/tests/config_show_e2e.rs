@@ -16,7 +16,7 @@ fn config_show_should_report_defaults_and_selected_repository_rules() -> anyhow:
     let manifest = temporary.path().join("code-system-graph.yaml");
     std::fs::write(
         &manifest,
-        "version: 1\nname: configuration\nrepos:\n  api:\n    path: api\n    excludes:\n      - coverage/**\n    includeDefaults:\n      - vendor/internal-sdk/**\n  worker:\n    path: worker\n",
+        "version: 1\nname: configuration\nrepos:\n  api:\n    path: api\n    excludes:\n      - ./coverage//./**\n    includeDefaults:\n      - ./vendor//internal-sdk/./**\n  worker:\n    path: worker\n",
     )?;
 
     let output = Command::new(env!("CARGO_BIN_EXE_csgraph"))
@@ -114,5 +114,25 @@ fn config_show_should_reject_unknown_repository_alias() -> anyhow::Result<()> {
 
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("missing"));
+    Ok(())
+}
+
+#[test]
+fn config_show_should_reject_unsupported_glob_syntax() -> anyhow::Result<()> {
+    let temporary = tempfile::tempdir()?;
+    std::fs::create_dir_all(temporary.path().join("api"))?;
+    let manifest = temporary.path().join("code-system-graph.yaml");
+    std::fs::write(
+        &manifest,
+        "version: 1\nname: configuration\nrepos:\n  api:\n    path: api\n    excludes:\n      - \"src/[ab]/**\"\n",
+    )?;
+
+    let output = Command::new(env!("CARGO_BIN_EXE_csgraph"))
+        .args(["config", "show", "--config"])
+        .arg(&manifest)
+        .output()?;
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unsupported glob syntax"));
     Ok(())
 }

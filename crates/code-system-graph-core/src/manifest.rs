@@ -382,6 +382,7 @@ mod tests {
     use code_system_graph_model::EdgeKind;
 
     use super::{MANUAL_REASON_MAX_BYTES, ManifestError, parse_manifest};
+    use crate::IgnorePatternError;
 
     const VALID: &str = r"
 version: 1
@@ -427,6 +428,24 @@ repos:
             result,
             Err(ManifestError::InvalidIgnorePattern { field, .. })
                 if field == "repos.web.includeDefaults"
+        ));
+    }
+
+    #[test]
+    fn parse_manifest_should_reject_unsupported_ignore_syntax() {
+        let input = VALID.replace(
+            "    path: ../web",
+            "    path: ../web\n    excludes: [\"src/[ab]/**\"]",
+        );
+
+        let result = parse_manifest(&input);
+
+        assert!(matches!(
+            result,
+            Err(ManifestError::InvalidIgnorePattern {
+                source: IgnorePatternError::UnsupportedSyntax(_),
+                ..
+            })
         ));
     }
 
