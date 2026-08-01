@@ -11,6 +11,8 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::{ExtractionBudgets, ExtractionLimitExceeded, ExtractionTracker};
+
 const EXACT_CONFIDENCE: f32 = 1.0;
 const STATIC_TEXT_CONFIDENCE: f32 = 0.95;
 const PRESENCE_CONFIDENCE: f32 = 0.9;
@@ -165,6 +167,8 @@ pub enum PackageManifestError {
         /// Bounded parser explanation.
         message: String,
     },
+    /// Extraction exceeded one configured invocation resource.
+    LimitExceeded(ExtractionLimitExceeded),
 }
 
 impl fmt::Display for PackageManifestError {
@@ -176,11 +180,25 @@ impl fmt::Display for PackageManifestError {
             Self::Malformed { path, message } => {
                 write!(formatter, "malformed package manifest `{path}`: {message}")
             }
+            Self::LimitExceeded(error) => error.fmt(formatter),
         }
     }
 }
 
-impl Error for PackageManifestError {}
+impl Error for PackageManifestError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::LimitExceeded(error) => Some(error),
+            Self::UnsupportedPath(_) | Self::Malformed { .. } => None,
+        }
+    }
+}
+
+impl From<ExtractionLimitExceeded> for PackageManifestError {
+    fn from(error: ExtractionLimitExceeded) -> Self {
+        Self::LimitExceeded(error)
+    }
+}
 
 /// Extracts static package facts by dispatching on a repository-relative file name.
 ///
@@ -200,6 +218,25 @@ pub fn extract_package_manifest(
     relative_path: &str,
     content: &str,
 ) -> Result<PackageManifest, PackageManifestError> {
+    let mut tracker = ExtractionTracker::new(
+        relative_path,
+        "code-system-graph.packages",
+        &ExtractionBudgets::default(),
+    );
+    extract_package_manifest_with_tracker(relative_path, content, &mut tracker)
+}
+
+/// Extracts package facts using an existing per-invocation tracker.
+///
+/// # Errors
+///
+/// Returns an error for malformed input or an exhausted extraction budget.
+pub fn extract_package_manifest_with_tracker(
+    relative_path: &str,
+    content: &str,
+    tracker: &mut ExtractionTracker,
+) -> Result<PackageManifest, PackageManifestError> {
+    tracker.check_input_bytes(u64::try_from(content.len()).unwrap_or(u64::MAX))?;
     validate_relative_path(relative_path)?;
     let file_name = relative_path.rsplit('/').next().unwrap_or(relative_path);
     let lower_name = file_name.to_ascii_lowercase();
@@ -214,9 +251,9 @@ pub fn extract_package_manifest(
         "cargo.lock" => parse_cargo_lockfile(relative_path, content),
         "go.mod" => parse_go_mod(relative_path, content),
         "go.work" => parse_go_work(relative_path, content),
-        "pom.xml" => parse_maven(relative_path, content),
+        "pom.xml" => parse_maven(relative_path, content, tracker),
         "build.gradle" | "build.gradle.kts" => parse_gradle(relative_path, content),
-        "packages.config" => parse_packages_config(relative_path, content),
+        "packages.config" => parse_packages_config(relative_path, content, tracker),
         _ if lower_name.starts_with("requirements")
             && std::path::Path::new(&lower_name)
                 .extension()
@@ -224,7 +261,7 @@ pub fn extract_package_manifest(
         {
             parse_requirements(relative_path, content)
         }
-        _ if lower_name.ends_with(".csproj") => parse_csproj(relative_path, content),
+        _ if lower_name.ends_with(".csproj") => parse_csproj(relative_path, content, tracker),
         _ => Err(PackageManifestError::UnsupportedPath(
             relative_path.to_owned(),
         )),
@@ -1610,24 +1647,45 @@ struct XmlNode {
     attributes: BTreeMap<String, String>,
     text: String,
     line: usize,
-    children: Vec<XmlNode>,
+    children: Vec<usize>,
 }
 
-fn parse_xml(path: &str, content: &str) -> Result<XmlNode, PackageManifestError> {
+#[derive(Debug)]
+struct XmlDocument {
+    nodes: Vec<XmlNode>,
+}
+
+impl XmlDocument {
+    fn node(&self, index: usize) -> &XmlNode {
+        &self.nodes[index]
+    }
+
+    fn children<'a>(&'a self, node: &'a XmlNode) -> impl Iterator<Item = &'a XmlNode> + 'a {
+        node.children.iter().map(|index| self.node(*index))
+    }
+}
+
+fn parse_xml(
+    path: &str,
+    content: &str,
+    tracker: &mut ExtractionTracker,
+) -> Result<XmlDocument, PackageManifestError> {
     reject_nul(path, content)?;
-    let mut stack = vec![XmlNode {
+    let mut nodes = vec![XmlNode {
         name: "#document".to_owned(),
         line: 1,
         ..XmlNode::default()
     }];
+    let mut stack = vec![0_usize];
     let mut cursor = 0;
     while cursor < content.len() {
+        tracker.charge_work(1)?;
         let Some(relative_open) = content[cursor..].find('<') else {
-            append_xml_text(&mut stack, &content[cursor..]);
+            append_xml_text(&mut nodes, &stack, &content[cursor..], tracker)?;
             break;
         };
         let open = cursor + relative_open;
-        append_xml_text(&mut stack, &content[cursor..open]);
+        append_xml_text(&mut nodes, &stack, &content[cursor..open], tracker)?;
         if content[open..].starts_with("<!--") {
             let end = content[open + 4..]
                 .find("-->")
@@ -1642,7 +1700,7 @@ fn parse_xml(path: &str, content: &str) -> Result<XmlNode, PackageManifestError>
                 .find("]]>")
                 .map(|index| start + index)
                 .ok_or_else(|| malformed(path, "unterminated CDATA section"))?;
-            append_xml_text(&mut stack, &content[start..end]);
+            append_xml_text(&mut nodes, &stack, &content[start..end], tracker)?;
             cursor = end + 3;
             continue;
         }
@@ -1658,24 +1716,27 @@ fn parse_xml(path: &str, content: &str) -> Result<XmlNode, PackageManifestError>
             if stack.len() <= 1 {
                 return Err(malformed(path, format!("unexpected closing tag `{name}`")));
             }
-            let node = stack
+            let node_index = stack
                 .pop()
                 .ok_or_else(|| malformed(path, "XML parser stack underflow"))?;
+            let node = &nodes[node_index];
             if node.name != name {
                 return Err(malformed(
                     path,
                     format!("closing tag `{name}` does not match `{}`", node.name),
                 ));
             }
-            if let Some(parent) = stack.last_mut() {
-                parent.children.push(node);
-            }
             continue;
         }
         let self_closing = raw.ends_with('/');
         let declaration = raw.trim_end_matches('/').trim();
         let (name, attributes) = parse_xml_opening(path, declaration)?;
-        let node = XmlNode {
+        let depth = u64::try_from(stack.len()).unwrap_or(u64::MAX);
+        tracker.check_structural_depth(depth)?;
+        tracker.charge_identifier(&name)?;
+        tracker.charge_observation(1)?;
+        let node_index = nodes.len();
+        nodes.push(XmlNode {
             name,
             attributes,
             text: String::new(),
@@ -1685,28 +1746,37 @@ fn parse_xml(path: &str, content: &str) -> Result<XmlNode, PackageManifestError>
                 .count()
                 + 1,
             children: Vec::new(),
-        };
-        if self_closing {
-            if let Some(parent) = stack.last_mut() {
-                parent.children.push(node);
-            }
-        } else {
-            stack.push(node);
+        });
+        let parent = *stack
+            .last()
+            .ok_or_else(|| malformed(path, "XML parser stack underflow"))?;
+        nodes[parent].children.push(node_index);
+        if !self_closing {
+            stack.push(node_index);
         }
     }
     if stack.len() != 1 {
-        let name = stack.last().map_or("", |node| node.name.as_str());
+        let name = stack.last().map_or("", |index| nodes[*index].name.as_str());
         return Err(malformed(path, format!("unclosed XML tag `{name}`")));
     }
-    stack
-        .pop()
-        .ok_or_else(|| malformed(path, "XML document is empty"))
+    Ok(XmlDocument { nodes })
 }
 
-fn append_xml_text(stack: &mut [XmlNode], text: &str) {
-    if let Some(node) = stack.last_mut() {
+fn append_xml_text(
+    nodes: &mut [XmlNode],
+    stack: &[usize],
+    text: &str,
+    tracker: &mut ExtractionTracker,
+) -> Result<(), ExtractionLimitExceeded> {
+    if !text.is_empty() {
+        tracker.charge_string(text)?;
+    }
+    if let Some(index) = stack.last()
+        && let Some(node) = nodes.get_mut(*index)
+    {
         node.text.push_str(text);
     }
+    Ok(())
 }
 
 fn find_xml_tag_end(content: &str, start: usize) -> Option<usize> {
@@ -1772,34 +1842,39 @@ fn decode_xml_entities(value: &str) -> String {
         .replace("&amp;", "&")
 }
 
-fn child<'a>(node: &'a XmlNode, name: &str) -> Option<&'a XmlNode> {
-    node.children.iter().find(|item| item.name == name)
+fn child<'a>(document: &'a XmlDocument, node: &'a XmlNode, name: &str) -> Option<&'a XmlNode> {
+    document.children(node).find(|item| item.name == name)
 }
 
-fn child_text(node: &XmlNode, name: &str) -> Option<String> {
-    child(node, name)
+fn child_text(document: &XmlDocument, node: &XmlNode, name: &str) -> Option<String> {
+    child(document, node, name)
         .map(|item| decode_xml_entities(item.text.trim()))
         .filter(|value| !value.is_empty())
 }
 
-fn parse_maven(path: &str, content: &str) -> Result<PackageManifest, PackageManifestError> {
-    let document = parse_xml(path, content)?;
+fn parse_maven(
+    path: &str,
+    content: &str,
+    tracker: &mut ExtractionTracker,
+) -> Result<PackageManifest, PackageManifestError> {
+    let document = parse_xml(path, content, tracker)?;
     let project = document
-        .children
-        .iter()
+        .children(document.node(0))
         .find(|node| node.name == "project")
         .ok_or_else(|| malformed(path, "missing `project` root element"))?;
     let mut result = PackageManifest::default();
-    let group = child_text(project, "groupId")
-        .or_else(|| child(project, "parent").and_then(|node| child_text(node, "groupId")));
-    let artifact = child_text(project, "artifactId");
-    let version = child_text(project, "version")
-        .or_else(|| child(project, "parent").and_then(|node| child_text(node, "version")));
+    let group = child_text(&document, project, "groupId").or_else(|| {
+        child(&document, project, "parent").and_then(|node| child_text(&document, node, "groupId"))
+    });
+    let artifact = child_text(&document, project, "artifactId");
+    let version = child_text(&document, project, "version").or_else(|| {
+        child(&document, project, "parent").and_then(|node| child_text(&document, node, "version"))
+    });
     if let (Some(group), Some(artifact)) = (group, artifact)
         && !contains_dynamic(&group)
         && !contains_dynamic(&artifact)
     {
-        let evidence = child(project, "artifactId").map_or_else(
+        let evidence = child(&document, project, "artifactId").map_or_else(
             || evidence_at(content, project.line),
             |node| evidence_at(content, node.line),
         );
@@ -1811,20 +1886,20 @@ fn parse_maven(path: &str, content: &str) -> Result<PackageManifest, PackageMani
             evidence,
         ));
     }
-    if let Some(dependencies) = child(project, "dependencies") {
-        collect_maven_dependencies(path, content, dependencies, None, &mut result);
+    if let Some(dependencies) = child(&document, project, "dependencies") {
+        collect_maven_dependencies(path, content, &document, dependencies, None, &mut result);
     }
-    if let Some(profiles) = child(project, "profiles") {
-        for profile in profiles
-            .children
-            .iter()
+    if let Some(profiles) = child(&document, project, "profiles") {
+        for profile in document
+            .children(profiles)
             .filter(|node| node.name == "profile")
         {
-            let profile_id = child_text(profile, "id");
-            if let Some(dependencies) = child(profile, "dependencies") {
+            let profile_id = child_text(&document, profile, "id");
+            if let Some(dependencies) = child(&document, profile, "dependencies") {
                 collect_maven_dependencies(
                     path,
                     content,
+                    &document,
                     dependencies,
                     profile_id
                         .as_deref()
@@ -1841,32 +1916,35 @@ fn parse_maven(path: &str, content: &str) -> Result<PackageManifest, PackageMani
 fn collect_maven_dependencies(
     path: &str,
     content: &str,
+    document: &XmlDocument,
     dependencies: &XmlNode,
     profile: Option<&str>,
     output: &mut PackageManifest,
 ) {
-    for item in dependencies
-        .children
-        .iter()
+    for item in document
+        .children(dependencies)
         .filter(|node| node.name == "dependency")
     {
-        let (Some(group), Some(artifact)) =
-            (child_text(item, "groupId"), child_text(item, "artifactId"))
-        else {
+        let (Some(group), Some(artifact)) = (
+            child_text(document, item, "groupId"),
+            child_text(document, item, "artifactId"),
+        ) else {
             continue;
         };
         if contains_dynamic(&group) || contains_dynamic(&artifact) {
             continue;
         }
-        let version = child_text(item, "version").filter(|value| !contains_dynamic(value));
-        let declared_scope = child_text(item, "scope").unwrap_or_else(|| "compile".to_owned());
+        let version =
+            child_text(document, item, "version").filter(|value| !contains_dynamic(value));
+        let declared_scope =
+            child_text(document, item, "scope").unwrap_or_else(|| "compile".to_owned());
         let scope = match declared_scope.as_str() {
             "test" => DependencyScope::Test,
             "provided" | "system" => DependencyScope::Build,
             _ => DependencyScope::Runtime,
         };
-        let optional = child_text(item, "optional").is_some_and(|value| value == "true");
-        let type_condition = child_text(item, "type")
+        let optional = child_text(document, item, "optional").is_some_and(|value| value == "true");
+        let type_condition = child_text(document, item, "type")
             .filter(|value| value != "jar")
             .map(|value| format!("type = \"{value}\""));
         output.dependencies.push(dependency(DependencyInput {
@@ -2031,17 +2109,16 @@ fn gradle_scope(configuration: &str) -> (DependencyScope, bool) {
 fn parse_packages_config(
     path: &str,
     content: &str,
+    tracker: &mut ExtractionTracker,
 ) -> Result<PackageManifest, PackageManifestError> {
-    let document = parse_xml(path, content)?;
+    let document = parse_xml(path, content, tracker)?;
     let packages = document
-        .children
-        .iter()
+        .children(document.node(0))
         .find(|node| node.name == "packages")
         .ok_or_else(|| malformed(path, "missing `packages` root element"))?;
     let mut result = PackageManifest::default();
-    for item in packages
-        .children
-        .iter()
+    for item in document
+        .children(packages)
         .filter(|node| node.name == "package")
     {
         let Some(name) = item.attributes.get("id") else {
@@ -2074,15 +2151,18 @@ fn parse_packages_config(
     Ok(result)
 }
 
-fn parse_csproj(path: &str, content: &str) -> Result<PackageManifest, PackageManifestError> {
-    let document = parse_xml(path, content)?;
+fn parse_csproj(
+    path: &str,
+    content: &str,
+    tracker: &mut ExtractionTracker,
+) -> Result<PackageManifest, PackageManifestError> {
+    let document = parse_xml(path, content, tracker)?;
     let project = document
-        .children
-        .iter()
+        .children(document.node(0))
         .find(|node| node.name == "Project")
         .ok_or_else(|| malformed(path, "missing `Project` root element"))?;
     let mut result = PackageManifest::default();
-    if let Some(identity) = csproj_package_identity(path, project)? {
+    if let Some(identity) = csproj_package_identity(path, &document, project)? {
         result.packages.push(package(
             PackageEcosystem::NuGet,
             identity.name,
@@ -2091,15 +2171,13 @@ fn parse_csproj(path: &str, content: &str) -> Result<PackageManifest, PackageMan
             evidence_at(content, identity.name_node.line),
         ));
     }
-    for group in project
-        .children
-        .iter()
+    for group in document
+        .children(project)
         .filter(|node| node.name == "ItemGroup")
     {
         let group_condition = group.attributes.get("Condition").cloned();
-        for reference in group
-            .children
-            .iter()
+        for reference in document
+            .children(group)
             .filter(|node| node.name == "PackageReference")
         {
             let Some(name) = reference
@@ -2119,13 +2197,13 @@ fn parse_csproj(path: &str, content: &str) -> Result<PackageManifest, PackageMan
                 .attributes
                 .get("Version")
                 .cloned()
-                .or_else(|| child_text(reference, "Version"))
+                .or_else(|| child_text(&document, reference, "Version"))
                 .filter(|value| !contains_dynamic(value));
             let private_assets = reference
                 .attributes
                 .get("PrivateAssets")
                 .cloned()
-                .or_else(|| child_text(reference, "PrivateAssets"));
+                .or_else(|| child_text(&document, reference, "PrivateAssets"));
             let reference_condition = reference.attributes.get("Condition").cloned();
             result.dependencies.push(dependency(DependencyInput {
                 ecosystem: PackageEcosystem::NuGet,
@@ -2155,15 +2233,15 @@ struct CsprojPackageIdentity<'a> {
 
 fn csproj_package_identity<'a>(
     path: &str,
+    document: &'a XmlDocument,
     project: &'a XmlNode,
 ) -> Result<Option<CsprojPackageIdentity<'a>>, PackageManifestError> {
     let mut identities = Vec::new();
-    for group in project
-        .children
-        .iter()
+    for group in document
+        .children(project)
         .filter(|node| node.name == "PropertyGroup")
     {
-        let Some(name_node) = child(group, "PackageId") else {
+        let Some(name_node) = child(document, group, "PackageId") else {
             continue;
         };
         let name = decode_xml_entities(name_node.text.trim());
@@ -2172,7 +2250,7 @@ fn csproj_package_identity<'a>(
         }
         let version = ["PackageVersion", "Version", "VersionPrefix"]
             .into_iter()
-            .find_map(|field| child_text(group, field))
+            .find_map(|field| child_text(document, group, field))
             .filter(|value| !contains_dynamic(value));
         identities.push(CsprojPackageIdentity {
             name_node,
@@ -2217,9 +2295,39 @@ fn reject_nul(path: &str, content: &str) -> Result<(), PackageManifestError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ExtractionResource;
 
     fn extract(path: &str, source: &str) -> PackageManifest {
         extract_package_manifest(path, source).expect("fixture should parse")
+    }
+
+    fn nested_maven(depth: usize) -> String {
+        let mut source = String::from("<project>");
+        source.push_str(&"<level>".repeat(depth.saturating_sub(1)));
+        source.push_str(&"</level>".repeat(depth.saturating_sub(1)));
+        source.push_str("</project>");
+        source
+    }
+
+    #[test]
+    fn xml_depth_should_accept_64_and_reject_65_with_an_iterative_stack() {
+        let budgets = ExtractionBudgets {
+            max_structural_depth_per_artifact: 64,
+            ..ExtractionBudgets::default()
+        };
+        let mut exact = ExtractionTracker::new("pom.xml", "packages", &budgets);
+        let mut above = ExtractionTracker::new("pom.xml", "packages", &budgets);
+
+        assert!(
+            extract_package_manifest_with_tracker("pom.xml", &nested_maven(64), &mut exact).is_ok()
+        );
+        assert!(matches!(
+            extract_package_manifest_with_tracker("pom.xml", &nested_maven(65), &mut above),
+            Err(PackageManifestError::LimitExceeded(error))
+                if error.resource == ExtractionResource::StructuralDepth
+                    && error.observed == 65
+                    && error.maximum == 64
+        ));
     }
 
     #[test]

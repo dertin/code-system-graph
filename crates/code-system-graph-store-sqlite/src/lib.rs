@@ -304,6 +304,11 @@ pub enum StoreError {
         /// Version required by this binary.
         required: i64,
     },
+    /// A disposable pre-publication database uses an obsolete initial schema contract.
+    #[error(
+        "development database uses an obsolete extraction schema; remove it and run a full scan to rebuild"
+    )]
+    ObsoleteDevelopmentDatabase,
     /// Another writer owns a non-stale lock.
     #[error("store writer lock is already held at `{0}`")]
     LockHeld(PathBuf),
@@ -501,6 +506,9 @@ impl SqliteStore {
         )?;
         let current = existing_schema_version(&connection)?;
         validate_supported_schema(current)?;
+        if current == LATEST_SCHEMA_VERSION {
+            validate_initial_schema_contract(&connection)?;
+        }
         Ok(MigrationReport {
             from_version: current,
             to_version: LATEST_SCHEMA_VERSION,
@@ -564,6 +572,7 @@ impl SqliteStore {
         backup_connection_to(&source, &mut destination)?;
         configure_connection(&destination)?;
         apply_migrations(&mut destination)?;
+        validate_initial_schema_contract(&destination)?;
         destination.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
         Ok(RestoreReport {
             source_path: backup_path.to_path_buf(),
@@ -598,6 +607,7 @@ impl SqliteStore {
                 required: LATEST_SCHEMA_VERSION,
             });
         }
+        validate_initial_schema_contract(&connection)?;
         Ok(Self { connection })
     }
 
@@ -613,6 +623,7 @@ impl SqliteStore {
     fn from_connection(mut connection: Connection) -> Result<Self, StoreError> {
         configure_connection(&connection)?;
         apply_migrations(&mut connection)?;
+        validate_initial_schema_contract(&connection)?;
         Ok(Self { connection })
     }
 
@@ -888,7 +899,8 @@ impl SqliteStore {
         let mut statement = self.connection.prepare(
             "SELECT
                 repo_id, checkout_id, path_encoding, relative_path, path_display,
-                extractor, content_hash, size_bytes, extractor_version, output_count, payload
+                extractor, content_hash, size_bytes, extractor_version, budget_fingerprint,
+                source_was_lossy, output_count, payload
              FROM extractor_batches
              WHERE snapshot_id = ?1
              ORDER BY repo_id, checkout_id, path_encoding, relative_path, extractor",
@@ -905,11 +917,16 @@ impl SqliteStore {
                     row.get::<_, String>(6)?,
                     row.get::<_, i64>(7)?,
                     row.get::<_, String>(8)?,
-                    row.get::<_, i64>(9)?,
-                    row.get::<_, Vec<u8>>(10)?,
+                    row.get::<_, String>(9)?,
+                    row.get::<_, bool>(10)?,
+                    row.get::<_, i64>(11)?,
+                    row.get::<_, Vec<u8>>(12)?,
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
+        if rows.iter().any(|row| row.8 != "1.0.0" || row.9.is_empty()) {
+            return Err(StoreError::ObsoleteDevelopmentDatabase);
+        }
         rows.into_iter()
             .map(
                 |(
@@ -922,6 +939,8 @@ impl SqliteStore {
                     content_hash,
                     stored_size_bytes,
                     extractor_version,
+                    budget_fingerprint,
+                    source_was_lossy,
                     stored_output_count,
                     payload,
                 )| {
@@ -942,6 +961,8 @@ impl SqliteStore {
                             )?,
                         },
                         extractor_version,
+                        budget_fingerprint,
+                        source_was_lossy,
                         output_count: stored_metric_to_u64(
                             "extractor_batches.output_count",
                             stored_output_count,
@@ -2017,6 +2038,7 @@ fn open_and_migrate(path: &Path) -> Result<(Connection, MigrationReport), StoreE
         None
     };
     apply_migrations(&mut connection)?;
+    validate_initial_schema_contract(&connection)?;
     Ok((
         connection,
         MigrationReport {
@@ -2054,6 +2076,17 @@ fn validate_supported_schema(version: i64) -> Result<(), StoreError> {
             found: version,
             supported: LATEST_SCHEMA_VERSION,
         });
+    }
+    Ok(())
+}
+
+fn validate_initial_schema_contract(connection: &Connection) -> Result<(), StoreError> {
+    let mut statement = connection.prepare("PRAGMA table_info(extractor_batches)")?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    if !columns.contains("budget_fingerprint") || !columns.contains("source_was_lossy") {
+        return Err(StoreError::ObsoleteDevelopmentDatabase);
     }
     Ok(())
 }
@@ -2989,8 +3022,9 @@ fn insert_extractor_batches(
         transaction.execute(
             "INSERT INTO extractor_batches(
                 snapshot_id, repo_id, checkout_id, path_encoding, relative_path, path_display,
-                extractor, content_hash, size_bytes, extractor_version, output_count, payload
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                extractor, content_hash, size_bytes, extractor_version, budget_fingerprint,
+                source_was_lossy, output_count, payload
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 snapshot_id,
                 batch.source.repo_id.as_str(),
@@ -3002,6 +3036,8 @@ fn insert_extractor_batches(
                 batch.source.content_hash,
                 metric_to_i64("extractor_batches.size_bytes", batch.source.size_bytes)?,
                 batch.extractor_version,
+                batch.budget_fingerprint,
+                batch.source_was_lossy,
                 metric_to_i64("extractor_batches.output_count", batch.output_count)?,
                 batch.payload,
             ],
@@ -3397,7 +3433,7 @@ mod tests {
     use rusqlite::params;
 
     use super::{
-        ManualLinkDisposition, ManualLinkRecord, ProviderCapabilityRecord, QueryCacheRecord, SnapshotBatch, SqliteStore, StoreError, StoreLock, lock_path
+        INITIAL_MIGRATION, ManualLinkDisposition, ManualLinkRecord, ProviderCapabilityRecord, QueryCacheRecord, SnapshotBatch, SqliteStore, StoreError, StoreLock, lock_path
     };
 
     const LOCK_HELPER_ENV: &str = "CODE_SYSTEM_GRAPH_LOCK_HELPER";
@@ -4087,6 +4123,28 @@ mod tests {
     }
 
     #[test]
+    fn version_one_database_without_definitive_batch_columns_should_require_rebuild()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temporary = tempfile::tempdir()?;
+        let database = temporary.path().join("obsolete.db");
+        let connection = rusqlite::Connection::open(&database)?;
+        connection.execute_batch(INITIAL_MIGRATION)?;
+        connection.execute_batch(
+            "ALTER TABLE extractor_batches DROP COLUMN budget_fingerprint;
+             ALTER TABLE extractor_batches DROP COLUMN source_was_lossy;",
+        )?;
+        drop(connection);
+
+        let result = SqliteStore::open(&database);
+
+        assert!(matches!(
+            result,
+            Err(StoreError::ObsoleteDevelopmentDatabase)
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn read_only_open_should_reject_pending_migration() -> Result<(), Box<dyn std::error::Error>> {
         let temporary = tempfile::tempdir()?;
         let database = temporary.path().join("uninitialized.db");
@@ -4522,6 +4580,8 @@ mod tests {
         let extractor_batch = StoredExtractorBatch {
             source: fingerprint.clone(),
             extractor_version: "1.0.0".to_owned(),
+            budget_fingerprint: "extraction-budgets:test".to_owned(),
+            source_was_lossy: false,
             output_count: 1,
             payload: br#"{"observations":["GET:/orders"]}"#.to_vec(),
         };
@@ -4552,6 +4612,48 @@ mod tests {
                 if fingerprints == vec![fingerprint]
                     && batches == vec![extractor_batch]
                     && runs == vec![run]
+        ));
+    }
+
+    #[test]
+    fn legacy_development_batch_contract_should_require_full_rebuild() {
+        let mut store = SqliteStore::in_memory().expect("test store must initialize");
+        let workspace = workspace();
+        let (nodes, edges, evidence) = fixture();
+        let (fingerprint, run) = incremental_fixture();
+        let extractor_batch = StoredExtractorBatch {
+            source: fingerprint.clone(),
+            extractor_version: "1.0.0".to_owned(),
+            budget_fingerprint: "extraction-budgets:test".to_owned(),
+            source_was_lossy: false,
+            output_count: 1,
+            payload: br#"{"observations":[]}"#.to_vec(),
+        };
+        store
+            .publish_snapshot(SnapshotBatch {
+                workspace: &workspace,
+                snapshot_id: "snapshot:legacy",
+                nodes: &nodes,
+                edges: &edges,
+                evidence: &evidence,
+                fingerprints: std::slice::from_ref(&fingerprint),
+                extractor_batches: std::slice::from_ref(&extractor_batch),
+                extractor_runs: std::slice::from_ref(&run),
+                manual_links: &[],
+                community_snapshot: None,
+            })
+            .expect("fixture snapshot should publish");
+        store
+            .connection
+            .execute(
+                "UPDATE extractor_batches SET extractor_version = '1.0.0.5'",
+                [],
+            )
+            .expect("fixture contract should be replaced");
+
+        assert!(matches!(
+            store.load_current_extractor_batches("commerce"),
+            Err(StoreError::ObsoleteDevelopmentDatabase)
         ));
     }
 

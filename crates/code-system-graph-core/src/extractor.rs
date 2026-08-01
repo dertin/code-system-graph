@@ -101,10 +101,16 @@ pub struct ExtractionBatch {
 impl ExtractionBatch {
     /// Converts the batch to its persistence representation.
     #[must_use]
-    pub fn into_stored(self) -> StoredExtractorBatch {
+    pub fn into_stored(
+        self,
+        budget_fingerprint: String,
+        source_was_lossy: bool,
+    ) -> StoredExtractorBatch {
         StoredExtractorBatch {
             source: self.source,
             extractor_version: self.report.extractor_version.to_string(),
+            budget_fingerprint,
+            source_was_lossy,
             output_count: self.output_count,
             payload: self.payload,
         }

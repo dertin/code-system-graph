@@ -221,6 +221,49 @@ The local database should never be committed. When the workspace belongs to a Gi
 .code-system-graph/
 ```
 
+## Advanced configuration
+
+### Security budgets
+
+Extraction budgets are global operator-owned safety limits. Each value applies independently to
+one artifact-extractor invocation and resets for the next file and for another extractor on the
+same file. They do not limit repository count, discovered file count, persisted node count, or the
+complete graph.
+
+The defaults are effective when this block is absent. A partial block changes only the named
+values:
+
+```yaml
+extractionBudgets:
+  maxInputBytesPerArtifact: 8388608
+  maxStructuralDepthPerArtifact: 64
+  maxAstDepthPerArtifact: 256
+  maxWorkUnitsPerArtifact: 100000
+  maxTreeSitterNodesPerArtifact: 500000
+  maxObservationsPerArtifact: 100000
+  maxAccumulatedStringBytesPerArtifact: 33554432
+  maxSerializedOutputBytesPerArtifact: 33554432
+  maxStringBytesPerValue: 65536
+  maxPortablePathBytesPerValue: 4096
+  maxIdentifierBytesPerValue: 1024
+  maxStructuredWallTimeMsPerArtifact: 5000
+  maxTreeSitterWallTimeMsPerArtifact: 10000
+```
+
+All values must be positive integers representable by the running build. Unknown fields, zero,
+and numeric overflow are rejected. Higher values are accepted, but increase the maximum CPU,
+memory, input, or output consumption explicitly authorized by the operator. Lower values can
+reject artifacts that scan successfully with the defaults.
+
+This block is accepted only in the trusted global `code-system-graph.yaml`. Repository-local
+`.code-system-graph.yaml`, environment variables, and CLI arguments cannot set or raise these
+limits. `csgraph config show` reports every effective value, including defaults.
+
+Effective values are fingerprinted into each extractor batch. A changed fingerprint prevents
+batch reuse. If budgets changed, a scan restricted with `--repo` fails early and requests a full
+scan so one snapshot cannot mix global policies. Any exhausted budget aborts before publication;
+the previous snapshot remains current and queryable.
+
 ## Optional features
 
 ### CodeGraph

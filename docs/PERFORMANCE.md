@@ -58,9 +58,34 @@ After registry discovery optimization, the measured Linux x86_64 result was:
 The changed-input count includes the source file and the source-owned extractor observations
 affected by that repository change; it is not a count of changed repositories.
 
+## Extraction-budget workload
+
+The extraction acceptance test creates one repository with 5,000 files: 1,000 each of GraphQL,
+Protobuf, Maven XML, JavaScript, and generated-client `FILES` manifests. It measures one direct
+representative extractor invocation per file, then performs a complete persisted scan:
+
+```text
+cargo test -p code-system-graph --test extraction_scale_e2e --release --locked -- --ignored --nocapture
+```
+
+Measured Linux x86_64 result on August 1, 2026:
+
+- files: 5,000;
+- discovered artifact-extractor invocations: 9,000, because JavaScript files intentionally run
+  through multiple focused extractors;
+- complete scan: 47,029 ms;
+- representative per-artifact extraction p50: 10 microseconds;
+- representative per-artifact extraction p95: 33 microseconds;
+- representative per-artifact extraction p99: 45 microseconds;
+- test-process peak resident memory from Linux `VmHWM`: 89,060 KiB.
+
+The memory value comes from the release test process after the scan. It excludes Cargo and compiler
+processes. The per-artifact samples measure parser extraction only; the complete-scan figure also
+includes discovery, fingerprinting, linking, community analysis, and SQLite publication.
+
 ## Interpretation and reproducibility
 
-- Always use `--release`; both tests reject debug builds.
+- Always use `--release`; scale acceptance tests reject debug builds.
 - Record the Git revision, Rust version, target triple, operating system, sample counts, and raw
   test output with candidate evidence.
 - Run on an otherwise representative workstation and disclose material contention or resource

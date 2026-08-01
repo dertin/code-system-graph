@@ -1,7 +1,7 @@
-use std::path::{Component, Path, PathBuf};
-
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+use crate::{ExtractionLimitExceeded, ExtractionTracker};
 
 /// Exact generated-client configuration or manifest observation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -36,6 +36,9 @@ pub enum GeneratedClientError {
     /// Metadata contains an unsafe repository-relative path.
     #[error("generated-client metadata contains unsafe path `{0}`")]
     UnsafePath(String),
+    /// Extraction exceeded one configured invocation resource.
+    #[error(transparent)]
+    LimitExceeded(#[from] ExtractionLimitExceeded),
 }
 
 /// Extracts `OpenAPI` Generator public configuration and output manifests.
@@ -46,49 +49,57 @@ pub enum GeneratedClientError {
 pub fn extract_generated_client_metadata(
     source_path: &str,
     content: &str,
+    tracker: &mut ExtractionTracker,
 ) -> Result<Vec<GeneratedClientMetadata>, GeneratedClientError> {
     let normalized = source_path.replace('\\', "/");
+    tracker.charge_portable_path(&normalized)?;
     if normalized.ends_with("openapitools.json") {
-        return extract_openapitools(&normalized, content);
+        return extract_openapitools(&normalized, content, tracker);
     }
     if normalized.ends_with(".openapi-generator/VERSION") {
+        for _ in content.lines() {
+            tracker.charge_work(1)?;
+        }
         let version = content.trim();
-        return Ok((!version.is_empty())
-            .then(|| GeneratedClientMetadata {
+        if version.is_empty() {
+            return Ok(Vec::new());
+        }
+        tracker.charge_string(version)?;
+        tracker.charge_observation(1)?;
+        return Ok(vec![GeneratedClientMetadata {
+            tool: "openapi-generator".to_owned(),
+            name: None,
+            generator_name: None,
+            input_spec: None,
+            output: None,
+            version: Some(version.to_owned()),
+            generated_file: None,
+            line: 1,
+        }]);
+    }
+    if normalized.ends_with(".openapi-generator/FILES") {
+        let mut output = Vec::new();
+        for (index, line) in content.lines().enumerate() {
+            tracker.charge_work(1)?;
+            let path = line.trim();
+            if path.is_empty() {
+                continue;
+            }
+            let path = validate_relative(path)?;
+            tracker.charge_portable_path(&path)?;
+            tracker.charge_observation(1)?;
+            output.push(GeneratedClientMetadata {
                 tool: "openapi-generator".to_owned(),
                 name: None,
                 generator_name: None,
                 input_spec: None,
                 output: None,
-                version: Some(version.to_owned()),
-                generated_file: None,
-                line: 1,
-            })
-            .into_iter()
-            .collect());
-    }
-    if normalized.ends_with(".openapi-generator/FILES") {
-        return content
-            .lines()
-            .enumerate()
-            .filter_map(|(index, line)| {
-                let path = line.trim();
-                (!path.is_empty()).then_some((index, path))
-            })
-            .map(|(index, path)| {
-                validate_relative(path)?;
-                Ok(GeneratedClientMetadata {
-                    tool: "openapi-generator".to_owned(),
-                    name: None,
-                    generator_name: None,
-                    input_spec: None,
-                    output: None,
-                    version: None,
-                    generated_file: Some(path.to_owned()),
-                    line: u32::try_from(index + 1).unwrap_or(u32::MAX),
-                })
-            })
-            .collect();
+                version: None,
+                generated_file: Some(path),
+                line: u32::try_from(index + 1).unwrap_or(u32::MAX),
+            });
+        }
+        return Ok(output);
     }
     Err(GeneratedClientError::UnsupportedPath(
         source_path.to_owned(),
@@ -98,6 +109,7 @@ pub fn extract_generated_client_metadata(
 fn extract_openapitools(
     source_path: &str,
     content: &str,
+    tracker: &mut ExtractionTracker,
 ) -> Result<Vec<GeneratedClientMetadata>, GeneratedClientError> {
     let root: serde_json::Value = serde_json::from_str(content)?;
     let generators = root
@@ -113,17 +125,20 @@ fn extract_openapitools(
     let version = root
         .get("generator-cli")
         .and_then(|value| value.get("version"))
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_owned);
-    let base = Path::new(source_path)
-        .parent()
-        .unwrap_or_else(|| Path::new(""));
+        .and_then(serde_json::Value::as_str);
+    let base = source_path.rsplit_once('/').map_or("", |(base, _)| base);
     let mut output = Vec::new();
     for (name, value) in generators {
+        tracker.charge_work(1)?;
+        tracker.charge_identifier(name)?;
         let generator_name = value
             .get("generatorName")
             .and_then(serde_json::Value::as_str)
-            .map(str::to_owned);
+            .map(|value| {
+                tracker.charge_identifier(value)?;
+                Ok::<_, ExtractionLimitExceeded>(value.to_owned())
+            })
+            .transpose()?;
         let input_spec = value
             .get("inputSpec")
             .and_then(serde_json::Value::as_str)
@@ -134,13 +149,26 @@ fn extract_openapitools(
             .and_then(serde_json::Value::as_str)
             .map(|path| resolve_relative(base, path))
             .transpose()?;
+        if let Some(path) = &input_spec {
+            tracker.charge_portable_path(path)?;
+        }
+        if let Some(path) = &generated_output {
+            tracker.charge_portable_path(path)?;
+        }
+        let version = version
+            .map(|value| {
+                tracker.charge_string(value)?;
+                Ok::<_, ExtractionLimitExceeded>(value.to_owned())
+            })
+            .transpose()?;
+        tracker.charge_observation(1)?;
         output.push(GeneratedClientMetadata {
             tool: "openapi-generator".to_owned(),
             name: Some(name.clone()),
             generator_name,
             input_spec,
             output: generated_output,
-            version: version.clone(),
+            version,
             generated_file: None,
             line: find_line(content, name),
         });
@@ -149,38 +177,46 @@ fn extract_openapitools(
     Ok(output)
 }
 
-fn resolve_relative(base: &Path, value: &str) -> Result<String, GeneratedClientError> {
+fn resolve_relative(base: &str, value: &str) -> Result<String, GeneratedClientError> {
     if portable_absolute(value) {
         return Err(GeneratedClientError::UnsafePath(value.to_owned()));
     }
-    let mut normalized = PathBuf::new();
-    for component in base.join(value).components() {
+    let portable = value.replace('\\', "/");
+    let mut normalized = base
+        .split('/')
+        .filter(|component| !component.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    for component in portable.split('/') {
         match component {
-            Component::CurDir => {}
-            Component::Normal(component) => normalized.push(component),
-            Component::ParentDir => {
-                if !normalized.pop() {
+            "" => return Err(GeneratedClientError::UnsafePath(value.to_owned())),
+            "." => {}
+            ".." => {
+                if normalized.pop().is_none() {
                     return Err(GeneratedClientError::UnsafePath(value.to_owned()));
                 }
             }
-            Component::RootDir | Component::Prefix(_) => {
-                return Err(GeneratedClientError::UnsafePath(value.to_owned()));
+            component => {
+                if component.contains(':') {
+                    return Err(GeneratedClientError::UnsafePath(value.to_owned()));
+                }
+                normalized.push(component.to_owned());
             }
         }
     }
-    Ok(normalized.to_string_lossy().replace('\\', "/"))
+    Ok(normalized.join("/"))
 }
 
-fn validate_relative(value: &str) -> Result<(), GeneratedClientError> {
-    let path = Path::new(value);
-    if portable_absolute(value)
-        || path
-            .components()
-            .any(|component| component == Component::ParentDir)
+fn validate_relative(value: &str) -> Result<String, GeneratedClientError> {
+    let normalized = value.replace('\\', "/");
+    if portable_absolute(&normalized)
+        || normalized
+            .split('/')
+            .any(|component| component.is_empty() || component == ".." || component.contains(':'))
     {
         return Err(GeneratedClientError::UnsafePath(value.to_owned()));
     }
-    Ok(())
+    Ok(normalized)
 }
 
 fn portable_absolute(value: &str) -> bool {
@@ -201,13 +237,19 @@ fn find_line(content: &str, token: &str) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::extract_generated_client_metadata;
+    use super::{GeneratedClientError, extract_generated_client_metadata};
+    use crate::{ExtractionBudgets, ExtractionResource, ExtractionTracker};
+
+    fn tracker(path: &str) -> ExtractionTracker {
+        ExtractionTracker::new(path, "generated-client", &ExtractionBudgets::default())
+    }
 
     #[test]
     fn openapitools_should_resolve_exact_input_and_output_paths() {
         let result = extract_generated_client_metadata(
             "clients/openapitools.json",
             r#"{"generator-cli":{"version":"7.12.0","generators":{"web":{"generatorName":"typescript-fetch","inputSpec":"../openapi.yaml","output":"generated"}}}}"#,
+            &mut tracker("clients/openapitools.json"),
         );
 
         assert!(matches!(
@@ -221,9 +263,87 @@ mod tests {
 
     #[test]
     fn generated_file_manifest_should_reject_checkout_escape() {
-        let result =
-            extract_generated_client_metadata(".openapi-generator/FILES", "../secret.txt\n");
+        let result = extract_generated_client_metadata(
+            ".openapi-generator/FILES",
+            "../secret.txt\n",
+            &mut tracker(".openapi-generator/FILES"),
+        );
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn generated_file_manifest_should_normalize_safe_mixed_separators() {
+        let result = extract_generated_client_metadata(
+            ".openapi-generator\\FILES",
+            "src\\generated/api.ts\n",
+            &mut tracker(".openapi-generator\\FILES"),
+        );
+
+        assert!(matches!(
+            result,
+            Ok(items) if items[0].generated_file.as_deref() == Some("src/generated/api.ts")
+        ));
+    }
+
+    #[test]
+    fn generated_file_manifest_should_reject_drives_empty_components_and_parent_segments() {
+        for unsafe_path in [
+            "C:\\secret.txt",
+            "//server/share.txt",
+            "src//generated.ts",
+            "src\\..\\secret.txt",
+            "src/../secret.txt",
+        ] {
+            let result = extract_generated_client_metadata(
+                ".openapi-generator/FILES",
+                unsafe_path,
+                &mut tracker(".openapi-generator/FILES"),
+            );
+            assert!(
+                matches!(result, Err(GeneratedClientError::UnsafePath(_))),
+                "unsafe path was accepted: {unsafe_path}"
+            );
+        }
+    }
+
+    #[test]
+    fn generated_file_lines_and_facts_should_be_charged_before_accumulation() {
+        let work_budgets = ExtractionBudgets {
+            max_work_units_per_artifact: 2,
+            ..ExtractionBudgets::default()
+        };
+        let mut work = ExtractionTracker::new("FILES", "generated-client", &work_budgets);
+        let result = extract_generated_client_metadata(
+            ".openapi-generator/FILES",
+            "one.ts\ntwo.ts\nthree.ts\n",
+            &mut work,
+        );
+        assert!(matches!(
+            result,
+            Err(GeneratedClientError::LimitExceeded(error))
+                if error.resource == ExtractionResource::WorkUnits
+                    && error.observed == 3
+                    && error.maximum == 2
+        ));
+
+        let observation_budgets = ExtractionBudgets {
+            max_observations_per_artifact: 2,
+            ..ExtractionBudgets::default()
+        };
+        let mut observations =
+            ExtractionTracker::new("FILES", "generated-client", &observation_budgets);
+        let result = extract_generated_client_metadata(
+            ".openapi-generator/FILES",
+            "one.ts\ntwo.ts\nthree.ts\n",
+            &mut observations,
+        );
+        assert!(matches!(
+            result,
+            Err(GeneratedClientError::LimitExceeded(error))
+                if error.resource == ExtractionResource::Observations
+                    && error.observed == 3
+                    && error.maximum == 2
+        ));
     }
 }

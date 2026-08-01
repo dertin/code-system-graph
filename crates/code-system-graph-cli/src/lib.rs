@@ -7,14 +7,14 @@ mod sync;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use atomic_write_file::AtomicWriteFile;
 use code_system_graph_core::{
-    AffectedTestsRequest, AnalyzerVersions, ArtifactKey, BatchAction, BatchPlanError, BitbucketProvider, ChangeAnalysisError, ChangeAnalysisOptions, ChangeError, ChangeImpactReport, ChangeProvider, ChangeRequest, ChangeScope, ChangeSet, CodeGraphConfig, CodeGraphProvider, CommunityError, ConfigDoctorInput, ConfigError, ConfigExtractionError, ContractReport, ContractRequest, CorroborationReport, DataDocument, DataExtractionError, DeclaredImplementation, DeclaredTestCase, DoctorReport, DoctorRequest, DocumentationDocument, DocumentationExtractionError, EffectiveRepositoryConfig, EventDocument, EventExtractionError, EventGraphFacts, ExitCode, ExportReport, ExportRequest, ExtractionGraphFacts, ExtractorBatch, ExtractorBatchPlan, FederatedGraph, FreshnessDoctorInput, GeneratedClientError, GeneratedClientMetadata, GitCliChangeProvider, GitHubProvider, GraphqlDocument, GraphqlExtractionError, GraphqlGraphFacts, HttpBoundary, HttpExtractionError, ImpactContext, ImpactError, ImpactReport, ImpactRequest, ImpactTarget, IncrementalPlan, InfrastructureDocument, InfrastructureExtractionError, IntegrityDoctorInput, InterfaceError, LinkError, LocalCodeIntelligenceProvider, LocalContextRequest, LocalContextResult, LocalEnrichmentInput, LocalEnrichmentStatus, LocalImpactItem, LocalImpactRequest, ManifestEdit, ManifestEditError, ManifestError, ManualLinkConfig, ManualLinkError, PackageGraphFacts, PackageManifest, PackageManifestError, PrAuthToken, ProtobufDocument, ProtobufExtractionError, ProtobufGraphFacts, ProviderBudget, ProviderCapability, ProviderDoctorInput, ProviderDoctorStatus, ProviderError, ProviderRequest, ProviderStatus, PullRequestCoordinates, PullRequestError, PullRequestInspectRequest, PullRequestInspection, PullRequestListPage, PullRequestListRequest, PullRequestListState, PullRequestProvider, PullRequestProviderConfig, PullRequestProviderKind, QueryError, RecommendedCommand, RegisteredWorkspace, RegistryError, ReqwestPrHttpTransport, SafeConfigDocument, SchemaDoctorInput, SearchFilters, SearchReport, SearchRequest, SourceEpistemicStatus, SourceGraphFacts, SourceLanguage, SourceObservation, SourceRole, SourceSyntaxError, SourceSyntaxLanguage, SourceWarning, SymbolAnchor, SymbolCorroboration, TraceError, TraversalReport, TraversalRequest, WorkspaceManifest, affected_link_keys, analyze_changes, analyze_communities, analyze_impact, apply_openapi_override, classify_interface_error, commit_manifest_edit, compare_community_snapshots, corroborate_repository, declared_implementation, declared_test_case, doctor, documents_to_graph, encode_native_path, event_documents_to_graph, export_graph, extract_asyncapi, extract_codeowners, extract_data_artifact, extract_docker_compose, extract_generated_client_metadata, extract_graphql_document, extract_graphql_persisted_operations, extract_helm, extract_kubernetes, extract_markdown, extract_openapi, extract_package_manifest, extract_protobuf, extract_safe_config, extract_service_catalog, extract_terraform, graphql_documents_to_graph, inspect_contracts, inspect_source_syntax, link_declared_implementations, link_declared_tests, link_http_boundaries, link_registered_package_owners, load_extractor_batch, merge_affected_link_neighborhoods, package_manifest_to_graph, parse_event_source, parse_go_source, parse_graphql_source, parse_java_source, parse_javascript_source_at_path, parse_literal_sql_source_at_root, parse_manifest, parse_protobuf_generated_source, parse_python_source, parse_rust_source, parse_typescript_source_at_path, plan_extractor_batches, plan_incremental_scan, preview_add_manual_link, preview_add_repository, preview_remove_repository, protobuf_documents_to_graph, register_workspace, resolve_manual_links, resolve_repository_config, search, source_observations_to_graph, store_extractor_batch, traverse
+    AffectedTestsRequest, AnalyzerVersions, ArtifactKey, BatchAction, BatchPlanError, BitbucketProvider, ChangeAnalysisError, ChangeAnalysisOptions, ChangeError, ChangeImpactReport, ChangeProvider, ChangeRequest, ChangeScope, ChangeSet, CodeGraphConfig, CodeGraphProvider, CommunityError, ConfigDoctorInput, ConfigError, ConfigExtractionError, ContractReport, ContractRequest, CorroborationReport, DataDocument, DataExtractionError, DeclaredImplementation, DeclaredTestCase, DoctorReport, DoctorRequest, DocumentationDocument, DocumentationExtractionError, EXTRACTION_CONTRACT_VERSION, EffectiveRepositoryConfig, EventDocument, EventExtractionError, EventGraphFacts, ExitCode, ExportReport, ExportRequest, ExtractionBudgets, ExtractionGraphFacts, ExtractionLimitExceeded, ExtractionTracker, ExtractorBatch, ExtractorBatchPlan, FederatedGraph, FreshnessDoctorInput, GeneratedClientError, GeneratedClientMetadata, GitCliChangeProvider, GitHubProvider, GraphqlDocument, GraphqlExtractionError, GraphqlGraphFacts, HttpBoundary, HttpExtractionError, ImpactContext, ImpactError, ImpactReport, ImpactRequest, ImpactTarget, IncrementalPlan, InfrastructureDocument, InfrastructureExtractionError, IntegrityDoctorInput, InterfaceError, LinkError, LocalCodeIntelligenceProvider, LocalContextRequest, LocalContextResult, LocalEnrichmentInput, LocalEnrichmentStatus, LocalImpactItem, LocalImpactRequest, ManifestEdit, ManifestEditError, ManifestError, ManualLinkConfig, ManualLinkError, PackageGraphFacts, PackageManifest, PackageManifestError, PrAuthToken, ProtobufDocument, ProtobufExtractionError, ProtobufGraphFacts, ProviderBudget, ProviderCapability, ProviderDoctorInput, ProviderDoctorStatus, ProviderError, ProviderRequest, ProviderStatus, PullRequestCoordinates, PullRequestError, PullRequestInspectRequest, PullRequestInspection, PullRequestListPage, PullRequestListRequest, PullRequestListState, PullRequestProvider, PullRequestProviderConfig, PullRequestProviderKind, QueryError, RecommendedCommand, RegisteredWorkspace, RegistryError, ReqwestPrHttpTransport, SafeConfigDocument, SchemaDoctorInput, SearchFilters, SearchReport, SearchRequest, SourceEpistemicStatus, SourceGraphFacts, SourceLanguage, SourceObservation, SourceRole, SourceSyntaxError, SourceSyntaxLanguage, SourceWarning, SymbolAnchor, SymbolCorroboration, TraceError, TraversalReport, TraversalRequest, WorkspaceManifest, affected_link_keys, analyze_changes, analyze_communities, analyze_impact, apply_openapi_override, classify_interface_error, commit_manifest_edit, compare_community_snapshots, corroborate_repository, declared_implementation, declared_test_case, doctor, documents_to_graph, encode_native_path, event_documents_to_graph, export_graph, extract_asyncapi, extract_codeowners, extract_data_artifact, extract_docker_compose, extract_generated_client_metadata, extract_graphql_document_with_tracker, extract_graphql_persisted_operations_with_tracker, extract_helm, extract_kubernetes, extract_markdown, extract_openapi, extract_package_manifest_with_tracker, extract_protobuf_with_tracker, extract_safe_config, extract_service_catalog, extract_terraform, graphql_documents_to_graph, inspect_contracts, inspect_source_syntax, link_declared_implementations, link_declared_tests, link_http_boundaries, link_registered_package_owners, load_extractor_batch, merge_affected_link_neighborhoods, package_manifest_to_graph, parse_event_source, parse_go_source, parse_graphql_source_with_tracker, parse_java_source, parse_javascript_source_at_path, parse_literal_sql_source_at_root, parse_manifest, parse_protobuf_generated_source, parse_python_source, parse_rust_source, parse_typescript_source_at_path, plan_extractor_batches, plan_incremental_scan, preview_add_manual_link, preview_add_repository, preview_remove_repository, protobuf_documents_to_graph, register_workspace, resolve_manual_links, resolve_repository_config, search, source_observations_to_graph, store_extractor_batch, traverse
 };
 pub use code_system_graph_core::{
     ConfigSource, DEFAULT_EXCLUDES, IgnorePolicy, PROTECTED_EXCLUDES
@@ -34,10 +34,6 @@ use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
 const MAX_TRACE_DEPTH: usize = 32;
-const MAX_ARTIFACT_BYTES: u64 = 16 * 1024 * 1024;
-const FOCUSED_EXTRACTOR_VERSION: &str = "1.0.0+extractor.4";
-const LOSSY_FOCUSED_EXTRACTOR_VERSION: &str = "1.0.0+extractor.4.lossy";
-const MAX_DISCOVERED_FILES_PER_REPOSITORY: usize = 100_000;
 const MAX_SCAN_DEGRADATIONS: usize = 25;
 const GENERATED_STATE_IGNORE_RULE: &[u8] = b".code-system-graph/";
 pub(crate) const CODEGRAPH_DISABLED_CODE: &str = "codegraph_disabled";
@@ -66,6 +62,9 @@ pub enum ApplicationError {
     /// Workspace manifest was invalid.
     #[error(transparent)]
     Manifest(#[from] ManifestError),
+    /// An extractor exhausted one configured per-invocation resource.
+    #[error(transparent)]
+    ExtractionLimit(#[from] ExtractionLimitExceeded),
     /// HTTP boundary artifact was invalid.
     #[error(transparent)]
     HttpExtraction(#[from] HttpExtractionError),
@@ -140,16 +139,11 @@ pub enum ApplicationError {
     /// Workspace is absent from the selected registry.
     #[error("workspace `{0}` is not registered")]
     WorkspaceNotFound(String),
-    /// An extractor-relevant artifact exceeds the configured byte limit.
-    #[error("artifact `{path}` is {size} bytes; maximum is {maximum} bytes")]
-    ArtifactTooLarge {
-        /// Artifact path.
-        path: PathBuf,
-        /// Observed byte size.
-        size: u64,
-        /// Hard maximum.
-        maximum: u64,
-    },
+    /// A targeted scan cannot mix batches produced under different global budgets.
+    #[error(
+        "extraction budgets changed since the current snapshot; run a full scan without `--repo`"
+    )]
+    PartialScanBudgetChanged,
     /// An extractor artifact resolves outside its repository checkout.
     #[error("artifact `{path}` resolves outside checkout `{checkout}`")]
     ArtifactOutsideCheckout {
@@ -157,14 +151,6 @@ pub enum ApplicationError {
         path: PathBuf,
         /// Canonical checkout root.
         checkout: PathBuf,
-    },
-    /// Repository discovery exceeded its deterministic file budget.
-    #[error("repository `{repository}` contains more than {maximum} discoverable files")]
-    ArtifactInventoryLimit {
-        /// Repository alias.
-        repository: String,
-        /// Non-overridable file budget.
-        maximum: usize,
     },
     /// Persistent storage failed.
     #[error(transparent)]
@@ -218,6 +204,7 @@ pub const fn application_exit_code(error: &ApplicationError) -> ExitCode {
         ApplicationError::WorkspaceNotFound(_) => ExitCode::NotFound,
         ApplicationError::WorkspaceAlreadyExists(_) => ExitCode::Conflict,
         ApplicationError::Manifest(_)
+        | ApplicationError::ExtractionLimit(_)
         | ApplicationError::HttpExtraction(_)
         | ApplicationError::PackageManifest(_)
         | ApplicationError::GeneratedClient(_)
@@ -238,9 +225,8 @@ pub const fn application_exit_code(error: &ApplicationError) -> ExitCode {
         | ApplicationError::ManifestEdit(_)
         | ApplicationError::UnknownOverrideRepository(_)
         | ApplicationError::WorkspaceNameMismatch { .. }
-        | ApplicationError::ArtifactTooLarge { .. }
         | ApplicationError::ArtifactOutsideCheckout { .. }
-        | ApplicationError::ArtifactInventoryLimit { .. }
+        | ApplicationError::PartialScanBudgetChanged
         | ApplicationError::Trace(_)
         | ApplicationError::Community(_)
         | ApplicationError::Query(_)
@@ -384,6 +370,8 @@ pub struct ConfigReport {
     pub schema_version: u8,
     /// Workspace name from the manifest.
     pub workspace: String,
+    /// Effective global extraction safety limits, including applied defaults.
+    pub extraction_budgets: ExtractionBudgets,
     /// Effective per-repository configuration in alias order.
     pub repositories: Vec<RepositoryConfigReport>,
 }
@@ -661,6 +649,7 @@ struct WorkspaceContext {
     manifest: WorkspaceManifest,
     registry: RegisteredWorkspace,
     repository_configs: BTreeMap<String, EffectiveRepositoryConfig>,
+    extraction_budgets: ExtractionBudgets,
 }
 
 /// Resolves and reports native discovery exclusions without opening a graph database.
@@ -705,6 +694,7 @@ pub fn show_config(
     Ok(ConfigReport {
         schema_version: 1,
         workspace: context.manifest.name,
+        extraction_budgets: context.extraction_budgets,
         repositories,
     })
 }
@@ -1095,6 +1085,14 @@ pub fn scan_workspace_with_overrides(
             Err(StoreError::CurrentSnapshotMissing(_)) => Vec::new(),
             Err(error) => return Err(error.into()),
         };
+    let budget_fingerprint = context.extraction_budgets.fingerprint();
+    if overrides.repository.is_some()
+        && previous_extractor_batches
+            .iter()
+            .any(|batch| batch.budget_fingerprint != budget_fingerprint)
+    {
+        return Err(ApplicationError::PartialScanBudgetChanged);
+    }
     let previous_graph = match store.load_current_graph(&context.manifest.name) {
         Ok(graph) => graph,
         Err(StoreError::CurrentSnapshotMissing(_)) => (Vec::new(), Vec::new()),
@@ -1115,7 +1113,11 @@ pub fn scan_workspace_with_overrides(
     let plan = plan_incremental_scan(&previous_fingerprints, &fingerprints);
     if previous_manifest_matches
         && !plan.has_changes()
-        && focused_batch_cache_complete(&fingerprints, &previous_extractor_batches)
+        && focused_batch_cache_complete(
+            &fingerprints,
+            &previous_extractor_batches,
+            &context.extraction_budgets,
+        )
         && previous_communities.is_some()
         && !overrides.codegraph
     {
@@ -3153,6 +3155,8 @@ fn load_workspace_context(
 ) -> Result<WorkspaceContext, ApplicationError> {
     let manifest_source = read_file(config_path)?;
     let manifest = parse_manifest(&manifest_source)?;
+    let extraction_budgets = ExtractionBudgets::resolve(manifest.extraction_budgets.as_ref())
+        .map_err(ManifestError::from)?;
     for alias in overrides.repo_openapi.keys() {
         if !manifest.repos.contains_key(alias) {
             return Err(ApplicationError::UnknownOverrideRepository(alias.clone()));
@@ -3180,23 +3184,24 @@ fn load_workspace_context(
         manifest,
         registry,
         repository_configs,
+        extraction_budgets,
     })
 }
 
 fn focused_batch_cache_complete(
     fingerprints: &[ArtifactFingerprint],
     stored: &[StoredExtractorBatch],
+    budgets: &ExtractionBudgets,
 ) -> bool {
+    let budget_fingerprint = budgets.fingerprint();
     fingerprints
         .iter()
         .filter(|fingerprint| focused_extractor(&fingerprint.extractor))
         .all(|fingerprint| {
             stored.iter().any(|batch| {
                 batch.source == *fingerprint
-                    && matches!(
-                        batch.extractor_version.as_str(),
-                        FOCUSED_EXTRACTOR_VERSION | LOSSY_FOCUSED_EXTRACTOR_VERSION
-                    )
+                    && batch.extractor_version == EXTRACTION_CONTRACT_VERSION
+                    && batch.budget_fingerprint == budget_fingerprint
             })
         })
 }
@@ -3206,7 +3211,7 @@ fn stored_batch_degradations(
 ) -> Result<Vec<String>, ApplicationError> {
     let mut degradations = Vec::new();
     for batch in stored {
-        if batch.extractor_version == LOSSY_FOCUSED_EXTRACTOR_VERSION {
+        if batch.source_was_lossy {
             degradations.push(format!("{} contains invalid UTF-8 and was decoded lossily; extracted evidence is incomplete", batch.source.path.display));
         }
         if batch.source.extractor == "code-system-graph.data.artifact" {
@@ -3297,10 +3302,8 @@ fn assemble_focused_batches(
         let reusable = previous_by_key.get(&key).copied().filter(|batch| {
             planned_actions.get(&key) == Some(&BatchAction::Reuse)
                 && batch.source.content_hash == fingerprint.content_hash
-                && matches!(
-                    batch.extractor_version.as_str(),
-                    FOCUSED_EXTRACTOR_VERSION | LOSSY_FOCUSED_EXTRACTOR_VERSION
-                )
+                && batch.extractor_version == EXTRACTION_CONTRACT_VERSION
+                && batch.budget_fingerprint == context.extraction_budgets.fingerprint()
         });
         if let Some(stored) = reusable {
             stored_batches.push(stored.clone());
@@ -3335,7 +3338,12 @@ fn assemble_focused_batches(
         })?;
         let relative_path = native_relative_path(&fingerprint.path);
         let artifact_path = checkout.join(&relative_path);
-        let (source, source_was_lossy) = read_source_file(&artifact_path)?;
+        let mut tracker = ExtractionTracker::new(
+            &fingerprint.path.display,
+            &fingerprint.extractor,
+            &context.extraction_budgets,
+        );
+        let (source, source_was_lossy) = read_source_file(&artifact_path, &mut tracker)?;
         if source_was_lossy {
             degradations.push(format!("{} contains invalid UTF-8 and was decoded lossily; extracted evidence is incomplete", fingerprint.path.display));
         }
@@ -3344,6 +3352,7 @@ fn assemble_focused_batches(
                 source_syntax_language(&fingerprint.extractor),
                 &portable_path(&fingerprint.path.display),
                 &source,
+                &mut tracker,
             )?;
             let mut observations = match fingerprint.extractor.as_str() {
                 "code-system-graph.source.javascript" => parse_javascript_source_at_path(
@@ -3384,28 +3393,38 @@ fn assemble_focused_batches(
                 }
             }
             let batch = ExtractorBatch::new(fingerprint.clone(), observations);
-            stored_batches.push(store_extractor_batch(&batch, FOCUSED_EXTRACTOR_VERSION)?);
+            stored_batches.push(store_extractor_batch(
+                &batch,
+                &mut tracker,
+                source_was_lossy,
+            )?);
             source_batches.push(batch);
         } else if fingerprint.extractor == "code-system-graph.packages" {
             let portable_path = portable_path(&fingerprint.path.display);
-            let manifest = extract_package_manifest(&portable_path, &source)?;
+            let manifest =
+                extract_package_manifest_with_tracker(&portable_path, &source, &mut tracker)?;
             let batch = ExtractorBatch::new(fingerprint.clone(), vec![manifest]);
-            stored_batches.push(store_extractor_batch(&batch, FOCUSED_EXTRACTOR_VERSION)?);
+            stored_batches.push(store_extractor_batch(
+                &batch,
+                &mut tracker,
+                source_was_lossy,
+            )?);
             package_batches.push(batch);
         } else if graphql_extractor(&fingerprint.extractor) {
             let portable_path = portable_path(&fingerprint.path.display);
             let document = match fingerprint.extractor.as_str() {
                 "code-system-graph.graphql.document" => {
-                    extract_graphql_document(&portable_path, &source)?
+                    extract_graphql_document_with_tracker(&portable_path, &source, &mut tracker)?
                 }
                 "code-system-graph.graphql.persisted" => GraphqlDocument {
                     source_path: portable_path.clone(),
                     types: Vec::new(),
                     operations: Vec::new(),
                     fragments: Vec::new(),
-                    persisted_operations: extract_graphql_persisted_operations(
+                    persisted_operations: extract_graphql_persisted_operations_with_tracker(
                         &portable_path,
                         &source,
+                        &mut tracker,
                     )?,
                     resolvers: Vec::new(),
                     federation: Vec::new(),
@@ -3418,14 +3437,19 @@ fn assemble_focused_batches(
                             "unsupported GraphQL source language for `{portable_path}`"
                         ))
                     })?;
-                    let mut document = parse_graphql_source(language, &source);
+                    let mut document =
+                        parse_graphql_source_with_tracker(language, &source, &mut tracker)?;
                     document.source_path = portable_path;
                     document
                 }
                 _ => unreachable!("graphql extractor classification must be exhaustive"),
             };
             let batch = ExtractorBatch::new(fingerprint.clone(), vec![document]);
-            stored_batches.push(store_extractor_batch(&batch, FOCUSED_EXTRACTOR_VERSION)?);
+            stored_batches.push(store_extractor_batch(
+                &batch,
+                &mut tracker,
+                source_was_lossy,
+            )?);
             graphql_batches.push(batch);
         } else if event_extractor(&fingerprint.extractor) {
             let portable_path = portable_path(&fingerprint.path.display);
@@ -3442,12 +3466,20 @@ fn assemble_focused_batches(
                 document
             };
             let batch = ExtractorBatch::new(fingerprint.clone(), vec![document]);
-            stored_batches.push(store_extractor_batch(&batch, FOCUSED_EXTRACTOR_VERSION)?);
+            stored_batches.push(store_extractor_batch(
+                &batch,
+                &mut tracker,
+                source_was_lossy,
+            )?);
             event_batches.push(batch);
         } else if protobuf_extractor(&fingerprint.extractor) {
             let portable_path = portable_path(&fingerprint.path.display);
             let document = if fingerprint.extractor == "code-system-graph.protobuf" {
-                ProtobufDocument::File(Box::new(extract_protobuf(&portable_path, &source)?))
+                ProtobufDocument::File(Box::new(extract_protobuf_with_tracker(
+                    &portable_path,
+                    &source,
+                    &mut tracker,
+                )?))
             } else {
                 let language = source_language_for_path(&relative_path).ok_or_else(|| {
                     ApplicationError::InvalidSourceObservation(format!(
@@ -3461,7 +3493,11 @@ fn assemble_focused_batches(
                 ))
             };
             let batch = ExtractorBatch::new(fingerprint.clone(), vec![document]);
-            stored_batches.push(store_extractor_batch(&batch, FOCUSED_EXTRACTOR_VERSION)?);
+            stored_batches.push(store_extractor_batch(
+                &batch,
+                &mut tracker,
+                source_was_lossy,
+            )?);
             protobuf_batches.push(batch);
         } else if data_extractor(&fingerprint.extractor) {
             let portable_path = portable_path(&fingerprint.path.display);
@@ -3483,7 +3519,11 @@ fn assemble_focused_batches(
                 ));
             }
             let batch = ExtractorBatch::new(fingerprint.clone(), vec![document]);
-            stored_batches.push(store_extractor_batch(&batch, FOCUSED_EXTRACTOR_VERSION)?);
+            stored_batches.push(store_extractor_batch(
+                &batch,
+                &mut tracker,
+                source_was_lossy,
+            )?);
             data_batches.push(batch);
         } else if infrastructure_extractor(&fingerprint.extractor) {
             let portable_path = portable_path(&fingerprint.path.display);
@@ -3501,7 +3541,11 @@ fn assemble_focused_batches(
                 _ => unreachable!("infrastructure extractor classification must be exhaustive"),
             };
             let batch = ExtractorBatch::new(fingerprint.clone(), vec![document]);
-            stored_batches.push(store_extractor_batch(&batch, FOCUSED_EXTRACTOR_VERSION)?);
+            stored_batches.push(store_extractor_batch(
+                &batch,
+                &mut tracker,
+                source_was_lossy,
+            )?);
             infrastructure_batches.push(batch);
         } else if documentation_extractor(&fingerprint.extractor) {
             let portable_path = portable_path(&fingerprint.path.display);
@@ -3518,26 +3562,33 @@ fn assemble_focused_batches(
                 _ => unreachable!("documentation extractor classification must be exhaustive"),
             };
             let batch = ExtractorBatch::new(fingerprint.clone(), vec![document]);
-            stored_batches.push(store_extractor_batch(&batch, FOCUSED_EXTRACTOR_VERSION)?);
+            stored_batches.push(store_extractor_batch(
+                &batch,
+                &mut tracker,
+                source_was_lossy,
+            )?);
             documentation_batches.push(batch);
         } else if fingerprint.extractor == "code-system-graph.config.safe" {
             let portable_path = portable_path(&fingerprint.path.display);
             let document = extract_safe_config(&portable_path, &source)?;
             let batch = ExtractorBatch::new(fingerprint.clone(), vec![document]);
-            stored_batches.push(store_extractor_batch(&batch, FOCUSED_EXTRACTOR_VERSION)?);
+            stored_batches.push(store_extractor_batch(
+                &batch,
+                &mut tracker,
+                source_was_lossy,
+            )?);
             config_batches.push(batch);
         } else {
             let portable_path = portable_path(&fingerprint.path.display);
-            let metadata = extract_generated_client_metadata(&portable_path, &source)?;
+            let metadata =
+                extract_generated_client_metadata(&portable_path, &source, &mut tracker)?;
             let batch = ExtractorBatch::new(fingerprint.clone(), metadata);
-            stored_batches.push(store_extractor_batch(&batch, FOCUSED_EXTRACTOR_VERSION)?);
+            stored_batches.push(store_extractor_batch(
+                &batch,
+                &mut tracker,
+                source_was_lossy,
+            )?);
             generated_client_batches.push(batch);
-        }
-        if source_was_lossy {
-            let stored = stored_batches
-                .last_mut()
-                .expect("new extraction must persist one batch");
-            LOSSY_FOCUSED_EXTRACTOR_VERSION.clone_into(&mut stored.extractor_version);
         }
     }
     source_batches.sort_by_key(ExtractorBatch::key);
@@ -4670,7 +4721,12 @@ fn extract_boundaries(context: &WorkspaceContext) -> Result<Vec<HttpBoundary>, A
             .ok_or_else(|| ApplicationError::RegistryAliasMissing(alias.clone()))?;
         for openapi in &effective.openapi {
             let openapi_path = repository_path.join(openapi);
-            let openapi_source = read_file(&openapi_path)?;
+            let mut tracker = ExtractionTracker::new(
+                openapi,
+                "code-system-graph.http.openapi",
+                &context.extraction_budgets,
+            );
+            let (openapi_source, _) = read_source_file(&openapi_path, &mut tracker)?;
             boundaries.extend(extract_openapi(&registered.id, openapi, &openapi_source)?);
         }
     }
@@ -4806,6 +4862,7 @@ fn discover_artifact_fingerprints(
                 checkout_path,
                 Path::new(openapi),
                 "code-system-graph.http.openapi",
+                &context.extraction_budgets,
             )?;
             fingerprints.insert(artifact_key(&fingerprint), fingerprint);
         }
@@ -4815,6 +4872,7 @@ fn discover_artifact_fingerprints(
                 checkout_path,
                 Path::new(&consumer.source),
                 "code-system-graph.http.declared",
+                &context.extraction_budgets,
             )?;
             fingerprints.insert(artifact_key(&fingerprint), fingerprint);
         }
@@ -4824,6 +4882,7 @@ fn discover_artifact_fingerprints(
                 checkout_path,
                 Path::new(&test.path),
                 "code-system-graph.tests.declared",
+                &context.extraction_budgets,
             )?;
             fingerprints.insert(artifact_key(&fingerprint), fingerprint);
         }
@@ -4833,14 +4892,20 @@ fn discover_artifact_fingerprints(
                 checkout_path,
                 Path::new(&implementation.path),
                 "code-system-graph.implementations.declared",
+                &context.extraction_budgets,
             )?;
             fingerprints.insert(artifact_key(&fingerprint), fingerprint);
         }
         for (relative_path, extractor) in
-            discover_focused_artifacts(checkout_path, alias, &effective.ignore_policy)?
+            discover_focused_artifacts(checkout_path, &effective.ignore_policy)?
         {
-            let fingerprint =
-                fingerprint_artifact(repository, checkout_path, &relative_path, extractor)?;
+            let fingerprint = fingerprint_artifact(
+                repository,
+                checkout_path,
+                &relative_path,
+                extractor,
+                &context.extraction_budgets,
+            )?;
             fingerprints.insert(artifact_key(&fingerprint), fingerprint);
         }
     }
@@ -4849,7 +4914,6 @@ fn discover_artifact_fingerprints(
 
 fn discover_focused_artifacts(
     checkout_path: &Path,
-    repository_alias: &str,
     ignore_policy: &IgnorePolicy,
 ) -> Result<Vec<(PathBuf, &'static str)>, ApplicationError> {
     let mut pending = vec![checkout_path.to_path_buf()];
@@ -4891,12 +4955,6 @@ fn discover_focused_artifacts(
             }
             for extractor in focused_extractors_for_path(&path) {
                 discovered.push((relative.to_path_buf(), extractor));
-                if discovered.len() > MAX_DISCOVERED_FILES_PER_REPOSITORY {
-                    return Err(ApplicationError::ArtifactInventoryLimit {
-                        repository: repository_alias.to_owned(),
-                        maximum: MAX_DISCOVERED_FILES_PER_REPOSITORY,
-                    });
-                }
             }
         }
     }
@@ -5109,6 +5167,7 @@ fn fingerprint_artifact(
     checkout_path: &Path,
     relative_path: &Path,
     extractor: &str,
+    budgets: &ExtractionBudgets,
 ) -> Result<ArtifactFingerprint, ApplicationError> {
     let configured_path = checkout_path.join(relative_path);
     let canonical_path =
@@ -5127,17 +5186,8 @@ fn fingerprint_artifact(
             path: canonical_path.clone(),
             source,
         })?;
-    if metadata.len() > MAX_ARTIFACT_BYTES {
-        return Err(ApplicationError::ArtifactTooLarge {
-            path: canonical_path,
-            size: metadata.len(),
-            maximum: MAX_ARTIFACT_BYTES,
-        });
-    }
-    let content = std::fs::read(&canonical_path).map_err(|source| ApplicationError::ReadFile {
-        path: canonical_path.clone(),
-        source,
-    })?;
+    let mut tracker = ExtractionTracker::new(relative_path.to_string_lossy(), extractor, budgets);
+    let content = read_bounded_bytes(&canonical_path, &mut tracker)?;
     let relative = canonical_path.strip_prefix(checkout_path).map_err(|_| {
         ApplicationError::ArtifactOutsideCheckout {
             path: canonical_path.clone(),
@@ -5215,7 +5265,7 @@ fn extractor_runs(
                 repo_id: RepoId::new(repo_id),
                 checkout_id: CheckoutId::new(checkout_id),
                 extractor_version: if focused_extractor(&extractor) {
-                    FOCUSED_EXTRACTOR_VERSION.to_owned()
+                    EXTRACTION_CONTRACT_VERSION.to_owned()
                 } else {
                     env!("CARGO_PKG_VERSION").to_owned()
                 },
@@ -5241,13 +5291,38 @@ fn read_file(path: &Path) -> Result<String, ApplicationError> {
     })
 }
 
-fn read_source_file(path: &Path) -> Result<(String, bool), ApplicationError> {
-    let bytes = std::fs::read(path).map_err(|source| ApplicationError::ReadFile {
-        path: path.to_path_buf(),
-        source,
-    })?;
+fn read_source_file(
+    path: &Path,
+    tracker: &mut ExtractionTracker,
+) -> Result<(String, bool), ApplicationError> {
+    let bytes = read_bounded_bytes(path, tracker)?;
     match String::from_utf8(bytes) {
         Ok(source) => Ok((source, false)),
         Err(error) => Ok((String::from_utf8_lossy(error.as_bytes()).into_owned(), true)),
     }
+}
+
+fn read_bounded_bytes(
+    path: &Path,
+    tracker: &mut ExtractionTracker,
+) -> Result<Vec<u8>, ApplicationError> {
+    let metadata = std::fs::metadata(path).map_err(|source| ApplicationError::ReadFile {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    tracker.check_input_bytes(metadata.len())?;
+    let file = std::fs::File::open(path).map_err(|source| ApplicationError::ReadFile {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let maximum = tracker.budgets().max_input_bytes_per_artifact;
+    let mut bytes = Vec::new();
+    file.take(maximum.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|source| ApplicationError::ReadFile {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    tracker.check_input_bytes(u64::try_from(bytes.len()).unwrap_or(u64::MAX))?;
+    Ok(bytes)
 }

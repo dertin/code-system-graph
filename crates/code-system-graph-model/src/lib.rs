@@ -245,6 +245,10 @@ pub struct StoredExtractorBatch {
     pub source: ArtifactFingerprint,
     /// Semantic version of the extractor payload schema.
     pub extractor_version: String,
+    /// Canonical fingerprint of the effective extraction budgets.
+    pub budget_fingerprint: String,
+    /// Whether invalid UTF-8 input bytes were decoded lossily for text extraction.
+    pub source_was_lossy: bool,
     /// Deterministic number of observations encoded in the payload.
     pub output_count: u64,
     /// UTF-8 JSON payload encoded as bytes for bounded, lossless persistence.

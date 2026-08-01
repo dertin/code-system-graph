@@ -3,6 +3,7 @@
 use std::process::Command;
 
 use code_system_graph::ConfigReport;
+use code_system_graph_core::ExtractionBudgets;
 
 #[test]
 fn config_show_should_report_defaults_and_selected_repository_rules() -> anyhow::Result<()> {
@@ -33,6 +34,7 @@ fn config_show_should_report_defaults_and_selected_repository_rules() -> anyhow:
     );
     assert_eq!(report.schema_version, 1);
     assert_eq!(report.workspace, "configuration");
+    assert_eq!(report.extraction_budgets, ExtractionBudgets::default());
     assert_eq!(report.repositories.len(), 1);
     assert_eq!(report.repositories[0].alias, "api");
     assert_eq!(
@@ -63,6 +65,58 @@ fn config_show_should_report_defaults_and_selected_repository_rules() -> anyhow:
             .iter()
             .any(|pattern| pattern.contains(".code-system-graph"))
     );
+    Ok(())
+}
+
+#[test]
+fn config_show_should_report_effective_budget_overrides() -> anyhow::Result<()> {
+    let temporary = tempfile::tempdir()?;
+    std::fs::create_dir_all(temporary.path().join("api"))?;
+    let manifest = temporary.path().join("code-system-graph.yaml");
+    std::fs::write(
+        &manifest,
+        "version: 1\nname: configuration\nextractionBudgets:\n  maxInputBytesPerArtifact: 1234\nrepos:\n  api:\n    path: api\n",
+    )?;
+
+    let output = Command::new(env!("CARGO_BIN_EXE_csgraph"))
+        .args(["config", "show", "--config"])
+        .arg(&manifest)
+        .output()?;
+    let report: ConfigReport = serde_json::from_slice(&output.stdout)?;
+
+    assert!(output.status.success());
+    assert_eq!(
+        report.extraction_budgets.max_input_bytes_per_artifact,
+        1_234
+    );
+    assert_eq!(
+        report.extraction_budgets.max_ast_depth_per_artifact,
+        ExtractionBudgets::default().max_ast_depth_per_artifact
+    );
+    Ok(())
+}
+
+#[test]
+fn repository_local_config_should_reject_extraction_budget_overrides() -> anyhow::Result<()> {
+    let temporary = tempfile::tempdir()?;
+    std::fs::create_dir_all(temporary.path().join("api"))?;
+    std::fs::write(
+        temporary.path().join("api/.code-system-graph.yaml"),
+        "version: 1\nextractionBudgets:\n  maxInputBytesPerArtifact: 999999999\n",
+    )?;
+    let manifest = temporary.path().join("code-system-graph.yaml");
+    std::fs::write(
+        &manifest,
+        "version: 1\nname: configuration\nrepos:\n  api:\n    path: api\n",
+    )?;
+
+    let output = Command::new(env!("CARGO_BIN_EXE_csgraph"))
+        .args(["config", "show", "--config"])
+        .arg(&manifest)
+        .output()?;
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("extractionBudgets"));
     Ok(())
 }
 

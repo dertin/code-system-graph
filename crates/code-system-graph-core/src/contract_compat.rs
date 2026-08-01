@@ -1254,7 +1254,7 @@ fn compare_graphql_field(
     for argument in &after.arguments {
         if !before_arguments.contains(argument.name.as_str())
             && type_is_non_null(&argument.type_ref)
-            && argument.default_value.is_none()
+            && argument.default_value_kind.is_none()
         {
             findings.push(graphql_breaking(
                 "graphql.required_argument_added",

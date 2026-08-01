@@ -226,6 +226,8 @@ CREATE TABLE IF NOT EXISTS extractor_batches (
     content_hash TEXT NOT NULL,
     size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
     extractor_version TEXT NOT NULL,
+    budget_fingerprint TEXT NOT NULL,
+    source_was_lossy INTEGER NOT NULL CHECK (source_was_lossy IN (0, 1)),
     output_count INTEGER NOT NULL CHECK (output_count >= 0),
     payload BLOB NOT NULL CHECK (json_valid(CAST(payload AS TEXT))),
     PRIMARY KEY (

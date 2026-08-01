@@ -5,7 +5,7 @@ use code_system_graph_model::ArtifactFingerprint;
 use semver::Version;
 
 use crate::{
-    BoundaryExtractor, DiscoverContext, DiscoveredInput, ExtractInput, ExtractionBatch, ExtractionCompleteness, ExtractionReport, ExtractorError, FileDescriptor, SourceEpistemicStatus, SourceSyntaxLanguage, extract_generated_client_metadata, extract_package_manifest, fingerprint_content, inspect_source_syntax, parse_go_source, parse_java_source, parse_javascript_source_at_path, parse_python_source, parse_rust_source, parse_typescript_source_at_path
+    BoundaryExtractor, DiscoverContext, DiscoveredInput, ExtractInput, ExtractionBatch, ExtractionCompleteness, ExtractionReport, ExtractorError, FileDescriptor, SourceEpistemicStatus, SourceSyntaxLanguage, extract_generated_client_metadata, extract_package_manifest_with_tracker, fingerprint_content, inspect_source_syntax, parse_go_source, parse_java_source, parse_javascript_source_at_path, parse_python_source, parse_rust_source, parse_typescript_source_at_path
 };
 
 /// Focused source language selected for HTTP and test extraction.
@@ -100,6 +100,11 @@ impl BoundaryExtractor for FocusedSourceExtractor {
             syntax_language(self.language),
             &input.file.path.display,
             source,
+            &mut crate::ExtractionTracker::new(
+                &input.file.path.display,
+                self.id(),
+                &crate::ExtractionBudgets::default(),
+            ),
         )
         .map_err(|error| ExtractorError::InvalidInput(error.to_string()))?;
         let observations = match self.language {
@@ -222,8 +227,16 @@ impl BoundaryExtractor for GeneratedClientMetadataExtractor {
         let started = Instant::now();
         let fingerprint = fingerprint_content(input.content)?;
         let source = std::str::from_utf8(input.content)?;
-        let metadata = extract_generated_client_metadata(&input.file.path.display, source)
-            .map_err(|error| ExtractorError::InvalidInput(error.to_string()))?;
+        let metadata = extract_generated_client_metadata(
+            &input.file.path.display,
+            source,
+            &mut crate::ExtractionTracker::new(
+                &input.file.path.display,
+                self.id(),
+                &crate::ExtractionBudgets::default(),
+            ),
+        )
+        .map_err(|error| ExtractorError::InvalidInput(error.to_string()))?;
         let output_count = u64::try_from(metadata.len())
             .map_err(|_| ExtractorError::InvalidInput("too many metadata facts".to_owned()))?;
         Ok(ExtractionBatch {
@@ -299,8 +312,16 @@ impl BoundaryExtractor for PackageManifestExtractor {
         let started = Instant::now();
         let fingerprint = fingerprint_content(input.content)?;
         let source = std::str::from_utf8(input.content)?;
-        let manifest = extract_package_manifest(&input.file.path.display, source)
-            .map_err(|error| ExtractorError::InvalidInput(error.to_string()))?;
+        let manifest = extract_package_manifest_with_tracker(
+            &input.file.path.display,
+            source,
+            &mut crate::ExtractionTracker::new(
+                &input.file.path.display,
+                self.id(),
+                &crate::ExtractionBudgets::default(),
+            ),
+        )
+        .map_err(|error| ExtractorError::InvalidInput(error.to_string()))?;
         let output_count = [
             manifest.packages.len(),
             manifest.dependencies.len(),

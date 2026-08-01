@@ -7,7 +7,9 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use thiserror::Error;
 
-use crate::IncrementalPlan;
+use crate::{
+    EXTRACTION_CONTRACT_VERSION, ExtractionLimitExceeded, ExtractionTracker, IncrementalPlan
+};
 
 /// Stable identity of one extractor input within a concrete checkout.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -144,6 +146,9 @@ pub enum BatchPlanError {
     /// A source-owned output payload could not be serialized or decoded.
     #[error("invalid extractor batch payload: {0}")]
     InvalidPayload(String),
+    /// One per-invocation extraction resource exceeded its configured maximum.
+    #[error(transparent)]
+    ExtractionLimit(#[from] ExtractionLimitExceeded),
     /// An output count cannot be represented by the persistence model.
     #[error("extractor batch output count exceeds the supported range")]
     OutputCountOverflow,
@@ -164,15 +169,25 @@ pub enum BatchPlanError {
 /// Returns [`BatchPlanError`] when outputs cannot be encoded or their count exceeds `u64`.
 pub fn store_extractor_batch<T: Serialize>(
     batch: &ExtractorBatch<T>,
-    extractor_version: impl Into<String>,
+    tracker: &mut ExtractionTracker,
+    source_was_lossy: bool,
 ) -> Result<code_system_graph_model::StoredExtractorBatch, BatchPlanError> {
+    tracker.ensure_observations(u64::try_from(batch.outputs.len()).unwrap_or(u64::MAX))?;
+    let mut writer = tracker.bounded_json_writer();
+    if let Err(error) = serde_json::to_writer(&mut writer, &batch.outputs) {
+        if let Some(limit) = tracker.output_limit_error(&writer) {
+            return Err(limit.into());
+        }
+        return Err(BatchPlanError::InvalidPayload(error.to_string()));
+    }
     Ok(code_system_graph_model::StoredExtractorBatch {
         source: batch.source.clone(),
-        extractor_version: extractor_version.into(),
+        extractor_version: EXTRACTION_CONTRACT_VERSION.to_owned(),
+        budget_fingerprint: tracker.budgets().fingerprint(),
+        source_was_lossy,
         output_count: u64::try_from(batch.outputs.len())
             .map_err(|_| BatchPlanError::OutputCountOverflow)?,
-        payload: serde_json::to_vec(&batch.outputs)
-            .map_err(|error| BatchPlanError::InvalidPayload(error.to_string()))?,
+        payload: writer.into_inner(),
     })
 }
 
@@ -302,7 +317,11 @@ mod tests {
     use super::{
         BatchAction, BatchPlanError, ExtractorBatch, affected_link_keys, load_extractor_batch, plan_extractor_batches, store_extractor_batch
     };
-    use crate::IncrementalPlan;
+    use crate::{ExtractionBudgets, ExtractionTracker, IncrementalPlan};
+
+    fn tracker() -> ExtractionTracker {
+        ExtractionTracker::new("src/routes.rs", "test", &ExtractionBudgets::default())
+    }
 
     fn path(value: &str) -> NativePath {
         NativePath {
@@ -396,7 +415,7 @@ mod tests {
     #[test]
     fn stored_batch_should_round_trip_without_source_text() {
         let original = batch("src/routes.rs", "hash", &["GET:/orders", "POST:/orders"]);
-        let result = store_extractor_batch(&original, "1.0.0")
+        let result = store_extractor_batch(&original, &mut tracker(), false)
             .and_then(|stored| load_extractor_batch::<String>(&stored));
 
         assert_eq!(result, Ok(original));
@@ -405,10 +424,11 @@ mod tests {
     #[test]
     fn stored_batch_should_reject_inconsistent_output_count() {
         let original = batch("src/routes.rs", "hash", &["GET:/orders"]);
-        let result = store_extractor_batch(&original, "1.0.0").and_then(|mut stored| {
-            stored.output_count = 2;
-            load_extractor_batch::<String>(&stored)
-        });
+        let result =
+            store_extractor_batch(&original, &mut tracker(), false).and_then(|mut stored| {
+                stored.output_count = 2;
+                load_extractor_batch::<String>(&stored)
+            });
 
         assert!(matches!(
             result,

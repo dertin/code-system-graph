@@ -13,6 +13,7 @@ mod data_contracts;
 mod documents;
 mod event_graph;
 mod events;
+mod extraction_budget;
 mod extraction_graph;
 mod extractor;
 mod generated_client;
@@ -77,6 +78,9 @@ pub use event_graph::{EventGraphFacts, event_documents_to_graph};
 pub use events::{
     DeliverySemantics, EventBroker, EventDocument, EventEvidenceLine, EventExtractionError, EventObservation, EventRole, EventSchemaDefinition, EventSchemaField, extract_asyncapi, parse_event_source
 };
+pub use extraction_budget::{
+    BoundedJsonWriter, EXTRACTION_CONTRACT_VERSION, ExtractionBudgetOverrides, ExtractionBudgets, ExtractionClock, ExtractionLimitExceeded, ExtractionResource, ExtractionTracker, InvalidExtractionBudget
+};
 pub use extraction_graph::{ExtractionGraphFacts, documents_to_graph};
 pub use extractor::{
     BoundaryExtractor, ContentFingerprint, DiscoverContext, DiscoveredInput, ExtractInput, ExtractionBatch, ExtractionCompleteness, ExtractionReport, ExtractorError, FileDescriptor, MAX_EXTRACTOR_INPUT_BYTES, fingerprint_content
@@ -85,7 +89,7 @@ pub use generated_client::{
     GeneratedClientError, GeneratedClientMetadata, extract_generated_client_metadata
 };
 pub use graphql_contracts::{
-    GraphqlArgumentDefinition, GraphqlDocument, GraphqlExtractionError, GraphqlFederationMetadata, GraphqlFieldDefinition, GraphqlFragment, GraphqlLineRange, GraphqlOperation, GraphqlOperationKind, GraphqlPersistedOperation, GraphqlResolver, GraphqlSelection, GraphqlTypeDefinition, GraphqlTypeKind, GraphqlTypeRef, extract_graphql_document, extract_graphql_persisted_operations, parse_graphql_source
+    GraphqlArgumentDefinition, GraphqlDocument, GraphqlExtractionError, GraphqlFederationMetadata, GraphqlFieldDefinition, GraphqlFragment, GraphqlLineRange, GraphqlLiteralKind, GraphqlOperation, GraphqlOperationKind, GraphqlPersistedOperation, GraphqlResolver, GraphqlSelection, GraphqlTypeDefinition, GraphqlTypeKind, GraphqlTypeRef, extract_graphql_document, extract_graphql_document_with_tracker, extract_graphql_persisted_operations, extract_graphql_persisted_operations_with_tracker, parse_graphql_source, parse_graphql_source_with_tracker
 };
 pub use graphql_graph::{GraphqlGraphFacts, graphql_documents_to_graph};
 pub use http::{
@@ -117,10 +121,10 @@ pub use package_graph::{
     PackageDependencyFact, PackageGraphFacts, PackageIdentity, link_registered_package_owners, package_manifest_to_graph
 };
 pub use packages::{
-    DependencyScope, LockfileMetadata, PackageCoordinate, PackageDependency, PackageEcosystem, PackageEvidenceLine, PackageManifest, PackageManifestError, PackageManifestValue, extract_package_manifest
+    DependencyScope, LockfileMetadata, PackageCoordinate, PackageDependency, PackageEcosystem, PackageEvidenceLine, PackageManifest, PackageManifestError, PackageManifestValue, extract_package_manifest, extract_package_manifest_with_tracker
 };
 pub use protobuf_contracts::{
-    ProtoEnum, ProtoEnumValue, ProtoField, ProtoFieldCardinality, ProtoFile, ProtoGeneratedMarker, ProtoGeneratedRole, ProtoMessage, ProtoRpcMethod, ProtoService, ProtoSyntax, ProtoWireType, ProtobufDocument, ProtobufExtractionError, extract_protobuf, parse_protobuf_generated_source
+    ProtoEnum, ProtoEnumValue, ProtoField, ProtoFieldCardinality, ProtoFile, ProtoGeneratedMarker, ProtoGeneratedRole, ProtoMessage, ProtoRpcMethod, ProtoService, ProtoSyntax, ProtoWireType, ProtobufDocument, ProtobufExtractionError, extract_protobuf, extract_protobuf_with_tracker, parse_protobuf_generated_source
 };
 pub use protobuf_graph::{ProtobufGraphFacts, protobuf_documents_to_graph};
 pub use provider::{

@@ -8,7 +8,7 @@ use proto_parser::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::SourceLanguage;
+use crate::{ExtractionBudgets, ExtractionLimitExceeded, ExtractionTracker, SourceLanguage};
 
 const MAX_FIELD_NUMBER: i64 = 536_870_911;
 const FIRST_RESERVED_IMPLEMENTATION_FIELD: i64 = 19_000;
@@ -305,6 +305,9 @@ pub enum ProtobufExtractionError {
         /// One-based declaration line of the duplicate.
         line: u32,
     },
+    /// Extraction exceeded one configured invocation resource.
+    #[error(transparent)]
+    LimitExceeded(#[from] ExtractionLimitExceeded),
 }
 
 /// Extracts an owned protobuf contract from a `.proto` source.
@@ -320,6 +323,26 @@ pub fn extract_protobuf(
     source_path: &str,
     input: &str,
 ) -> Result<ProtoFile, ProtobufExtractionError> {
+    let mut tracker = ExtractionTracker::new(
+        source_path,
+        "code-system-graph.protobuf",
+        &ExtractionBudgets::default(),
+    );
+    extract_protobuf_with_tracker(source_path, input, &mut tracker)
+}
+
+/// Extracts a protobuf contract using an existing per-invocation tracker.
+///
+/// # Errors
+///
+/// Returns an error for malformed input or an exhausted extraction budget.
+pub fn extract_protobuf_with_tracker(
+    source_path: &str,
+    input: &str,
+    tracker: &mut ExtractionTracker,
+) -> Result<ProtoFile, ProtobufExtractionError> {
+    tracker.check_input_bytes(u64::try_from(input.len()).unwrap_or(u64::MAX))?;
+    precheck_protobuf_depth(input, tracker)?;
     let mut parser = Parser::with_filename(input, source_path);
     let parsed = parser
         .parse()
@@ -333,7 +356,7 @@ pub fn extract_protobuf(
     let (syntax, syntax_line) = extract_syntax(source_path, &parsed.elements)?;
     let (package, package_line) = extract_package(source_path, &parsed.elements)?;
     let package_scope = package.as_deref().unwrap_or_default();
-    let known_types = collect_type_names(&parsed.elements, package_scope);
+    let known_types = collect_type_names(&parsed.elements, package_scope, tracker)?;
     let mut imports = Vec::new();
     let mut public_imports = Vec::new();
     let mut weak_imports = Vec::new();
@@ -343,6 +366,7 @@ pub fn extract_protobuf(
     let mut services = Vec::new();
 
     for element in &parsed.elements {
+        tracker.charge_work(1)?;
         match element {
             Element::Import(import) => {
                 imports.push(import.filename.clone());
@@ -360,12 +384,14 @@ pub fn extract_protobuf(
                 message,
                 package_scope,
                 &known_types,
+                1,
+                tracker,
             )?),
             Element::Enum(enumeration) => {
-                enums.push(extract_enum(enumeration, package_scope));
+                enums.push(extract_enum(enumeration, package_scope, 1, tracker)?);
             }
             Element::Service(service) => {
-                services.push(extract_service(service, package_scope));
+                services.push(extract_service(service, package_scope, 1, tracker)?);
             }
             _ => {}
         }
@@ -391,7 +417,7 @@ pub fn extract_protobuf(
         public_imports,
         weak_imports,
         import_lines,
-        options: options_from_elements(&parsed.elements),
+        options: options_from_elements(&parsed.elements, 1, tracker)?,
         messages,
         enums,
         services,
@@ -545,14 +571,27 @@ struct KnownTypes {
     messages: BTreeSet<String>,
 }
 
-fn collect_type_names(elements: &[Element], scope: &str) -> KnownTypes {
+fn collect_type_names(
+    elements: &[Element],
+    scope: &str,
+    tracker: &mut ExtractionTracker,
+) -> Result<KnownTypes, ExtractionLimitExceeded> {
     let mut known = KnownTypes::default();
-    collect_type_names_into(elements, scope, &mut known);
-    known
+    // The top-level file is not a recursive message scope. Its first message is depth one.
+    collect_type_names_into(elements, scope, &mut known, 0, tracker)?;
+    Ok(known)
 }
 
-fn collect_type_names_into(elements: &[Element], scope: &str, known: &mut KnownTypes) {
+fn collect_type_names_into(
+    elements: &[Element],
+    scope: &str,
+    known: &mut KnownTypes,
+    depth: u64,
+    tracker: &mut ExtractionTracker,
+) -> Result<(), ExtractionLimitExceeded> {
+    tracker.check_structural_depth(depth)?;
     for element in elements {
+        tracker.charge_work(1)?;
         match element {
             Element::Enum(enumeration) => {
                 known.enums.insert(qualified_name(scope, &enumeration.name));
@@ -560,16 +599,29 @@ fn collect_type_names_into(elements: &[Element], scope: &str, known: &mut KnownT
             Element::Message(message) => {
                 let message_scope = qualified_name(scope, &message.name);
                 known.messages.insert(message_scope.clone());
-                collect_type_names_into(&message.elements, &message_scope, known);
+                collect_type_names_into(
+                    &message.elements,
+                    &message_scope,
+                    known,
+                    depth.saturating_add(1),
+                    tracker,
+                )?;
             }
             Element::Group(group) => {
                 let group_scope = qualified_name(scope, &group.name);
                 known.messages.insert(group_scope.clone());
-                collect_type_names_into(&group.elements, &group_scope, known);
+                collect_type_names_into(
+                    &group.elements,
+                    &group_scope,
+                    known,
+                    depth.saturating_add(1),
+                    tracker,
+                )?;
             }
             _ => {}
         }
     }
+    Ok(())
 }
 
 fn extract_message(
@@ -577,6 +629,8 @@ fn extract_message(
     message: &Message,
     parent_scope: &str,
     known_types: &KnownTypes,
+    depth: u64,
+    tracker: &mut ExtractionTracker,
 ) -> Result<ProtoMessage, ProtobufExtractionError> {
     extract_message_elements(
         source_path,
@@ -586,6 +640,8 @@ fn extract_message(
         &message.elements,
         parent_scope,
         known_types,
+        depth,
+        tracker,
     )
 }
 
@@ -594,6 +650,8 @@ fn extract_group_message(
     group: &Group,
     parent_scope: &str,
     known_types: &KnownTypes,
+    depth: u64,
+    tracker: &mut ExtractionTracker,
 ) -> Result<ProtoMessage, ProtobufExtractionError> {
     extract_message_elements(
         source_path,
@@ -603,12 +661,18 @@ fn extract_group_message(
         &group.elements,
         parent_scope,
         known_types,
+        depth,
+        tracker,
     )
 }
 
 #[expect(
     clippy::too_many_lines,
     reason = "One traversal keeps message fields, nesting, options, and reservations consistent"
+)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "The parser message context and shared budget tracker are independent inputs"
 )]
 fn extract_message_elements(
     source_path: &str,
@@ -618,7 +682,10 @@ fn extract_message_elements(
     elements: &[Element],
     parent_scope: &str,
     known_types: &KnownTypes,
+    depth: u64,
+    tracker: &mut ExtractionTracker,
 ) -> Result<ProtoMessage, ProtobufExtractionError> {
+    tracker.check_structural_depth(depth)?;
     let full_name = qualified_name(parent_scope, name);
     let mut fields = Vec::new();
     let mut messages = Vec::new();
@@ -627,6 +694,7 @@ fn extract_message_elements(
     let mut reserved_names = Vec::new();
 
     for element in elements {
+        tracker.charge_work(1)?;
         match element {
             Element::NormalField(field) => fields.push(field_from_common(
                 source_path,
@@ -636,6 +704,8 @@ fn extract_message_elements(
                 None,
                 &full_name,
                 known_types,
+                depth,
+                tracker,
             )?),
             Element::MapField(field) => fields.push(field_from_common(
                 source_path,
@@ -645,6 +715,8 @@ fn extract_message_elements(
                 Some(&field.key_type),
                 &full_name,
                 known_types,
+                depth,
+                tracker,
             )?),
             Element::Oneof(oneof) => {
                 for child in &oneof.elements {
@@ -657,6 +729,8 @@ fn extract_message_elements(
                             None,
                             &full_name,
                             known_types,
+                            depth,
+                            tracker,
                         )?);
                     }
                 }
@@ -667,6 +741,8 @@ fn extract_message_elements(
                     nested,
                     &full_name,
                     known_types,
+                    depth.saturating_add(1),
+                    tracker,
                 )?);
             }
             Element::Group(group) => {
@@ -693,9 +769,16 @@ fn extract_message_elements(
                     group,
                     &full_name,
                     known_types,
+                    depth.saturating_add(1),
+                    tracker,
                 )?);
             }
-            Element::Enum(enumeration) => enums.push(extract_enum(enumeration, &full_name)),
+            Element::Enum(enumeration) => enums.push(extract_enum(
+                enumeration,
+                &full_name,
+                depth.saturating_add(1),
+                tracker,
+            )?),
             Element::Reserved(reserved) => {
                 reserved_numbers.extend(
                     reserved
@@ -730,12 +813,16 @@ fn extract_message_elements(
         enums,
         reserved_numbers,
         reserved_names,
-        options: options_from_elements(elements),
+        options: options_from_elements(elements, depth, tracker)?,
         is_extension,
         line: source_line(line),
     })
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "The parser field shape and shared budget tracker are independent inputs"
+)]
 fn field_from_common(
     source_path: &str,
     field: &FieldCommon,
@@ -744,7 +831,10 @@ fn field_from_common(
     map_key_type: Option<&str>,
     message_scope: &str,
     known_types: &KnownTypes,
+    depth: u64,
+    tracker: &mut ExtractionTracker,
 ) -> Result<ProtoField, ProtobufExtractionError> {
+    tracker.check_structural_depth(depth)?;
     validate_field_number(
         source_path,
         &field.name,
@@ -769,7 +859,7 @@ fn field_from_common(
         oneof: oneof.map(str::to_owned),
         map_key_type: map_key_type.map(str::to_owned),
         map_value_type,
-        options: relevant_options(&field.options),
+        options: relevant_options(&field.options, depth, tracker)?,
         line: source_line(field.position.line),
     })
 }
@@ -822,16 +912,23 @@ fn validate_unique_fields(
     Ok(())
 }
 
-fn extract_enum(enumeration: &Enum, parent_scope: &str) -> ProtoEnum {
+fn extract_enum(
+    enumeration: &Enum,
+    parent_scope: &str,
+    depth: u64,
+    tracker: &mut ExtractionTracker,
+) -> Result<ProtoEnum, ProtobufExtractionError> {
+    tracker.check_structural_depth(depth)?;
     let mut values = Vec::new();
     let mut reserved_numbers = Vec::new();
     let mut reserved_names = Vec::new();
     for element in &enumeration.elements {
+        tracker.charge_work(1)?;
         match element {
             Element::EnumField(value) => values.push(ProtoEnumValue {
                 name: value.name.clone(),
                 number: value.integer,
-                options: options_from_elements(&value.elements),
+                options: options_from_elements(&value.elements, depth, tracker)?,
                 line: source_line(value.position.line),
             }),
             Element::Reserved(reserved) => {
@@ -854,26 +951,31 @@ fn extract_enum(enumeration: &Enum, parent_scope: &str) -> ProtoEnum {
     values.dedup_by(|left, right| left.number == right.number && left.name == right.name);
     sort_dedup(&mut reserved_numbers);
     sort_dedup(&mut reserved_names);
-    ProtoEnum {
+    Ok(ProtoEnum {
         name: enumeration.name.clone(),
         full_name: qualified_name(parent_scope, &enumeration.name),
         values,
         reserved_numbers,
         reserved_names,
-        options: options_from_elements(&enumeration.elements),
+        options: options_from_elements(&enumeration.elements, depth, tracker)?,
         line: source_line(enumeration.position.line),
-    }
+    })
 }
 
-fn extract_service(service: &Service, package: &str) -> ProtoService {
-    let mut methods = service
-        .elements
-        .iter()
-        .filter_map(|element| match element {
-            Element::Rpc(rpc) => Some(extract_rpc(rpc)),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
+fn extract_service(
+    service: &Service,
+    package: &str,
+    depth: u64,
+    tracker: &mut ExtractionTracker,
+) -> Result<ProtoService, ProtobufExtractionError> {
+    tracker.check_structural_depth(depth)?;
+    let mut methods = Vec::new();
+    for element in &service.elements {
+        tracker.charge_work(1)?;
+        if let Element::Rpc(rpc) = element {
+            methods.push(extract_rpc(rpc, depth.saturating_add(1), tracker)?);
+        }
+    }
     methods.sort_by(|left, right| {
         left.name
             .cmp(&right.name)
@@ -881,25 +983,30 @@ fn extract_service(service: &Service, package: &str) -> ProtoService {
             .then_with(|| left.response_type.cmp(&right.response_type))
     });
     methods.dedup();
-    ProtoService {
+    Ok(ProtoService {
         name: service.name.clone(),
         full_name: qualified_name(package, &service.name),
         methods,
-        options: options_from_elements(&service.elements),
+        options: options_from_elements(&service.elements, depth, tracker)?,
         line: source_line(service.position.line),
-    }
+    })
 }
 
-fn extract_rpc(rpc: &Rpc) -> ProtoRpcMethod {
-    ProtoRpcMethod {
+fn extract_rpc(
+    rpc: &Rpc,
+    depth: u64,
+    tracker: &mut ExtractionTracker,
+) -> Result<ProtoRpcMethod, ProtobufExtractionError> {
+    tracker.check_structural_depth(depth)?;
+    Ok(ProtoRpcMethod {
         name: rpc.name.clone(),
         request_type: rpc.request_type.clone(),
         response_type: rpc.returns_type.clone(),
         client_streaming: rpc.streams_request,
         server_streaming: rpc.streams_returns,
-        options: options_from_elements(&rpc.elements),
+        options: options_from_elements(&rpc.elements, depth, tracker)?,
         line: source_line(rpc.position.line),
-    }
+    })
 }
 
 fn cardinality(optional: bool, required: bool, repeated: bool) -> ProtoFieldCardinality {
@@ -947,24 +1054,43 @@ fn resolves_type(type_name: &str, message_scope: &str, names: &BTreeSet<String>)
     names.contains(type_name)
 }
 
-fn options_from_elements(elements: &[Element]) -> BTreeMap<String, String> {
-    elements
-        .iter()
-        .filter_map(|element| match element {
-            Element::Option(option) if is_relevant_option(&option.name) => {
-                Some((option.name.clone(), literal_value(&option.constant)))
-            }
-            _ => None,
-        })
-        .collect()
+fn options_from_elements(
+    elements: &[Element],
+    depth: u64,
+    tracker: &mut ExtractionTracker,
+) -> Result<BTreeMap<String, String>, ExtractionLimitExceeded> {
+    let mut options = BTreeMap::new();
+    for element in elements {
+        if let Element::Option(option) = element
+            && is_relevant_option(&option.name)
+        {
+            tracker.charge_work(1)?;
+            options.insert(
+                option.name.clone(),
+                literal_value(&option.constant, depth.saturating_add(1), tracker)?,
+            );
+        }
+    }
+    Ok(options)
 }
 
-fn relevant_options(options: &[ProtoOption]) -> BTreeMap<String, String> {
-    options
+fn relevant_options(
+    source: &[ProtoOption],
+    depth: u64,
+    tracker: &mut ExtractionTracker,
+) -> Result<BTreeMap<String, String>, ExtractionLimitExceeded> {
+    let mut options = BTreeMap::new();
+    for option in source
         .iter()
         .filter(|option| is_relevant_option(&option.name))
-        .map(|option| (option.name.clone(), literal_value(&option.constant)))
-        .collect()
+    {
+        tracker.charge_work(1)?;
+        options.insert(
+            option.name.clone(),
+            literal_value(&option.constant, depth.saturating_add(1), tracker)?,
+        );
+    }
+    Ok(options)
 }
 
 fn is_relevant_option(name: &str) -> bool {
@@ -996,27 +1122,82 @@ fn is_relevant_option(name: &str) -> bool {
         || name.contains("grpc.gateway")
 }
 
-fn literal_value(literal: &Literal) -> String {
+fn literal_value(
+    literal: &Literal,
+    depth: u64,
+    tracker: &mut ExtractionTracker,
+) -> Result<String, ExtractionLimitExceeded> {
+    tracker.check_structural_depth(depth)?;
+    tracker.charge_work(1)?;
     if let Some(array) = &literal.array {
-        return format!(
-            "[{}]",
-            array
-                .iter()
-                .map(literal_value)
-                .collect::<Vec<_>>()
-                .join(",")
-        );
+        let mut values = Vec::new();
+        for value in array {
+            values.push(literal_value(value, depth.saturating_add(1), tracker)?);
+        }
+        let value = format!("[{}]", values.join(","));
+        tracker.charge_string(&value)?;
+        return Ok(value);
     }
     if let Some(map) = &literal.ordered_map {
-        return format!(
-            "{{{}}}",
-            map.iter()
-                .map(|entry| format!("{}:{}", entry.name, literal_value(&entry.literal)))
-                .collect::<Vec<_>>()
-                .join(",")
-        );
+        let mut values = Vec::new();
+        for entry in map {
+            let nested = literal_value(&entry.literal, depth.saturating_add(1), tracker)?;
+            values.push(format!("{}:{nested}", entry.name));
+        }
+        let value = format!("{{{}}}", values.join(","));
+        tracker.charge_string(&value)?;
+        return Ok(value);
     }
-    literal.source.clone()
+    tracker.charge_string(&literal.source)?;
+    Ok(literal.source.clone())
+}
+
+fn precheck_protobuf_depth(
+    input: &str,
+    tracker: &ExtractionTracker,
+) -> Result<(), ExtractionLimitExceeded> {
+    let bytes = input.as_bytes();
+    let mut cursor = 0;
+    let mut depth = 0_u64;
+    let mut quote = None;
+    let mut escaped = false;
+    let mut line_comment = false;
+    let mut block_comment = false;
+    while cursor < bytes.len() {
+        let byte = bytes[cursor];
+        let next = bytes.get(cursor.saturating_add(1)).copied();
+        if line_comment {
+            line_comment = byte != b'\n';
+        } else if block_comment {
+            if byte == b'*' && next == Some(b'/') {
+                block_comment = false;
+                cursor = cursor.saturating_add(1);
+            }
+        } else if let Some(delimiter) = quote {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == delimiter {
+                quote = None;
+            }
+        } else if byte == b'/' && next == Some(b'/') {
+            line_comment = true;
+            cursor = cursor.saturating_add(1);
+        } else if byte == b'/' && next == Some(b'*') {
+            block_comment = true;
+            cursor = cursor.saturating_add(1);
+        } else if matches!(byte, b'"' | b'\'') {
+            quote = Some(byte);
+        } else if matches!(byte, b'{' | b'[' | b'(') {
+            depth = depth.saturating_add(1);
+            tracker.check_structural_depth(depth)?;
+        } else if matches!(byte, b'}' | b']' | b')') {
+            depth = depth.saturating_sub(1);
+        }
+        cursor = cursor.saturating_add(1);
+    }
+    Ok(())
 }
 
 fn qualified_name(scope: &str, name: &str) -> String {
@@ -1124,10 +1305,13 @@ fn sort_dedup<T: Ord>(values: &mut Vec<T>) {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
+    use std::process::Command;
+
     use super::{
-        ProtoFieldCardinality, ProtoSyntax, ProtoWireType, ProtobufExtractionError, extract_protobuf, parse_protobuf_generated_source
+        ProtoFieldCardinality, ProtoSyntax, ProtoWireType, ProtobufExtractionError, extract_protobuf, extract_protobuf_with_tracker, parse_protobuf_generated_source
     };
-    use crate::SourceLanguage;
+    use crate::{ExtractionBudgets, ExtractionResource, ExtractionTracker, SourceLanguage};
 
     const COMPLETE_PROTO: &str = r#"syntax = "proto3";
 package example.v1;
@@ -1273,6 +1457,68 @@ service Greeter {
             result,
             Err(ProtobufExtractionError::InvalidFieldNumber { number: 19_000, .. })
         ));
+    }
+
+    fn nested_messages(depth: usize) -> String {
+        let mut source = String::from("syntax = \"proto3\";\n");
+        for index in 0..depth {
+            writeln!(source, "message M{index} {{").expect("String writes are infallible");
+        }
+        source.push_str("string value = 1;\n");
+        source.push_str(&"}\n".repeat(depth));
+        source
+    }
+
+    #[test]
+    fn protobuf_depth_should_accept_64_and_reject_65_before_recursive_parse() {
+        let budgets = ExtractionBudgets {
+            max_structural_depth_per_artifact: 64,
+            ..ExtractionBudgets::default()
+        };
+        let mut exact = ExtractionTracker::new("exact.proto", "protobuf", &budgets);
+        let mut above = ExtractionTracker::new("above.proto", "protobuf", &budgets);
+
+        let exact_result =
+            extract_protobuf_with_tracker("exact.proto", &nested_messages(64), &mut exact);
+        assert!(exact_result.is_ok(), "exact depth failed: {exact_result:?}");
+        assert!(matches!(
+            extract_protobuf_with_tracker("above.proto", &nested_messages(65), &mut above),
+            Err(ProtobufExtractionError::LimitExceeded(error))
+                if error.resource == ExtractionResource::StructuralDepth
+                    && error.observed == 65
+                    && error.maximum == 64
+        ));
+    }
+
+    #[test]
+    fn deeply_nested_protobuf_should_fail_cleanly_in_a_subprocess() {
+        const CHILD_ENV: &str = "CSGRAPH_PROTO_DEPTH_CHILD";
+        if std::env::var_os(CHILD_ENV).is_some() {
+            let budgets = ExtractionBudgets {
+                max_structural_depth_per_artifact: 64,
+                ..ExtractionBudgets::default()
+            };
+            let mut tracker = ExtractionTracker::new("deep.proto", "protobuf", &budgets);
+            assert!(matches!(
+                extract_protobuf_with_tracker("deep.proto", &nested_messages(20_000), &mut tracker),
+                Err(ProtobufExtractionError::LimitExceeded(_))
+            ));
+            return;
+        }
+
+        let output = Command::new(std::env::current_exe().expect("test executable should exist"))
+            .args([
+                "--exact",
+                "protobuf_contracts::tests::deeply_nested_protobuf_should_fail_cleanly_in_a_subprocess",
+            ])
+            .env(CHILD_ENV, "1")
+            .output()
+            .expect("child test should launch");
+        assert!(
+            output.status.success(),
+            "child failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]

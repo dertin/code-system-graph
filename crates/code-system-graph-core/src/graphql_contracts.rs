@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use graphql_parser::{query, schema};
 use serde::{Deserialize, Serialize};
 
-use crate::SourceLanguage;
+use crate::{ExtractionBudgets, ExtractionLimitExceeded, ExtractionTracker, SourceLanguage};
 
 /// Inclusive one-based source range supporting an extracted GraphQL fact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -48,6 +48,30 @@ pub enum GraphqlTypeKind {
     Enum,
     /// Union type.
     Union,
+}
+
+/// Non-sensitive structural category of a GraphQL literal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GraphqlLiteralKind {
+    /// Null literal.
+    Null,
+    /// Boolean literal.
+    Boolean,
+    /// Integer literal.
+    Integer,
+    /// Floating-point literal.
+    Float,
+    /// String literal without its contents.
+    String,
+    /// Enum literal without its member name.
+    Enum,
+    /// List literal without its members.
+    List,
+    /// Object literal without its fields or values.
+    Object,
+    /// Variable reference without its name.
+    Variable,
 }
 
 /// Fully owned GraphQL type reference preserving list and nullability structure.
@@ -94,8 +118,8 @@ pub struct GraphqlArgumentDefinition {
     pub name: String,
     /// Declared GraphQL type.
     pub type_ref: GraphqlTypeRef,
-    /// Canonical literal default value, when declared.
-    pub default_value: Option<String>,
+    /// Structural category of the default value, when declared.
+    pub default_value_kind: Option<GraphqlLiteralKind>,
     /// Directive names attached to the definition.
     pub directives: Vec<String>,
     /// Source evidence for the declaration.
@@ -264,8 +288,8 @@ pub struct GraphqlFederationMetadata {
     pub directive: String,
     /// Schema, type, or exact field coordinate carrying the directive.
     pub target: String,
-    /// Canonical literal directive arguments.
-    pub arguments: BTreeMap<String, String>,
+    /// Structural categories of directive arguments.
+    pub arguments: BTreeMap<String, GraphqlLiteralKind>,
     /// Source evidence for the directive.
     pub lines: GraphqlLineRange,
 }
@@ -337,6 +361,9 @@ pub enum GraphqlExtractionError {
         /// Source artifact path.
         source_path: String,
     },
+    /// Extraction exceeded one configured invocation resource.
+    #[error(transparent)]
+    LimitExceeded(#[from] ExtractionLimitExceeded),
 }
 
 /// Parses a standalone SDL or executable GraphQL document.
@@ -352,20 +379,44 @@ pub fn extract_graphql_document(
     source_path: &str,
     input: &str,
 ) -> Result<GraphqlDocument, GraphqlExtractionError> {
+    let mut tracker = ExtractionTracker::new(
+        source_path,
+        "code-system-graph.graphql.document",
+        &ExtractionBudgets::default(),
+    );
+    extract_graphql_document_with_tracker(source_path, input, &mut tracker)
+}
+
+/// Parses a standalone GraphQL document using an existing per-invocation tracker.
+///
+/// # Errors
+///
+/// Returns [`GraphqlExtractionError`] for invalid syntax or exhausted budgets.
+pub fn extract_graphql_document_with_tracker(
+    source_path: &str,
+    input: &str,
+    tracker: &mut ExtractionTracker,
+) -> Result<GraphqlDocument, GraphqlExtractionError> {
+    tracker.check_input_bytes(u64::try_from(input.len()).unwrap_or(u64::MAX))?;
+    precheck_graphql_depth(input, tracker)?;
     let schema_result = schema::parse_schema::<String>(input);
     let query_result = query::parse_query::<String>(input);
+    tracker.check_structured_time()?;
 
     match (schema_result, query_result) {
         (Ok(document), _) => {
+            charge_schema_work(&document, tracker)?;
             let mut output = GraphqlDocument::empty(source_path);
             append_schema_document(document, &mut output);
             finish_document(&mut output);
+            charge_graphql_document(&output, tracker)?;
             Ok(output)
         }
         (Err(_), Ok(document)) => {
             let mut output = GraphqlDocument::empty(source_path);
-            append_query_document(document, &mut output);
+            append_query_document(document, &mut output, tracker)?;
             finish_document(&mut output);
+            charge_graphql_document(&output, tracker)?;
             Ok(output)
         }
         (Err(schema_error), Err(query_error)) => Err(GraphqlExtractionError::InvalidGraphql {
@@ -390,6 +441,25 @@ pub fn extract_graphql_persisted_operations(
     source_path: &str,
     input: &str,
 ) -> Result<Vec<GraphqlPersistedOperation>, GraphqlExtractionError> {
+    let mut tracker = ExtractionTracker::new(
+        source_path,
+        "code-system-graph.graphql.persisted",
+        &ExtractionBudgets::default(),
+    );
+    extract_graphql_persisted_operations_with_tracker(source_path, input, &mut tracker)
+}
+
+/// Extracts persisted operations using an existing per-invocation tracker.
+///
+/// # Errors
+///
+/// Returns [`GraphqlExtractionError`] for invalid input or exhausted budgets.
+pub fn extract_graphql_persisted_operations_with_tracker(
+    source_path: &str,
+    input: &str,
+    tracker: &mut ExtractionTracker,
+) -> Result<Vec<GraphqlPersistedOperation>, GraphqlExtractionError> {
+    tracker.check_input_bytes(u64::try_from(input.len()).unwrap_or(u64::MAX))?;
     let value: serde_json::Value =
         serde_json::from_str(input).map_err(|error| GraphqlExtractionError::InvalidJson {
             source_path: source_path.to_owned(),
@@ -397,7 +467,7 @@ pub fn extract_graphql_persisted_operations(
             message: error.to_string(),
         })?;
     let mut candidates = Vec::new();
-    collect_persisted_candidates(&value, None, &mut candidates);
+    collect_persisted_candidates(&value, None, &mut candidates, 1, tracker)?;
     if candidates.is_empty() {
         return Err(GraphqlExtractionError::UnsupportedPersistedManifest {
             source_path: source_path.to_owned(),
@@ -407,7 +477,8 @@ pub fn extract_graphql_persisted_operations(
     let mut output = Vec::new();
     for candidate in candidates {
         let line = manifest_id_line(input, &candidate.id);
-        output.push(persisted_operation(source_path, candidate, line)?);
+        tracker.charge_work(1)?;
+        output.push(persisted_operation(source_path, candidate, line, tracker)?);
     }
     output.sort();
     output.dedup();
@@ -420,8 +491,33 @@ pub fn extract_graphql_persisted_operations(
 /// the returned document partial and add a warning. Resolver recognition is intentionally limited
 /// to popular declarative patterns with literal field coordinates and named implementation
 /// symbols.
-#[must_use]
-pub fn parse_graphql_source(language: SourceLanguage, input: &str) -> GraphqlDocument {
+///
+/// # Errors
+///
+/// Returns [`GraphqlExtractionError`] when a configured extraction budget is exhausted.
+pub fn parse_graphql_source(
+    language: SourceLanguage,
+    input: &str,
+) -> Result<GraphqlDocument, GraphqlExtractionError> {
+    let mut tracker = ExtractionTracker::new(
+        "<embedded>",
+        "code-system-graph.graphql.source",
+        &ExtractionBudgets::default(),
+    );
+    parse_graphql_source_with_tracker(language, input, &mut tracker)
+}
+
+/// Extracts embedded GraphQL using an existing per-invocation tracker.
+///
+/// # Errors
+///
+/// Returns an error when a configured extraction budget is exhausted.
+pub fn parse_graphql_source_with_tracker(
+    language: SourceLanguage,
+    input: &str,
+    tracker: &mut ExtractionTracker,
+) -> Result<GraphqlDocument, GraphqlExtractionError> {
+    tracker.check_input_bytes(u64::try_from(input.len()).unwrap_or(u64::MAX))?;
     let mut output = GraphqlDocument::empty("");
     let literals = embedded_graphql_literals(language, input);
     for literal in literals {
@@ -432,7 +528,9 @@ pub fn parse_graphql_source(language: SourceLanguage, input: &str) -> GraphqlDoc
                 .push(format!("dynamic_graphql_literal:{}", literal.start_line));
             continue;
         }
-        if let Ok(mut document) = extract_graphql_document("", &literal.text) {
+        tracker.charge_work(1)?;
+        if let Ok(mut document) = extract_graphql_document_with_tracker("", &literal.text, tracker)
+        {
             shift_document_lines(&mut document, literal.start_line.saturating_sub(1));
             merge_document(&mut output, document);
         } else {
@@ -443,8 +541,9 @@ pub fn parse_graphql_source(language: SourceLanguage, input: &str) -> GraphqlDoc
         }
     }
     output.resolvers = extract_resolvers(language, input);
+    tracker.charge_observation(u64::try_from(output.resolvers.len()).unwrap_or(u64::MAX))?;
     finish_document(&mut output);
-    output
+    Ok(output)
 }
 
 #[derive(Debug)]
@@ -458,23 +557,38 @@ fn collect_persisted_candidates(
     value: &serde_json::Value,
     key_hint: Option<&str>,
     output: &mut Vec<PersistedCandidate>,
-) {
+    depth: u64,
+    tracker: &mut ExtractionTracker,
+) -> Result<(), ExtractionLimitExceeded> {
+    tracker.check_structural_depth(depth)?;
+    tracker.charge_work(1)?;
     match value {
         serde_json::Value::Object(object) => {
-            if let Some(candidate) = persisted_candidate_from_object(object, key_hint) {
+            if let Some(candidate) = persisted_candidate_from_object(object, key_hint, tracker)? {
+                tracker.charge_observation(1)?;
                 output.push(candidate);
-                return;
+                return Ok(());
             }
             if let Some(operations) = object.get("operations") {
-                collect_persisted_candidates(operations, None, output);
-                return;
+                collect_persisted_candidates(
+                    operations,
+                    None,
+                    output,
+                    depth.saturating_add(1),
+                    tracker,
+                )?;
+                return Ok(());
             }
             for (key, nested) in object {
+                tracker.charge_work(1)?;
                 if is_manifest_metadata_key(key) {
                     continue;
                 }
                 match nested {
                     serde_json::Value::String(document) if looks_like_graphql(document) => {
+                        tracker.charge_identifier(key)?;
+                        tracker.charge_string(document)?;
+                        tracker.charge_observation(1)?;
                         output.push(PersistedCandidate {
                             id: key.clone(),
                             operation_name: None,
@@ -482,7 +596,13 @@ fn collect_persisted_candidates(
                         });
                     }
                     serde_json::Value::Object(_) | serde_json::Value::Array(_) => {
-                        collect_persisted_candidates(nested, Some(key), output);
+                        collect_persisted_candidates(
+                            nested,
+                            Some(key),
+                            output,
+                            depth.saturating_add(1),
+                            tracker,
+                        )?;
                     }
                     _ => {}
                 }
@@ -490,35 +610,54 @@ fn collect_persisted_candidates(
         }
         serde_json::Value::Array(values) => {
             for nested in values {
-                collect_persisted_candidates(nested, None, output);
+                collect_persisted_candidates(
+                    nested,
+                    None,
+                    output,
+                    depth.saturating_add(1),
+                    tracker,
+                )?;
             }
         }
         _ => {}
     }
+    Ok(())
 }
 
 fn persisted_candidate_from_object(
     object: &serde_json::Map<String, serde_json::Value>,
     key_hint: Option<&str>,
-) -> Option<PersistedCandidate> {
-    let id = string_property(object, &["id", "hash", "sha256Hash"])
-        .or_else(|| key_hint.map(str::to_owned))?;
+    tracker: &mut ExtractionTracker,
+) -> Result<Option<PersistedCandidate>, ExtractionLimitExceeded> {
+    let id = string_property(object, &["id", "hash", "sha256Hash"]).or(key_hint);
     let document = string_property(object, &["body", "query", "document", "text"]);
     let operation_name = string_property(object, &["name", "operationName"]);
-    (document.is_some() || operation_name.is_some()).then_some(PersistedCandidate {
-        id,
-        operation_name,
-        document,
-    })
+    let Some(id) = id else {
+        return Ok(None);
+    };
+    if document.is_none() && operation_name.is_none() {
+        return Ok(None);
+    }
+    tracker.charge_identifier(id)?;
+    if let Some(value) = document {
+        tracker.charge_string(value)?;
+    }
+    if let Some(value) = operation_name {
+        tracker.charge_identifier(value)?;
+    }
+    Ok(Some(PersistedCandidate {
+        id: id.to_owned(),
+        operation_name: operation_name.map(str::to_owned),
+        document: document.map(str::to_owned),
+    }))
 }
 
-fn string_property(
-    object: &serde_json::Map<String, serde_json::Value>,
+fn string_property<'a>(
+    object: &'a serde_json::Map<String, serde_json::Value>,
     keys: &[&str],
-) -> Option<String> {
+) -> Option<&'a str> {
     keys.iter()
         .find_map(|key| object.get(*key).and_then(serde_json::Value::as_str))
-        .map(str::to_owned)
 }
 
 fn is_manifest_metadata_key(key: &str) -> bool {
@@ -532,6 +671,7 @@ fn persisted_operation(
     source_path: &str,
     candidate: PersistedCandidate,
     line: u32,
+    tracker: &mut ExtractionTracker,
 ) -> Result<GraphqlPersistedOperation, GraphqlExtractionError> {
     let Some(document) = candidate.document else {
         return Ok(GraphqlPersistedOperation {
@@ -548,7 +688,7 @@ fn persisted_operation(
             },
         });
     };
-    let parsed = extract_graphql_document(source_path, &document)?;
+    let parsed = extract_graphql_document_with_tracker(source_path, &document, tracker)?;
     let operation =
         choose_persisted_operation(&parsed.operations, candidate.operation_name.as_deref());
     let Some(operation) = operation else {
@@ -957,7 +1097,7 @@ fn argument_definition(value: schema::InputValue<'_, String>) -> GraphqlArgument
     GraphqlArgumentDefinition {
         name: value.name,
         type_ref: schema_type_ref(&value.value_type),
-        default_value: value.default_value.as_ref().map(schema_value),
+        default_value_kind: value.default_value.as_ref().map(graphql_value_kind),
         directives: directive_names(&value.directives),
         lines: line_range(value.position.line),
     }
@@ -1027,7 +1167,7 @@ fn append_federation_directives(
         let arguments = directive
             .arguments
             .iter()
-            .map(|(name, value)| (name.clone(), schema_value(value)))
+            .map(|(name, value)| (name.clone(), graphql_value_kind(value)))
             .collect();
         output.push(GraphqlFederationMetadata {
             directive: directive.name.clone(),
@@ -1063,50 +1203,43 @@ fn is_federation_directive(name: &str) -> bool {
     )
 }
 
-fn schema_value(value: &schema::Value<'_, String>) -> String {
-    graphql_value(value)
-}
-
-fn query_value(value: &query::Value<'_, String>) -> String {
-    graphql_value(value)
-}
-
-fn graphql_value(value: &schema::Value<'_, String>) -> String {
+fn graphql_value_kind(value: &schema::Value<'_, String>) -> GraphqlLiteralKind {
     match value {
-        schema::Value::Variable(name) => format!("${name}"),
-        schema::Value::Int(number) => number
-            .as_i64()
-            .map_or_else(|| "0".to_owned(), |value| value.to_string()),
-        schema::Value::Float(number) => number.to_string(),
-        schema::Value::String(value) => {
-            serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_owned())
-        }
-        schema::Value::Boolean(value) => value.to_string(),
-        schema::Value::Null => "null".to_owned(),
-        schema::Value::Enum(value) => value.clone(),
-        schema::Value::List(values) => format!(
-            "[{}]",
-            values
-                .iter()
-                .map(graphql_value)
-                .collect::<Vec<_>>()
-                .join(",")
-        ),
-        schema::Value::Object(values) => format!(
-            "{{{}}}",
-            values
-                .iter()
-                .map(|(name, value)| format!("{name}:{}", graphql_value(value)))
-                .collect::<Vec<_>>()
-                .join(",")
-        ),
+        schema::Value::Variable(_) => GraphqlLiteralKind::Variable,
+        schema::Value::Int(_) => GraphqlLiteralKind::Integer,
+        schema::Value::Float(_) => GraphqlLiteralKind::Float,
+        schema::Value::String(_) => GraphqlLiteralKind::String,
+        schema::Value::Boolean(_) => GraphqlLiteralKind::Boolean,
+        schema::Value::Null => GraphqlLiteralKind::Null,
+        schema::Value::Enum(_) => GraphqlLiteralKind::Enum,
+        schema::Value::List(_) => GraphqlLiteralKind::List,
+        schema::Value::Object(_) => GraphqlLiteralKind::Object,
     }
 }
 
-fn append_query_document(document: query::Document<'_, String>, output: &mut GraphqlDocument) {
+#[derive(Debug, Clone, Default)]
+struct FragmentExpansion {
+    paths: BTreeSet<String>,
+    spreads: BTreeSet<String>,
+    missing: BTreeSet<String>,
+}
+
+#[derive(Debug, Clone)]
+enum FragmentMemoState {
+    Pending,
+    InProgress,
+    Completed(FragmentExpansion),
+}
+
+fn append_query_document(
+    document: query::Document<'_, String>,
+    output: &mut GraphqlDocument,
+    tracker: &mut ExtractionTracker,
+) -> Result<(), ExtractionLimitExceeded> {
     let mut operation_sources = Vec::new();
     let mut fragment_sources = BTreeMap::new();
     for definition in document.definitions {
+        tracker.charge_work(1)?;
         match definition {
             query::Definition::Operation(operation) => operation_sources.push(operation),
             query::Definition::Fragment(fragment) => {
@@ -1115,35 +1248,63 @@ fn append_query_document(document: query::Document<'_, String>, output: &mut Gra
         }
     }
 
+    let mut memo = fragment_sources
+        .keys()
+        .map(|name| (name.clone(), FragmentMemoState::Pending))
+        .collect::<BTreeMap<_, _>>();
     for fragment in fragment_sources.values() {
-        output.fragments.push(fragment_definition(fragment));
+        output.fragments.push(fragment_definition(
+            fragment,
+            &fragment_sources,
+            &mut memo,
+            tracker,
+        )?);
     }
     for operation in &operation_sources {
-        output
-            .operations
-            .push(operation_definition(operation, &fragment_sources));
+        output.operations.push(operation_definition(
+            operation,
+            &fragment_sources,
+            &mut memo,
+            tracker,
+        )?);
     }
+    Ok(())
 }
 
-fn fragment_definition(fragment: &query::FragmentDefinition<'_, String>) -> GraphqlFragment {
+fn fragment_definition(
+    fragment: &query::FragmentDefinition<'_, String>,
+    fragments: &BTreeMap<String, query::FragmentDefinition<'_, String>>,
+    memo: &mut BTreeMap<String, FragmentMemoState>,
+    tracker: &mut ExtractionTracker,
+) -> Result<GraphqlFragment, ExtractionLimitExceeded> {
     let mut selections = Vec::new();
     let mut spreads = Vec::new();
-    append_selections(&fragment.selection_set, None, &mut selections, &mut spreads);
+    append_selections(
+        &fragment.selection_set,
+        None,
+        &mut selections,
+        &mut spreads,
+        1,
+        tracker,
+    )?;
+    let expansion = expand_fragment(&fragment.name, fragments, memo, 1, tracker)?;
     let query::TypeCondition::On(type_condition) = &fragment.type_condition;
-    GraphqlFragment {
+    Ok(GraphqlFragment {
         name: fragment.name.clone(),
         type_condition: type_condition.clone(),
-        consumed_field_paths: field_paths(&selections),
+        consumed_field_paths: expansion.paths.into_iter().collect(),
         selections: sorted_unique(selections),
-        fragment_spreads: sorted_strings(spreads),
+        fragment_spreads: expansion.spreads.into_iter().collect(),
         lines: line_range(fragment.position.line),
-    }
+    })
 }
 
 fn operation_definition(
     operation: &query::OperationDefinition<'_, String>,
     fragments: &BTreeMap<String, query::FragmentDefinition<'_, String>>,
-) -> GraphqlOperation {
+    memo: &mut BTreeMap<String, FragmentMemoState>,
+    tracker: &mut ExtractionTracker,
+) -> Result<GraphqlOperation, ExtractionLimitExceeded> {
     let (kind, name, variables, selection_set, line) = match operation {
         query::OperationDefinition::SelectionSet(selection_set) => (
             GraphqlOperationKind::Query,
@@ -1176,34 +1337,31 @@ fn operation_definition(
     };
     let mut selections = Vec::new();
     let mut direct_spreads = Vec::new();
-    append_selections(selection_set, None, &mut selections, &mut direct_spreads);
-    let mut expanded_paths = BTreeSet::new();
-    let mut all_spreads = BTreeSet::new();
-    let mut missing = BTreeSet::new();
-    collect_expanded_paths(
+    append_selections(
         selection_set,
         None,
-        fragments,
-        &mut BTreeSet::new(),
-        &mut expanded_paths,
-        &mut all_spreads,
-        &mut missing,
-    );
-    let warnings = missing
+        &mut selections,
+        &mut direct_spreads,
+        1,
+        tracker,
+    )?;
+    let expansion = expand_selection_set(selection_set, None, fragments, memo, 1, tracker)?;
+    let warnings = expansion
+        .missing
         .iter()
         .map(|name| format!("missing_fragment:{name}"))
         .collect::<Vec<_>>();
-    GraphqlOperation {
+    Ok(GraphqlOperation {
         kind,
         name,
         variables,
         selections: sorted_unique(selections),
-        consumed_field_paths: expanded_paths.into_iter().collect(),
-        fragment_spreads: all_spreads.into_iter().collect(),
-        complete: missing.is_empty(),
+        consumed_field_paths: expansion.paths.into_iter().collect(),
+        fragment_spreads: expansion.spreads.into_iter().collect(),
+        complete: expansion.missing.is_empty(),
         warnings,
         lines: line_range(line),
-    }
+    })
 }
 
 fn query_variables(
@@ -1214,7 +1372,7 @@ fn query_variables(
         .map(|variable| GraphqlArgumentDefinition {
             name: variable.name.clone(),
             type_ref: query_type_ref(&variable.var_type),
-            default_value: variable.default_value.as_ref().map(query_value),
+            default_value_kind: variable.default_value.as_ref().map(graphql_value_kind),
             directives: Vec::new(),
             lines: line_range(variable.position.line),
         })
@@ -1229,20 +1387,34 @@ fn append_selections(
     parent: Option<&str>,
     output: &mut Vec<GraphqlSelection>,
     spreads: &mut Vec<String>,
-) {
+    depth: u64,
+    tracker: &mut ExtractionTracker,
+) -> Result<(), ExtractionLimitExceeded> {
+    tracker.check_structural_depth(depth)?;
     for selection in &selection_set.items {
+        tracker.charge_work(1)?;
         match selection {
             query::Selection::Field(field) => {
+                tracker.charge_identifier(&field.name)?;
                 let path = join_field_path(parent, &field.name);
+                tracker.charge_string(&path)?;
                 output.push(GraphqlSelection::Field {
                     path: path.clone(),
                     name: field.name.clone(),
                     alias: field.alias.clone(),
                     lines: line_range(field.position.line),
                 });
-                append_selections(&field.selection_set, Some(&path), output, spreads);
+                append_selections(
+                    &field.selection_set,
+                    Some(&path),
+                    output,
+                    spreads,
+                    depth.saturating_add(1),
+                    tracker,
+                )?;
             }
             query::Selection::FragmentSpread(spread) => {
+                tracker.charge_identifier(&spread.fragment_name)?;
                 spreads.push(spread.fragment_name.clone());
                 output.push(GraphqlSelection::FragmentSpread {
                     name: spread.fragment_name.clone(),
@@ -1260,79 +1432,139 @@ fn append_selections(
                     parent_path: parent.map(str::to_owned),
                     lines: line_range(fragment.position.line),
                 });
-                append_selections(&fragment.selection_set, parent, output, spreads);
+                append_selections(
+                    &fragment.selection_set,
+                    parent,
+                    output,
+                    spreads,
+                    depth.saturating_add(1),
+                    tracker,
+                )?;
             }
         }
     }
+    Ok(())
 }
 
-fn collect_expanded_paths(
+fn expand_fragment(
+    name: &str,
+    fragments: &BTreeMap<String, query::FragmentDefinition<'_, String>>,
+    memo: &mut BTreeMap<String, FragmentMemoState>,
+    depth: u64,
+    tracker: &mut ExtractionTracker,
+) -> Result<FragmentExpansion, ExtractionLimitExceeded> {
+    tracker.check_structural_depth(depth)?;
+    tracker.charge_work(1)?;
+    match memo.get(name) {
+        Some(FragmentMemoState::Completed(expansion)) => {
+            let materializations = expansion
+                .paths
+                .len()
+                .saturating_add(expansion.spreads.len())
+                .saturating_add(expansion.missing.len());
+            tracker.charge_work(u64::try_from(materializations).unwrap_or(u64::MAX))?;
+            return Ok(expansion.clone());
+        }
+        Some(FragmentMemoState::InProgress) => {
+            return Ok(FragmentExpansion {
+                missing: [format!("cycle:{name}")].into_iter().collect(),
+                ..FragmentExpansion::default()
+            });
+        }
+        Some(FragmentMemoState::Pending) | None => {}
+    }
+    let Some(fragment) = fragments.get(name) else {
+        return Ok(FragmentExpansion {
+            missing: [name.to_owned()].into_iter().collect(),
+            ..FragmentExpansion::default()
+        });
+    };
+    memo.insert(name.to_owned(), FragmentMemoState::InProgress);
+    let expansion = expand_selection_set(
+        &fragment.selection_set,
+        None,
+        fragments,
+        memo,
+        depth.saturating_add(1),
+        tracker,
+    )?;
+    memo.insert(
+        name.to_owned(),
+        FragmentMemoState::Completed(expansion.clone()),
+    );
+    Ok(expansion)
+}
+
+fn expand_selection_set(
     selection_set: &query::SelectionSet<'_, String>,
     parent: Option<&str>,
     fragments: &BTreeMap<String, query::FragmentDefinition<'_, String>>,
-    visiting: &mut BTreeSet<String>,
-    paths: &mut BTreeSet<String>,
-    spreads: &mut BTreeSet<String>,
-    missing: &mut BTreeSet<String>,
-) {
+    memo: &mut BTreeMap<String, FragmentMemoState>,
+    depth: u64,
+    tracker: &mut ExtractionTracker,
+) -> Result<FragmentExpansion, ExtractionLimitExceeded> {
+    tracker.check_structural_depth(depth)?;
+    let mut expansion = FragmentExpansion::default();
     for selection in &selection_set.items {
+        tracker.charge_work(1)?;
         match selection {
             query::Selection::Field(field) => {
                 let path = join_field_path(parent, &field.name);
-                paths.insert(path.clone());
-                collect_expanded_paths(
+                tracker.charge_string(&path)?;
+                expansion.paths.insert(path.clone());
+                let nested = expand_selection_set(
                     &field.selection_set,
                     Some(&path),
                     fragments,
-                    visiting,
-                    paths,
-                    spreads,
-                    missing,
-                );
+                    memo,
+                    depth.saturating_add(1),
+                    tracker,
+                )?;
+                merge_expansion(&mut expansion, nested);
             }
-            query::Selection::InlineFragment(fragment) => collect_expanded_paths(
-                &fragment.selection_set,
-                parent,
-                fragments,
-                visiting,
-                paths,
-                spreads,
-                missing,
-            ),
-            query::Selection::FragmentSpread(spread) => {
-                spreads.insert(spread.fragment_name.clone());
-                let Some(fragment) = fragments.get(&spread.fragment_name) else {
-                    missing.insert(spread.fragment_name.clone());
-                    continue;
-                };
-                if !visiting.insert(spread.fragment_name.clone()) {
-                    missing.insert(format!("cycle:{}", spread.fragment_name));
-                    continue;
-                }
-                collect_expanded_paths(
+            query::Selection::InlineFragment(fragment) => {
+                let nested = expand_selection_set(
                     &fragment.selection_set,
                     parent,
                     fragments,
-                    visiting,
-                    paths,
-                    spreads,
-                    missing,
-                );
-                visiting.remove(&spread.fragment_name);
+                    memo,
+                    depth.saturating_add(1),
+                    tracker,
+                )?;
+                merge_expansion(&mut expansion, nested);
+            }
+            query::Selection::FragmentSpread(spread) => {
+                expansion.spreads.insert(spread.fragment_name.clone());
+                let cached = expand_fragment(
+                    &spread.fragment_name,
+                    fragments,
+                    memo,
+                    depth.saturating_add(1),
+                    tracker,
+                )?;
+                expansion.spreads.extend(cached.spreads);
+                expansion.missing.extend(cached.missing);
+                for relative in cached.paths {
+                    tracker.charge_work(1)?;
+                    let materialized =
+                        parent.map_or(relative.clone(), |prefix| format!("{prefix}.{relative}"));
+                    tracker.charge_string(&materialized)?;
+                    expansion.paths.insert(materialized);
+                }
             }
         }
     }
+    Ok(expansion)
+}
+
+fn merge_expansion(target: &mut FragmentExpansion, source: FragmentExpansion) {
+    target.paths.extend(source.paths);
+    target.spreads.extend(source.spreads);
+    target.missing.extend(source.missing);
 }
 
 fn join_field_path(parent: Option<&str>, field: &str) -> String {
     parent.map_or_else(|| field.to_owned(), |prefix| format!("{prefix}.{field}"))
-}
-
-fn field_paths(selections: &[GraphqlSelection]) -> Vec<String> {
-    sorted_strings(selections.iter().filter_map(|selection| match selection {
-        GraphqlSelection::Field { path, .. } => Some(path.clone()),
-        GraphqlSelection::FragmentSpread { .. } | GraphqlSelection::InlineFragment { .. } => None,
-    }))
 }
 
 #[derive(Debug)]
@@ -1507,6 +1739,264 @@ fn looks_like_graphql(value: &str) -> bool {
     ]
     .iter()
     .any(|prefix| trimmed.starts_with(prefix))
+}
+
+fn precheck_graphql_depth(
+    input: &str,
+    tracker: &ExtractionTracker,
+) -> Result<(), ExtractionLimitExceeded> {
+    let bytes = input.as_bytes();
+    let mut cursor = 0;
+    let mut depth = 0_u64;
+    let mut quoted = false;
+    let mut block_quoted = false;
+    let mut escaped = false;
+    let mut comment = false;
+    while cursor < bytes.len() {
+        if cursor % 1_024 == 0 {
+            tracker.check_structured_time()?;
+        }
+        let byte = bytes[cursor];
+        if comment {
+            comment = byte != b'\n';
+            cursor += 1;
+            continue;
+        }
+        if block_quoted {
+            if bytes.get(cursor..cursor.saturating_add(3)) == Some(b"\"\"\"") {
+                block_quoted = false;
+                cursor += 3;
+            } else {
+                cursor += 1;
+            }
+            continue;
+        }
+        if quoted {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                quoted = false;
+            }
+            cursor += 1;
+            continue;
+        }
+        if byte == b'#' {
+            comment = true;
+        } else if bytes.get(cursor..cursor.saturating_add(3)) == Some(b"\"\"\"") {
+            block_quoted = true;
+            cursor += 3;
+            continue;
+        } else if byte == b'"' {
+            quoted = true;
+        } else if matches!(byte, b'{' | b'[' | b'(') {
+            depth = depth.saturating_add(1);
+            tracker.check_structural_depth(depth)?;
+        } else if matches!(byte, b'}' | b']' | b')') {
+            depth = depth.saturating_sub(1);
+        }
+        cursor += 1;
+    }
+    Ok(())
+}
+
+fn charge_schema_work(
+    document: &schema::Document<'_, String>,
+    tracker: &mut ExtractionTracker,
+) -> Result<(), ExtractionLimitExceeded> {
+    let units = document
+        .definitions
+        .iter()
+        .fold(0_u64, |total, definition| {
+            total.saturating_add(schema_definition_work_units(definition))
+        });
+    let mut remaining = units;
+    while remaining > 0 {
+        let chunk = remaining.min(1_024);
+        tracker.charge_work(chunk)?;
+        remaining -= chunk;
+    }
+    Ok(())
+}
+
+fn schema_definition_work_units(definition: &schema::Definition<'_, String>) -> u64 {
+    let nested = match definition {
+        schema::Definition::SchemaDefinition(value) => directives_work_units(&value.directives),
+        schema::Definition::TypeDefinition(value) => type_definition_work_units(value),
+        schema::Definition::TypeExtension(value) => type_extension_work_units(value),
+        schema::Definition::DirectiveDefinition(value) => input_values_work_units(&value.arguments),
+    };
+    1_u64.saturating_add(nested)
+}
+
+fn type_definition_work_units(definition: &schema::TypeDefinition<'_, String>) -> u64 {
+    match definition {
+        schema::TypeDefinition::Scalar(value) => directives_work_units(&value.directives),
+        schema::TypeDefinition::Object(value) => composite_work_units(
+            &value.directives,
+            value.implements_interfaces.len(),
+            &value.fields,
+        ),
+        schema::TypeDefinition::Interface(value) => composite_work_units(
+            &value.directives,
+            value.implements_interfaces.len(),
+            &value.fields,
+        ),
+        schema::TypeDefinition::Union(value) => {
+            directives_work_units(&value.directives).saturating_add(usize_to_u64(value.types.len()))
+        }
+        schema::TypeDefinition::Enum(value) => directives_work_units(&value.directives)
+            .saturating_add(value.values.iter().fold(0_u64, |total, enum_value| {
+                total
+                    .saturating_add(1)
+                    .saturating_add(directives_work_units(&enum_value.directives))
+            })),
+        schema::TypeDefinition::InputObject(value) => directives_work_units(&value.directives)
+            .saturating_add(input_values_work_units(&value.fields)),
+    }
+}
+
+fn type_extension_work_units(extension: &schema::TypeExtension<'_, String>) -> u64 {
+    match extension {
+        schema::TypeExtension::Scalar(value) => directives_work_units(&value.directives),
+        schema::TypeExtension::Object(value) => composite_work_units(
+            &value.directives,
+            value.implements_interfaces.len(),
+            &value.fields,
+        ),
+        schema::TypeExtension::Interface(value) => composite_work_units(
+            &value.directives,
+            value.implements_interfaces.len(),
+            &value.fields,
+        ),
+        schema::TypeExtension::Union(value) => {
+            directives_work_units(&value.directives).saturating_add(usize_to_u64(value.types.len()))
+        }
+        schema::TypeExtension::Enum(value) => directives_work_units(&value.directives)
+            .saturating_add(value.values.iter().fold(0_u64, |total, enum_value| {
+                total
+                    .saturating_add(1)
+                    .saturating_add(directives_work_units(&enum_value.directives))
+            })),
+        schema::TypeExtension::InputObject(value) => directives_work_units(&value.directives)
+            .saturating_add(input_values_work_units(&value.fields)),
+    }
+}
+
+fn composite_work_units(
+    directives: &[schema::Directive<'_, String>],
+    implements: usize,
+    fields: &[schema::Field<'_, String>],
+) -> u64 {
+    directives_work_units(directives)
+        .saturating_add(usize_to_u64(implements))
+        .saturating_add(fields.iter().fold(0_u64, |total, field| {
+            total
+                .saturating_add(1)
+                .saturating_add(input_values_work_units(&field.arguments))
+                .saturating_add(directives_work_units(&field.directives))
+        }))
+}
+
+fn input_values_work_units(values: &[schema::InputValue<'_, String>]) -> u64 {
+    values.iter().fold(0_u64, |total, value| {
+        total
+            .saturating_add(1)
+            .saturating_add(directives_work_units(&value.directives))
+            .saturating_add(
+                value
+                    .default_value
+                    .as_ref()
+                    .map_or(0, schema_value_work_units),
+            )
+    })
+}
+
+fn directives_work_units(directives: &[schema::Directive<'_, String>]) -> u64 {
+    directives.iter().fold(0_u64, |total, directive| {
+        total
+            .saturating_add(1)
+            .saturating_add(
+                directive
+                    .arguments
+                    .iter()
+                    .fold(0_u64, |arguments, (_, value)| {
+                        arguments
+                            .saturating_add(1)
+                            .saturating_add(schema_value_work_units(value))
+                    }),
+            )
+    })
+}
+
+fn schema_value_work_units(value: &schema::Value<'_, String>) -> u64 {
+    let nested = match value {
+        schema::Value::List(values) => values.iter().fold(0_u64, |total, value| {
+            total.saturating_add(schema_value_work_units(value))
+        }),
+        schema::Value::Object(values) => values.values().fold(0_u64, |total, value| {
+            total
+                .saturating_add(1)
+                .saturating_add(schema_value_work_units(value))
+        }),
+        schema::Value::Variable(_)
+        | schema::Value::Int(_)
+        | schema::Value::Float(_)
+        | schema::Value::String(_)
+        | schema::Value::Boolean(_)
+        | schema::Value::Null
+        | schema::Value::Enum(_) => 0,
+    };
+    1_u64.saturating_add(nested)
+}
+
+fn usize_to_u64(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
+}
+
+fn charge_graphql_document(
+    document: &GraphqlDocument,
+    tracker: &mut ExtractionTracker,
+) -> Result<(), ExtractionLimitExceeded> {
+    tracker.charge_portable_path(&document.source_path)?;
+    let observations = document
+        .types
+        .len()
+        .saturating_add(document.operations.len())
+        .saturating_add(document.fragments.len())
+        .saturating_add(document.persisted_operations.len())
+        .saturating_add(document.resolvers.len())
+        .saturating_add(document.federation.len());
+    tracker.charge_observation(u64::try_from(observations).unwrap_or(u64::MAX))?;
+    for value in document
+        .types
+        .iter()
+        .map(|item| item.name.as_str())
+        .chain(document.fragments.iter().map(|item| item.name.as_str()))
+        .chain(
+            document
+                .resolvers
+                .iter()
+                .map(|item| item.coordinate.as_str()),
+        )
+    {
+        tracker.charge_identifier(value)?;
+    }
+    for path in document
+        .operations
+        .iter()
+        .flat_map(|operation| &operation.consumed_field_paths)
+        .chain(
+            document
+                .fragments
+                .iter()
+                .flat_map(|fragment| &fragment.consumed_field_paths),
+        )
+    {
+        tracker.charge_string(path)?;
+    }
+    Ok(())
 }
 
 fn extract_resolvers(language: SourceLanguage, input: &str) -> Vec<GraphqlResolver> {
@@ -2155,7 +2645,10 @@ mod tests {
             .find(|field| field.name == "friends")
             .expect("friends field should exist");
         assert_eq!(friends.type_ref.as_graphql(), "[User!]!");
-        assert_eq!(friends.arguments[0].default_value.as_deref(), Some("10"));
+        assert_eq!(
+            friends.arguments[0].default_value_kind,
+            Some(GraphqlLiteralKind::Integer)
+        );
         assert_eq!(document.federation.len(), 2);
     }
 
@@ -2181,6 +2674,89 @@ mod tests {
             vec!["user", "user.id", "user.profile", "user.profile.name"]
         );
         assert_eq!(document.operations[0].fragment_spreads, vec!["UserFields"]);
+    }
+
+    #[test]
+    fn repeated_fragment_dag_should_memoize_and_deduplicate_transitive_paths() {
+        let input = r"
+            query Viewer {
+              viewer { ...Identity ...Profile ...Identity }
+            }
+            fragment Identity on User { id ...Shared }
+            fragment Profile on User { profile { name } ...Shared }
+            fragment Shared on User { tenant { id } }
+        ";
+
+        let document = extract_graphql_document("dag.graphql", input)
+            .expect("acyclic repeated spreads should remain bounded and valid");
+
+        assert_eq!(
+            document.operations[0].consumed_field_paths,
+            vec![
+                "viewer",
+                "viewer.id",
+                "viewer.profile",
+                "viewer.profile.name",
+                "viewer.tenant",
+                "viewer.tenant.id",
+            ]
+        );
+        assert_eq!(
+            document.operations[0].fragment_spreads,
+            vec!["Identity", "Profile", "Shared"]
+        );
+    }
+
+    #[test]
+    fn fragment_cycles_and_missing_fragments_should_be_preserved_as_incomplete() {
+        let input = r"
+            query Viewer { viewer { ...A ...Missing } }
+            fragment A on User { id ...B }
+            fragment B on User { name ...A }
+        ";
+
+        let document = extract_graphql_document("cycles.graphql", input)
+            .expect("cycles are represented as incomplete facts, not recursive failure");
+        let operation = &document.operations[0];
+
+        assert!(!operation.complete);
+        assert!(
+            operation
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("Missing"))
+        );
+        assert!(
+            operation
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("cycle:A"))
+        );
+        assert_eq!(
+            operation.consumed_field_paths,
+            vec!["viewer", "viewer.id", "viewer.name"]
+        );
+    }
+
+    #[test]
+    fn literal_values_should_never_appear_in_serialized_graphql_payloads() {
+        let input = r#"
+            type User @key(fields: "top-secret-federation-field") {
+              lookup(token: String = "top-secret-default", count: Int = 8675309): String
+            }
+            input Filter { enabled: Boolean = true }
+        "#;
+
+        let document = extract_graphql_document("schema.graphql", input)
+            .expect("valid SDL should be extracted");
+        let serialized = serde_json::to_string(&document).expect("document should serialize");
+
+        assert!(!serialized.contains("top-secret-federation-field"));
+        assert!(!serialized.contains("top-secret-default"));
+        assert!(!serialized.contains("8675309"));
+        assert!(serialized.contains("default_value_kind"));
+        assert!(serialized.contains("string"));
+        assert!(serialized.contains("integer"));
     }
 
     #[test]
@@ -2278,7 +2854,8 @@ mod tests {
             };
         ";
 
-        let document = parse_graphql_source(SourceLanguage::JavaScript, input);
+        let document = parse_graphql_source(SourceLanguage::JavaScript, input)
+            .expect("bounded JavaScript extraction should succeed");
 
         assert_eq!(document.operations.len(), 1);
         assert_eq!(document.resolvers.len(), 1);
@@ -2290,7 +2867,8 @@ mod tests {
     fn marks_dynamic_javascript_graphql_literal_incomplete() {
         let input = "const operation = gql`query Viewer { viewer(id: ${id}) { id } }`;";
 
-        let document = parse_graphql_source(SourceLanguage::TypeScript, input);
+        let document = parse_graphql_source(SourceLanguage::TypeScript, input)
+            .expect("bounded TypeScript extraction should succeed");
 
         assert!(!document.complete);
         assert_eq!(document.operations.len(), 0);
@@ -2301,7 +2879,8 @@ mod tests {
     fn marks_nonliteral_graphql_call_incomplete() {
         let input = "const operation = gql(buildOperation());";
 
-        let document = parse_graphql_source(SourceLanguage::JavaScript, input);
+        let document = parse_graphql_source(SourceLanguage::JavaScript, input)
+            .expect("bounded JavaScript extraction should succeed");
 
         assert!(!document.complete);
         assert_eq!(document.warnings, vec!["dynamic_graphql_literal:1"]);
@@ -2311,7 +2890,8 @@ mod tests {
     fn extracts_go_raw_string_graphql_assignment() {
         let input = "const query = `query Viewer { viewer { id } }`";
 
-        let document = parse_graphql_source(SourceLanguage::Go, input);
+        let document = parse_graphql_source(SourceLanguage::Go, input)
+            .expect("bounded Go extraction should succeed");
 
         assert_eq!(document.operations.len(), 1);
         assert_eq!(
@@ -2324,7 +2904,8 @@ mod tests {
     fn marks_invalid_embedded_literal_incomplete() {
         let input = "operation = gql(\"query Broken { viewer(\")";
 
-        let document = parse_graphql_source(SourceLanguage::Python, input);
+        let document = parse_graphql_source(SourceLanguage::Python, input)
+            .expect("bounded Python extraction should succeed");
 
         assert!(!document.complete);
         assert_eq!(document.warnings, vec!["invalid_embedded_graphql:1"]);
@@ -2344,7 +2925,8 @@ mod tests {
                     return self.name
         "#;
 
-        let document = parse_graphql_source(SourceLanguage::Python, input);
+        let document = parse_graphql_source(SourceLanguage::Python, input)
+            .expect("bounded Python extraction should succeed");
 
         assert_eq!(document.resolvers.len(), 2);
         assert_eq!(document.resolvers[0].coordinate, "Query.viewer");
@@ -2359,7 +2941,8 @@ mod tests {
             }
         ";
 
-        let document = parse_graphql_source(SourceLanguage::Go, input);
+        let document = parse_graphql_source(SourceLanguage::Go, input)
+            .expect("bounded Go extraction should succeed");
 
         assert_eq!(document.resolvers[0].coordinate, "Query.user");
         assert_eq!(document.resolvers[0].symbol, "queryResolver.User");
@@ -2374,7 +2957,8 @@ mod tests {
             }
         "#;
 
-        let document = parse_graphql_source(SourceLanguage::Java, input);
+        let document = parse_graphql_source(SourceLanguage::Java, input)
+            .expect("bounded Java extraction should succeed");
 
         assert_eq!(document.resolvers[0].coordinate, "User.displayName");
         assert_eq!(document.resolvers[0].symbol, "UserController.displayName");
@@ -2389,7 +2973,8 @@ mod tests {
             }
         "#;
 
-        let document = parse_graphql_source(SourceLanguage::Java, input);
+        let document = parse_graphql_source(SourceLanguage::Java, input)
+            .expect("bounded Java extraction should succeed");
 
         assert_eq!(document.resolvers[0].coordinate, "Query.viewer");
         assert_eq!(document.resolvers[0].symbol, "ViewerFetcher.loadViewer");
@@ -2406,7 +2991,8 @@ mod tests {
             }
         ";
 
-        let document = parse_graphql_source(SourceLanguage::Rust, input);
+        let document = parse_graphql_source(SourceLanguage::Rust, input)
+            .expect("bounded Rust extraction should succeed");
 
         assert_eq!(document.resolvers[0].coordinate, "Query.viewer");
         assert_eq!(document.resolvers[0].symbol, "Query::viewer");
@@ -2423,7 +3009,8 @@ mod tests {
             };
         ";
 
-        let document = parse_graphql_source(SourceLanguage::TypeScript, input);
+        let document = parse_graphql_source(SourceLanguage::TypeScript, input)
+            .expect("bounded TypeScript extraction should succeed");
 
         assert!(document.resolvers.is_empty());
     }
@@ -2437,5 +3024,35 @@ mod tests {
         };
 
         assert!(serde_json::to_string(&document).is_ok());
+    }
+
+    #[test]
+    fn schema_ast_work_should_be_charged_before_materialization() {
+        let budgets = ExtractionBudgets {
+            max_work_units_per_artifact: 1,
+            ..ExtractionBudgets::default()
+        };
+        let mut tracker = ExtractionTracker::new(
+            "schema.graphql",
+            "code-system-graph.graphql.document",
+            &budgets,
+        );
+
+        let error = extract_graphql_document_with_tracker(
+            "schema.graphql",
+            "type Query { viewer: String }",
+            &mut tracker,
+        )
+        .expect_err("the schema definition and field should exceed one work unit");
+
+        assert!(matches!(
+            error,
+            GraphqlExtractionError::LimitExceeded(ExtractionLimitExceeded {
+                resource: crate::ExtractionResource::WorkUnits,
+                observed: 2,
+                maximum: 1,
+                ..
+            })
+        ));
     }
 }
