@@ -741,9 +741,17 @@ impl ServerHandler for CodeSystemGraphServer {
              source access is unavailable because CodeGraph is disabled. Administrative tools mutate \
              state only when enabled."
         };
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().enable_resources().build())
-            .with_server_info(Implementation::new("code_system_graph", env!("CARGO_PKG_VERSION")))
-            .with_instructions(instructions)
+        ServerInfo::new(
+            ServerCapabilities::builder()
+                .enable_tools()
+                .enable_resources()
+                .build(),
+        )
+        .with_server_info(Implementation::new(
+            "code_system_graph",
+            env!("CARGO_PKG_VERSION"),
+        ))
+        .with_instructions(instructions)
     }
 
     async fn list_resources(
@@ -898,10 +906,7 @@ mod tests {
 
     #[test]
     fn initialize_contract_should_align_instructions_with_advertised_tools() {
-        let disabled = CodeSystemGraphServer::new(
-            PathBuf::from("graph.db"),
-            "commerce".to_owned(),
-        );
+        let disabled = CodeSystemGraphServer::new(PathBuf::from("graph.db"), "commerce".to_owned());
         let enabled = disabled.clone().with_codegraph(true, None);
         let disabled_info = disabled.get_info();
 
