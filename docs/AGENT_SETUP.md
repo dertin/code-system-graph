@@ -180,12 +180,12 @@ Open Cursor's MCP settings and confirm that the server and its tools are enabled
 Run one explicit command for each agent and repository where routing guidance should be available:
 
 ```bash
-cd /absolute/path/to/workspace/api
+cd /absolute/path/to/workspace/orders-service
 csgraph hooks install \
   --host codex \
   --codegraph \
   --workspace commerce \
-  --repository api \
+  --repository orders-service \
   --database ../.code-system-graph/code-system-graph.db
 ```
 
@@ -227,9 +227,9 @@ settings, creates backups before changing existing files, and is safe to rerun.
 Inspect or remove it with the same target arguments:
 
 ```bash
-csgraph hooks status --host codex --codegraph --workspace commerce --repository api \
+csgraph hooks status --host codex --codegraph --workspace commerce --repository orders-service \
   --database ../.code-system-graph/code-system-graph.db
-csgraph hooks uninstall --host codex --codegraph --workspace commerce --repository api \
+csgraph hooks uninstall --host codex --codegraph --workspace commerce --repository orders-service \
   --database ../.code-system-graph/code-system-graph.db
 ```
 
