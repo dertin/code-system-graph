@@ -3,11 +3,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use code_system_graph_model::stable_id;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    ContractImplementationConfig, HttpConsumerConfig, IntegrationTestConfig, RepositoryConfig
+    ContractImplementationConfig, HttpConsumerConfig, IgnorePatternError, IgnorePolicy, IntegrationTestConfig, RepositoryConfig, validate_excludes, validate_include_defaults
 };
 
 const LOCAL_CONFIG_NAME: &str = ".code-system-graph.yaml";
@@ -15,7 +16,7 @@ const MAX_OPENAPI_DISCOVERY_DEPTH: usize = 8;
 const MAX_OPENAPI_CANDIDATES: usize = 32;
 
 /// Origin of an effective repository configuration value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ConfigSource {
     /// Explicit command-line override.
@@ -58,6 +59,8 @@ pub fn apply_openapi_override(
 /// Strict merged repository configuration after precedence resolution.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct EffectiveRepositoryConfig {
+    /// Effective automatic-discovery exclusion policy.
+    pub ignore_policy: IgnorePolicy,
     /// Selected `OpenAPI` artifacts relative to the checkout root.
     pub openapi: Vec<String>,
     /// Source that selected the `OpenAPI` artifacts.
@@ -86,6 +89,8 @@ struct RepositoryLocalConfig {
     http_consumers: Option<Vec<HttpConsumerConfig>>,
     integration_tests: Option<Vec<IntegrationTestConfig>>,
     implementations: Option<Vec<ContractImplementationConfig>>,
+    excludes: Option<Vec<String>>,
+    include_defaults: Option<Vec<String>>,
 }
 
 /// Error returned while resolving repository configuration precedence.
@@ -131,6 +136,17 @@ pub enum ConfigError {
         /// Candidate paths in deterministic order.
         candidates: Vec<String>,
     },
+    /// A repository-local discovery pattern is malformed or unsafe.
+    #[error("repository config field `{field}` in `{path}` is invalid: {source}")]
+    InvalidIgnorePattern {
+        /// Configuration path.
+        path: PathBuf,
+        /// Dot-style field location.
+        field: String,
+        /// Pattern validation failure.
+        #[source]
+        source: IgnorePatternError,
+    },
 }
 
 /// Resolves workspace, repository-local, auto-detected, and default values in that order.
@@ -163,12 +179,13 @@ pub fn resolve_repository_config(
         (None, None)
     };
 
+    let ignore_policy = resolve_ignore_policy(checkout_path, workspace, local.as_ref())?;
     let (openapi, openapi_source) = if let Some(openapi) = &workspace.openapi {
         (vec![openapi.clone()], ConfigSource::WorkspaceManifest)
     } else if let Some(openapi) = local.as_ref().and_then(|config| config.openapi.clone()) {
         (vec![openapi], ConfigSource::RepositoryLocal)
     } else {
-        let candidates = discover_openapi_candidates(checkout_path)?;
+        let candidates = discover_openapi_candidates(checkout_path, &ignore_policy)?;
         if candidates.is_empty() {
             (Vec::new(), ConfigSource::Default)
         } else {
@@ -214,9 +231,12 @@ pub fn resolve_repository_config(
          consumers={http_consumers:?};consumers_source={http_consumers_source:?};\
          tests={integration_tests:?};tests_source={integration_tests_source:?};\
          implementations={implementations:?};implementations_source={implementations_source:?};\
-         local={local_source:?}"
+         ignore_policy={};\
+         local={local_source:?}",
+        ignore_policy.fingerprint_material()
     );
     Ok(EffectiveRepositoryConfig {
+        ignore_policy,
         openapi,
         openapi_source,
         http_consumers,
@@ -229,7 +249,10 @@ pub fn resolve_repository_config(
     })
 }
 
-fn discover_openapi_candidates(root: &Path) -> Result<Vec<String>, ConfigError> {
+fn discover_openapi_candidates(
+    root: &Path,
+    ignore_policy: &IgnorePolicy,
+) -> Result<Vec<String>, ConfigError> {
     let mut pending = vec![(root.to_path_buf(), 0_usize)];
     let mut candidates = Vec::new();
     while let Some((directory, depth)) = pending.pop() {
@@ -251,21 +274,21 @@ fn discover_openapi_candidates(root: &Path) -> Result<Vec<String>, ConfigError> 
                 source,
             })?;
             let name = entry.file_name().to_string_lossy().to_string();
+            let path = entry.path();
+            let relative = path.strip_prefix(root).unwrap_or(path.as_path());
             if file_type.is_dir() {
-                if depth < MAX_OPENAPI_DISCOVERY_DEPTH && !ignored_discovery_directory(&name) {
-                    pending.push((entry.path(), depth.saturating_add(1)));
+                if depth < MAX_OPENAPI_DISCOVERY_DEPTH && !ignore_policy.excludes(relative, true) {
+                    pending.push((path, depth.saturating_add(1)));
                 }
                 continue;
             }
-            if !file_type.is_file() || !openapi_filename(&name) {
+            if !file_type.is_file()
+                || ignore_policy.excludes(relative, false)
+                || !openapi_filename(&name)
+            {
                 continue;
             }
-            let path = entry.path();
-            let relative = path
-                .strip_prefix(root)
-                .unwrap_or(path.as_path())
-                .to_string_lossy()
-                .replace('\\', "/");
+            let relative = relative.to_string_lossy().replace('\\', "/");
             candidates.push(relative);
             if candidates.len() >= MAX_OPENAPI_CANDIDATES {
                 break;
@@ -278,20 +301,6 @@ fn discover_openapi_candidates(root: &Path) -> Result<Vec<String>, ConfigError> 
     candidates.sort();
     candidates.dedup();
     Ok(candidates)
-}
-
-fn ignored_discovery_directory(name: &str) -> bool {
-    matches!(
-        name,
-        ".git"
-            | ".codegraph"
-            | ".next"
-            | ".venv"
-            | "venv"
-            | "node_modules"
-            | "target"
-            | "__pycache__"
-    )
 }
 
 fn openapi_filename(name: &str) -> bool {
@@ -401,7 +410,62 @@ fn validate_local(path: &Path, config: &RepositoryLocalConfig) -> Result<(), Con
             }
         }
     }
+    if let Some(patterns) = &config.excludes {
+        validate_excludes(patterns).map_err(|source| ConfigError::InvalidIgnorePattern {
+            path: path.to_path_buf(),
+            field: "excludes".to_owned(),
+            source,
+        })?;
+    }
+    if let Some(patterns) = &config.include_defaults {
+        validate_include_defaults(patterns).map_err(|source| {
+            ConfigError::InvalidIgnorePattern {
+                path: path.to_path_buf(),
+                field: "includeDefaults".to_owned(),
+                source,
+            }
+        })?;
+    }
     Ok(())
+}
+
+fn select_patterns(
+    workspace: Option<&Vec<String>>,
+    local: Option<&Vec<String>>,
+) -> (Vec<String>, ConfigSource) {
+    if let Some(patterns) = workspace {
+        (patterns.clone(), ConfigSource::WorkspaceManifest)
+    } else if let Some(patterns) = local {
+        (patterns.clone(), ConfigSource::RepositoryLocal)
+    } else {
+        (Vec::new(), ConfigSource::Default)
+    }
+}
+
+fn resolve_ignore_policy(
+    checkout_path: &Path,
+    workspace: &RepositoryConfig,
+    local: Option<&RepositoryLocalConfig>,
+) -> Result<IgnorePolicy, ConfigError> {
+    let (excludes, excludes_source) = select_patterns(
+        workspace.excludes.as_ref(),
+        local.and_then(|config| config.excludes.as_ref()),
+    );
+    let (include_defaults, include_defaults_source) = select_patterns(
+        workspace.include_defaults.as_ref(),
+        local.and_then(|config| config.include_defaults.as_ref()),
+    );
+    IgnorePolicy::new(
+        excludes,
+        excludes_source,
+        include_defaults,
+        include_defaults_source,
+    )
+    .map_err(|source| ConfigError::InvalidIgnorePattern {
+        path: checkout_path.to_path_buf(),
+        field: "ignorePolicy".to_owned(),
+        source,
+    })
 }
 
 #[cfg(test)]
@@ -429,6 +493,8 @@ mod tests {
             }]),
             integration_tests: None,
             implementations: None,
+            excludes: None,
+            include_defaults: None,
         };
 
         let resolved = resolve_repository_config(repository.path(), &workspace)?;
@@ -446,6 +512,73 @@ mod tests {
                 1,
                 ConfigSource::WorkspaceManifest,
             )
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn workspace_ignore_fields_should_override_repository_local_lists()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let repository = tempfile::tempdir()?;
+        fs::write(
+            repository.path().join(".code-system-graph.yaml"),
+            "version: 1\nexcludes: [local/**]\nincludeDefaults: [vendor/local/**]\n",
+        )?;
+        let workspace = RepositoryConfig {
+            path: ".".to_owned(),
+            openapi: None,
+            http_consumers: None,
+            integration_tests: None,
+            implementations: None,
+            excludes: Some(vec!["workspace/**".to_owned()]),
+            include_defaults: Some(Vec::new()),
+        };
+
+        let resolved = resolve_repository_config(repository.path(), &workspace)?;
+
+        assert_eq!(
+            (
+                resolved.ignore_policy.configured_excludes().to_vec(),
+                resolved.ignore_policy.configured_excludes_source(),
+                resolved.ignore_policy.include_defaults().to_vec(),
+                resolved.ignore_policy.include_defaults_source(),
+            ),
+            (
+                vec!["workspace/**".to_owned()],
+                ConfigSource::WorkspaceManifest,
+                Vec::new(),
+                ConfigSource::WorkspaceManifest,
+            )
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn openapi_auto_detection_should_respect_reopened_default_subtree()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let repository = tempfile::tempdir()?;
+        fs::create_dir_all(repository.path().join("vendor/internal-sdk"))?;
+        fs::create_dir_all(repository.path().join("vendor/external"))?;
+        fs::write(
+            repository.path().join("vendor/internal-sdk/openapi.yaml"),
+            "{}",
+        )?;
+        fs::write(repository.path().join("vendor/external/openapi.yaml"), "{}")?;
+        let workspace = RepositoryConfig {
+            path: ".".to_owned(),
+            openapi: None,
+            http_consumers: None,
+            integration_tests: None,
+            implementations: None,
+            excludes: None,
+            include_defaults: Some(vec!["vendor/internal-sdk/**".to_owned()]),
+        };
+
+        let resolved = resolve_repository_config(repository.path(), &workspace)?;
+
+        assert_eq!(
+            resolved.openapi,
+            vec!["vendor/internal-sdk/openapi.yaml".to_owned()]
         );
         Ok(())
     }
@@ -469,6 +602,8 @@ mod tests {
             http_consumers: None,
             integration_tests: None,
             implementations: None,
+            excludes: None,
+            include_defaults: None,
         };
 
         let resolved = resolve_repository_config(repository.path(), &workspace)?;
@@ -496,6 +631,8 @@ mod tests {
             http_consumers: None,
             integration_tests: None,
             implementations: None,
+            excludes: None,
+            include_defaults: None,
         };
 
         let result = resolve_repository_config(repository.path(), &workspace);
@@ -518,6 +655,8 @@ mod tests {
             http_consumers: None,
             integration_tests: None,
             implementations: None,
+            excludes: None,
+            include_defaults: None,
         };
 
         let result = resolve_repository_config(repository.path(), &workspace);
@@ -535,6 +674,8 @@ mod tests {
             http_consumers: None,
             integration_tests: None,
             implementations: None,
+            excludes: None,
+            include_defaults: None,
         };
         let mut resolved = resolve_repository_config(repository.path(), &workspace)?;
 

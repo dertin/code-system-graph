@@ -19,6 +19,7 @@ mod generated_client;
 mod graphql_contracts;
 mod graphql_graph;
 mod http;
+mod ignore_policy;
 mod impact;
 mod incremental;
 mod infrastructure;
@@ -89,6 +90,9 @@ pub use graphql_contracts::{
 pub use graphql_graph::{GraphqlGraphFacts, graphql_documents_to_graph};
 pub use http::{
     BoundaryRole, HttpBoundary, HttpExtractionError, extract_openapi, normalize_http_path
+};
+pub use ignore_policy::{
+    DEFAULT_EXCLUDES, IGNORE_POLICY_VERSION, IgnorePatternError, IgnorePolicy, PROTECTED_EXCLUDES, validate_excludes, validate_include_defaults
 };
 pub use impact::{
     CompatibilityInput, ContractImpact, CoverageSummary, CriticalityAssignment, CriticalityTag, EnvironmentAssignment, ImpactClassification, ImpactCompatibilityStatus, ImpactContext, ImpactDepthBucket, ImpactDirection, ImpactError, ImpactItem, ImpactOptions, ImpactPathStep, ImpactReport, ImpactRequest, ImpactTarget, LocalEnrichmentInput, LocalEnrichmentStatus, LocalImpactItem, LocalImpactSummary, RecommendedCommand, RepositoryImpact, ResolvedTarget, RiskFactor, RiskLevel, ServiceImpact, TestRecommendation, TestRecommendationSource, TruncationInfo, analyze_impact

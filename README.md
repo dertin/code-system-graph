@@ -296,6 +296,7 @@ Where is coverage incomplete or stale?
 ### Optional
 
 - explicit OpenAPI paths or manual links when automatic evidence is insufficient;
+- repository-specific `excludes` and `includeDefaults` discovery globs;
 - Git for local change, revision, and strict pre-commit analysis;
 - [CodeGraph](docs/CODEGRAPH_INTEGRATION.md) for repository-local source and symbol context;
 - GitHub or Bitbucket Cloud access for pull-request analysis;
@@ -306,6 +307,8 @@ No external database, API key, cloud account, or network connection is required 
 query, trace, impact, status, CLI, or MCP workflows.
 
 See [Configuration](docs/CONFIGURATION.md) for all manifest fields and safe defaults.
+Use `csgraph config show --config code-system-graph.yaml` to inspect configured and implicit
+discovery rules without opening a database.
 
 ## Common use cases
 

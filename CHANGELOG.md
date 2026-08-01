@@ -25,6 +25,10 @@ has been published yet.
 
 - Added strict workspace manifests, canonical repository and checkout identities, root allowlists,
   linked worktree support, and lossless native path persistence.
+- Added per-repository `excludes` and `includeDefaults` glob policies shared by native scanning,
+  OpenAPI autodetection, and watched synchronization. Protected metadata directories remain
+  excluded, default dependency and build directories can be selectively reopened, explicit
+  artifacts are retained, and policy changes invalidate incremental scan fingerprints.
 - Added atomic SQLite snapshots, online backup and restore, explicit migrations, integrity checks,
   writer locks, historical snapshots, and per-checkout freshness.
 - Added deterministic evidence-backed linking with explicit ambiguity, coverage, provenance, and
@@ -104,6 +108,9 @@ has been published yet.
   export, diagnostics, cleanup, HTTP serving, hooks, and shell completions.
 - Added deterministic JSON results, JSON/GraphML/Markdown export, structured stderr diagnostics,
   correlation IDs, and stable failure classes.
+- Added `csgraph config show` with optional repository filtering and a versioned, deterministic
+  JSON report of protected, default, configured, and effective exclusion rules without requiring
+  a database or modifying the workspace.
 - Added a read-only-by-default MCP stdio server for status, contracts, source context, trace,
   query, communities, impact, changes, and consented pull-request inspection.
 - Added bounded, source-free MCP resources and a generated public schema catalog.

@@ -31,6 +31,7 @@ require explicit confirmation.
 ```text
 csgraph scan --database <db> [--config <manifest>] [--repo <alias>] [--changed|--force]
 csgraph sync --database <db> [--config <manifest>] [--repo <alias>] [--watch]
+csgraph config show [--config <manifest>] [--repo <alias>]
 csgraph status --database <db> [--config <manifest>]
 csgraph doctor --database <db> [--config <manifest>]
 csgraph diagnostics --database <db> [--config <manifest>] --output <new-bundle.json>
@@ -40,6 +41,11 @@ csgraph backup|restore|migrate ...
 Normal scan reuses unchanged source-owned batches. `--repo` recomputes only the selected alias and
 retains the other repositories' previous batches. `--force` invalidates reuse for the selected
 scope. Doctor reports unavailable observations as unknown rather than healthy.
+
+`config show` resolves workspace and repository-local configuration without opening a database. Its
+deterministic JSON reports protected exclusions, reactivable built-in defaults, configured
+`excludes` and `includeDefaults` with their source, and the ordered effective rules. The optional
+`--repo` filter requires one exact manifest alias.
 
 `scan` and plain `sync` each perform one pass and exit. Neither command installs a watcher or
 background service. `sync` is incremental, but first runs `codegraph sync --quiet` with direct
@@ -51,9 +57,10 @@ completed pass,
 coalesces event bursts, and observes the manifest plus all declared checkout trees. It uses the
 operating system's native backend on Linux/Unix, macOS, and Windows, automatically falls back to
 polling if native watcher setup fails, and selects polling for repositories on WSL Windows mounts.
-Set `--poll-interval-ms <n>` to force polling for network or virtual filesystems. Generated `.git/`,
-`.codegraph/`, `.code-system-graph/`, dependency, and build trees are ignored to avoid feedback
-loops and unnecessary scans. Watch mode stops when the process receives Ctrl-C or otherwise exits.
+Set `--poll-interval-ms <n>` to force polling for network or virtual filesystems. The same effective
+policy reported by `config show` filters scan discovery, OpenAPI auto-detection, and watch events;
+protected generated state cannot create feedback loops. Watch mode stops when the process receives
+Ctrl-C or otherwise exits.
 
 `diagnostics` writes an explicit JSON support bundle containing the binary version, operating
 system, architecture, generation time, whether `CODE_SYSTEM_GRAPH_DEBUG=1` was requested, and the
