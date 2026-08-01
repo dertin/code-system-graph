@@ -10,6 +10,7 @@ fn scan_should_apply_excludes_reopen_defaults_and_keep_explicit_artifacts() -> a
     for directory in [
         "src",
         "coverage",
+        "generated/output",
         "vendor/internal-sdk/src",
         "vendor/external/src",
         "vendor/contracts",
@@ -19,6 +20,7 @@ fn scan_should_apply_excludes_reopen_defaults_and_keep_explicit_artifacts() -> a
     for source in [
         "src/lib.rs",
         "coverage/missed.rs",
+        "generated/output/hidden.rs",
         "vendor/internal-sdk/src/lib.rs",
         "vendor/external/src/lib.rs",
     ] {
@@ -31,7 +33,7 @@ fn scan_should_apply_excludes_reopen_defaults_and_keep_explicit_artifacts() -> a
     let manifest = temporary.path().join("code-system-graph.yaml");
     std::fs::write(
         &manifest,
-        "version: 1\nname: ignored\nrepos:\n  app:\n    path: repo\n    openapi: vendor/contracts/openapi.yaml\n    excludes:\n      - ./coverage//./**\n    includeDefaults:\n      - ./vendor//internal-sdk/./**\n",
+        "version: 1\nname: ignored\nrepos:\n  app:\n    path: repo\n    openapi: vendor/contracts/openapi.yaml\n    excludes:\n      - ./coverage//./**\n      - generated/*\n    includeDefaults:\n      - ./vendor//internal-sdk/./**\n",
     )?;
     let database = temporary.path().join("graph.db");
 
@@ -46,11 +48,12 @@ fn scan_should_apply_excludes_reopen_defaults_and_keep_explicit_artifacts() -> a
         (
             paths.contains(&"src/lib.rs".to_owned()),
             paths.contains(&"coverage/missed.rs".to_owned()),
+            paths.contains(&"generated/output/hidden.rs".to_owned()),
             paths.contains(&"vendor/internal-sdk/src/lib.rs".to_owned()),
             paths.contains(&"vendor/external/src/lib.rs".to_owned()),
             paths.contains(&"vendor/contracts/openapi.yaml".to_owned()),
         ),
-        (true, false, true, false, true)
+        (true, false, false, true, false, true)
     );
     Ok(())
 }

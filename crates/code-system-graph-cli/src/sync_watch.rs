@@ -1,5 +1,7 @@
 //! Portable filesystem watching for the `sync --watch` command.
 
+#[cfg(target_os = "linux")]
+use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
@@ -60,7 +62,6 @@ impl WatchScope {
             })
             .collect::<Vec<_>>();
         repositories.sort_by(|left, right| left.root.cmp(&right.root));
-        repositories.dedup_by(|left, right| left.root == right.root);
         Ok(Self {
             config: absolute_path(config)?,
             database: absolute_path(database)?,
@@ -82,6 +83,12 @@ impl WatchScope {
         self.repositories
             .iter()
             .any(|repository| repository.relevant(path))
+    }
+
+    fn should_watch_directory(&self, path: &Path) -> bool {
+        self.repositories
+            .iter()
+            .any(|repository| repository.should_watch_directory(path))
     }
 
     fn watch_entries(&self) -> Vec<(PathBuf, RecursiveMode)> {
@@ -324,26 +331,36 @@ fn add_watch_entries<W: Watcher>(watcher: &mut W, scope: &WatchScope) -> notify:
 
 #[cfg(target_os = "linux")]
 fn add_native_watch_entries<W: Watcher>(watcher: &mut W, scope: &WatchScope) -> notify::Result<()> {
+    let mut installed = BTreeSet::new();
     if let Some(parent) = scope.config.parent() {
         watcher.watch(parent, RecursiveMode::NonRecursive)?;
+        installed.insert(parent.to_path_buf());
     }
     let mut pending = scope
         .repositories
         .iter()
-        .map(|repository| (repository, repository.root.clone()))
+        .map(|repository| repository.root.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .rev()
         .collect::<Vec<_>>();
-    pending.sort_by(|left, right| left.1.cmp(&right.1));
-    while let Some((repository, directory)) = pending.pop() {
-        watcher.watch(&directory, RecursiveMode::NonRecursive)?;
+    let mut visited = BTreeSet::new();
+    while let Some(directory) = pending.pop() {
+        if !visited.insert(directory.clone()) {
+            continue;
+        }
+        if installed.insert(directory.clone()) {
+            watcher.watch(&directory, RecursiveMode::NonRecursive)?;
+        }
         let entries = std::fs::read_dir(&directory).map_err(notify::Error::io)?;
         for entry in entries {
             let entry = entry.map_err(notify::Error::io)?;
             let file_type = entry.file_type().map_err(notify::Error::io)?;
             if file_type.is_dir()
                 && !file_type.is_symlink()
-                && repository.should_watch_directory(&entry.path())
+                && scope.should_watch_directory(&entry.path())
             {
-                pending.push((repository, entry.path()));
+                pending.push(entry.path());
             }
         }
     }
@@ -498,6 +515,31 @@ mod tests {
             ),
             (false, true, false, true)
         );
+    }
+
+    #[test]
+    fn scope_should_preserve_policies_for_aliases_with_the_same_checkout() -> anyhow::Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let repository = temporary.path().join("repo/generated/output");
+        std::fs::create_dir_all(&repository)?;
+        let source = repository.join("lib.rs");
+        std::fs::write(&source, "pub fn observed() {}\n")?;
+        let config = temporary.path().join("code-system-graph.yaml");
+        std::fs::write(
+            &config,
+            "version: 1\nname: shared-checkout\nrepos:\n  a-restrictive:\n    path: repo\n    excludes:\n      - generated/*\n  b-permissive:\n    path: repo\n",
+        )?;
+
+        let scope = WatchScope::load(
+            &config,
+            &temporary.path().join("graph.db"),
+            &ScanOverrides::default(),
+        )?;
+
+        assert_eq!(scope.repositories.len(), 2);
+        assert!(scope.relevant_path(&source));
+        assert!(scope.should_watch_directory(&repository));
+        Ok(())
     }
 
     #[test]

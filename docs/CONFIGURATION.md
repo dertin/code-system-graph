@@ -87,6 +87,10 @@ and evaluated as `coverage/**`. A terminal `/` remains directory-specific. Absol
 traversal with `..`, patterns without a path component, malformed globs, and unsafe terminal
 characters are rejected.
 
+Ordinary patterns match both files and directories. For example, `generated/*` prunes a
+`generated/output` directory and everything below it. Add a terminal `/` only when the pattern
+must match a directory and not a file with the same repository-relative path.
+
 Built-in protected exclusions cover `.git`, `.hg`, `.svn`, `.codegraph`, and
 `.code-system-graph`. They prevent version-control metadata, local indexes, and generated graph
 state from entering discovery and cannot be re-enabled. Reactivable defaults cover common

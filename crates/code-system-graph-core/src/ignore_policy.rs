@@ -192,14 +192,19 @@ impl IgnorePolicy {
     /// Whether one repository-relative path must be omitted from automatic discovery.
     #[must_use]
     pub fn excludes(&self, relative: &Path, directory: bool) -> bool {
-        let candidate = candidate(relative, directory);
-        if self.protected_matcher.is_match(&candidate)
-            || self.configured_matcher.is_match(&candidate)
-        {
+        let candidate = candidate(relative);
+        let directory_candidate = directory.then(|| format!("{candidate}/"));
+        let matches = |matcher: &GlobSet| {
+            matcher.is_match(&candidate)
+                || directory_candidate
+                    .as_deref()
+                    .is_some_and(|candidate| matcher.is_match(candidate))
+        };
+        if matches(&self.protected_matcher) || matches(&self.configured_matcher) {
             return true;
         }
-        self.default_matcher.is_match(&candidate)
-            && !self.include_matcher.is_match(&candidate)
+        matches(&self.default_matcher)
+            && !matches(&self.include_matcher)
             && !(directory && self.may_contain_included_default(relative))
     }
 
@@ -378,19 +383,14 @@ fn include_prefixes(patterns: &[String]) -> (Vec<PathBuf>, bool) {
     (prefixes, can_match_anywhere)
 }
 
-fn candidate(path: &Path, directory: bool) -> String {
-    let mut normalized = path
-        .components()
+fn candidate(path: &Path) -> String {
+    path.components()
         .filter_map(|component| match component {
             Component::Normal(value) => Some(value.to_string_lossy()),
             _ => None,
         })
         .collect::<Vec<_>>()
-        .join("/");
-    if directory && !normalized.ends_with('/') {
-        normalized.push('/');
-    }
-    normalized
+        .join("/")
 }
 
 fn unsafe_character(character: char) -> bool {
@@ -451,6 +451,14 @@ mod tests {
         let policy = policy(&["./coverage//"], &[]);
 
         assert!(policy.excludes(Path::new("coverage"), true));
+        assert!(!policy.excludes(Path::new("coverage"), false));
+    }
+
+    #[test]
+    fn ordinary_globs_should_match_directories_without_a_terminal_separator() {
+        let policy = policy(&["generated/*"], &[]);
+
+        assert!(policy.excludes(Path::new("generated/output"), true));
     }
 
     #[test]
