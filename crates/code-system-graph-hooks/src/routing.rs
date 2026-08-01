@@ -222,17 +222,13 @@ fn restrict_file(_path: &Path) -> Result<(), HookError> {
     Ok(())
 }
 
-
 #[cfg(test)]
 mod tests {
-    use super::{RoutingIntent, guidance_for};
+    use super::{guidance_for, RoutingIntent};
 
     #[test]
     fn guidance_should_follow_codegraph_policy() {
-        for intent in [
-            RoutingIntent::LocalRepository,
-            RoutingIntent::Federated,
-        ] {
+        for intent in [RoutingIntent::LocalRepository, RoutingIntent::Federated] {
             let native = guidance_for(intent, false).expect("native guidance");
             let enriched = guidance_for(intent, true).expect("CodeGraph guidance");
 
