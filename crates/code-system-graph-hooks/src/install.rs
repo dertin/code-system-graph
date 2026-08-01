@@ -106,8 +106,7 @@ pub fn status(request: &InstallRequest) -> Result<HookStatus, HookError> {
     let installed_state = read_install_state(&state_path)?;
     let policy = installed_state
         .as_ref()
-        .map(|state| state.codegraph_enabled)
-        .unwrap_or(request.codegraph_enabled);
+        .map_or(request.codegraph_enabled, |state| state.codegraph_enabled);
     let runtime = request.code_system_graph_binary.with_file_name(format!(
         "code-system-graph-hooks{}",
         std::env::consts::EXE_SUFFIX
