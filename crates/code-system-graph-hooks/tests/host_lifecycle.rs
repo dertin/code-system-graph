@@ -11,6 +11,7 @@ fn request(root: &std::path::Path, host: HostKind) -> InstallRequest {
         database: root.join(".code-system-graph/code-system-graph.db"),
         workspace: "acceptance".to_owned(),
         repository: "service".to_owned(),
+        codegraph_enabled: false,
     }
 }
 
@@ -100,6 +101,8 @@ fn hook_runtime_should_emit_host_context_without_echoing_prompt()
             "claude-code",
             "--root",
             temporary.path().to_string_lossy().as_ref(),
+            "--codegraph-enabled",
+            "false",
             "--marker",
             "code-system-graph-hooks:v1",
         ])
