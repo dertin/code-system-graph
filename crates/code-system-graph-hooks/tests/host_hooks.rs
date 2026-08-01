@@ -89,6 +89,47 @@ fn every_host_install_is_surgical_idempotent_and_uninstallable() -> Result<(), B
     Ok(())
 }
 
+#[test]
+fn every_host_reinstalls_changed_codegraph_policy() -> Result<(), Box<dyn Error>> {
+    for &host in HOSTS {
+        let fixture = Fixture::new(host)?;
+        let native = fixture.request(HookMode::Advisory);
+        install(&native)?;
+        let host_file = host_file(fixture.root(), host);
+        let native_content = fs::read_to_string(&host_file)?;
+        if matches!(
+            host,
+            HostKind::ClaudeCode | HostKind::Codex | HostKind::Gemini
+        ) {
+            assert!(native_content.contains("--codegraph-enabled false"));
+        } else {
+            assert!(!native_content.contains("explore"));
+        }
+
+        let enriched = InstallRequest {
+            codegraph_enabled: true,
+            ..native.clone()
+        };
+        assert!(
+            install(&enriched)?.changed,
+            "policy change did not update {host:?}"
+        );
+        assert!(status(&enriched)?.installed);
+        assert!(!status(&native)?.installed);
+
+        let enriched_content = fs::read_to_string(&host_file)?;
+        if matches!(
+            host,
+            HostKind::ClaudeCode | HostKind::Codex | HostKind::Gemini
+        ) {
+            assert!(enriched_content.contains("--codegraph-enabled true"));
+        } else {
+            assert!(enriched_content.contains("explore"));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(unix)]
 #[test]
 fn every_host_state_is_restrictive_and_strict_gate_fails_closed() -> Result<(), Box<dyn Error>> {
@@ -144,6 +185,7 @@ fn every_host_routes_with_ttl_without_persisting_prompt_source() -> Result<(), B
             host,
             root: fixture.root().to_path_buf(),
             event: json!({"session_id": "session-1", "prompt": prompt}),
+            codegraph_enabled: false,
             ttl_seconds: 300,
         };
         let first = route(&request)?;
@@ -181,6 +223,8 @@ fn every_host_runtime_fails_open_on_invalid_input() -> Result<(), Box<dyn Error>
                 host.as_str(),
                 "--root",
                 &root,
+                "--codegraph-enabled",
+                "false",
                 "--marker",
                 "code-system-graph-hooks:v1",
             ])
@@ -238,6 +282,7 @@ impl Fixture {
             database: self.root().join("mesh.sqlite"),
             workspace: "workspace-a".to_owned(),
             repository: "service-a".to_owned(),
+            codegraph_enabled: false,
         }
     }
 
