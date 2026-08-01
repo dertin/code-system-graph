@@ -248,7 +248,7 @@ Before committing local work:
 
 ```bash
 csgraph changes \
-  --repo api \
+  --repo repo_1 \
   --scope staged \
   --workspace my-project \
   --database .code-system-graph/code-system-graph.db
