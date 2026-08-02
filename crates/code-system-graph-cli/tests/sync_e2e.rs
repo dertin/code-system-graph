@@ -108,7 +108,7 @@ fn assert_watch_sync(extra_arguments: &[&str]) -> anyhow::Result<()> {
         let initial = receiver
             .recv_timeout(Duration::from_secs(15))
             .context("watch did not publish its initial pass")??;
-        let initial: SyncSummary = serde_json::from_str(&initial)?;
+        let initial = watch_sync_summary(&initial)?;
         assert!(!initial.scan.reused_snapshot);
         std::fs::write(
             temporary.path().join("api/openapi.yaml"),
@@ -117,7 +117,7 @@ fn assert_watch_sync(extra_arguments: &[&str]) -> anyhow::Result<()> {
         let updated = receiver
             .recv_timeout(Duration::from_secs(15))
             .context("watch did not publish after the source change")??;
-        let updated: SyncSummary = serde_json::from_str(&updated)?;
+        let updated = watch_sync_summary(&updated)?;
         assert!(updated.scan.changed_input_count > 0);
         assert_ne!(updated.scan.snapshot_id, initial.scan.snapshot_id);
         Ok(())
@@ -129,4 +129,15 @@ fn assert_watch_sync(extra_arguments: &[&str]) -> anyhow::Result<()> {
         .join()
         .map_err(|_| anyhow::anyhow!("watch stdout reader panicked"))?;
     result
+}
+
+fn watch_sync_summary(line: &str) -> anyhow::Result<SyncSummary> {
+    let value: serde_json::Value = serde_json::from_str(line)?;
+    anyhow::ensure!(value.get("type").and_then(serde_json::Value::as_str) == Some("sync_result"));
+    Ok(serde_json::from_value(
+        value
+            .get("summary")
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("watch result omitted summary"))?,
+    )?)
 }

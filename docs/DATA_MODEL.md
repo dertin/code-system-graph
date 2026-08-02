@@ -1,7 +1,8 @@
 # Federated Data Model
 
-Code System Graph stores normalized repository-boundary facts and their evidence. The initial 1.0 database
-schema is installed as one migration and retains migration support for future releases.
+Code System Graph stores normalized repository-boundary facts and their evidence. The initial 1.0
+database schema is the single definitive schema. Migration support will be designed only after a
+released schema exists.
 
 ## Identity
 
@@ -183,14 +184,16 @@ bounded reason. Current status compares those inputs with the live registry:
 
 Unknown, unavailable, corrupt, or partial inputs never produce a fresh or safe conclusion.
 
-## Migrations, locking, and recovery
+## Schema, locking, and recovery
 
-Migrations are ordered, embedded, and recorded in `schema_metadata`. Databases newer than the
-binary are rejected. Before a forward migration, an existing database receives an automatic,
-non-overwriting versioned backup through SQLite's backup API.
+The definitive 1.0.0 schema version and an opaque database instance identity are recorded in
+`schema_metadata`. The complete SQLite schema must match the initial 1.0.0 definition exactly.
+Any other development schema is rejected with an instruction to remove the disposable database
+and run a full scan. Operational checkpoints are bound to the instance identity, so a sidecar from
+another or rebuilt database is discarded rather than reused.
 
-Restore validates integrity and schema compatibility, preserves the destination as a separate
-safety backup, restores through the backup API, and then applies supported forward migrations.
+Restore validates integrity and exact schema compatibility, preserves the destination as a
+separate safety backup, and restores through SQLite's backup API without migration.
 
 A restrictive sidecar lock enforces one writer while independent read-only WAL connections remain
 available during publication. Lock metadata records a format version, PID, process start time, and

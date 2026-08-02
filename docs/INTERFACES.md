@@ -14,7 +14,7 @@ logic.
 
 ## CLI
 
-The CLI includes workspace/repository lifecycle, scan/status, backup/restore/migrate, ranked
+The CLI includes workspace/repository lifecycle, scan/status, exact-schema backup/restore, ranked
 search, traversal/trace, communities, impact, local changes, opt-in pull-request inspection,
 pull-request listing and overlap, contracts, bounded graph export, doctor diagnostics, explicit
 workspace cleanup, hooks, HTTP serving, and shell completions. Scan supports normal changed-input

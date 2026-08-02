@@ -53,6 +53,10 @@ fn bounded_artifact_read_should_accept_below_and_exact_but_reject_maximum_plus_o
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the atomicity scenario is clearest as one end-to-end test"
+)]
 fn changed_budgets_should_reextract_and_fail_atomically_without_leaking_literals()
 -> anyhow::Result<()> {
     let temporary = tempfile::tempdir()?;
@@ -86,6 +90,20 @@ fn changed_budgets_should_reextract_and_fail_atomically_without_leaking_literals
     let persisted_text = String::from_utf8_lossy(&persisted_bytes);
     assert!(!persisted_text.contains("private-federation-value"));
     assert!(!persisted_text.contains("private-default-value"));
+    for suffix in [".work-v1.db", ".work-v1.db-wal", ".work-v1.db-shm"] {
+        let path = temporary
+            .path()
+            .join(format!("code-system-graph.db{suffix}"));
+        if path.exists() {
+            let content = std::fs::read(path)?;
+            for needle in [
+                b"private-federation-value".as_slice(),
+                b"private-default-value".as_slice(),
+            ] {
+                assert!(!content.windows(needle.len()).any(|window| window == needle));
+            }
+        }
+    }
     drop(initial_store);
 
     std::fs::write(&config, manifest(Some(200_000)))?;
@@ -146,5 +164,36 @@ fn changed_budgets_should_reextract_and_fail_atomically_without_leaking_literals
         surviving_store.load_current_extractor_batches("extraction-budget-e2e")?;
     assert_eq!(surviving.snapshot_id, changed.snapshot_id);
     assert_eq!(surviving_batches, changed_batches);
+    Ok(())
+}
+
+#[test]
+fn complete_batches_should_resume_from_sidecar_after_failed_pass() -> anyhow::Result<()> {
+    let temporary = tempfile::tempdir()?;
+    let repository = temporary.path().join("api");
+    std::fs::create_dir_all(&repository)?;
+    std::fs::write(repository.join("a.graphql"), "scalar A\n")?;
+    std::fs::write(
+        repository.join("z.graphql"),
+        "type User @key(fields: \"id\") { lookup(token: String = \"x\"): String }\ntype Query { viewer: User }\n",
+    )?;
+    let config = temporary.path().join("code-system-graph.yaml");
+    let database = temporary.path().join("code-system-graph.db");
+    std::fs::write(
+        &config,
+        "version: 1\nname: resume-e2e\nextractionBudgets:\n  maxObservationsPerArtifact: 1\nrepos:\n  api:\n    path: api\n",
+    )?;
+
+    assert!(scan_workspace(&config, &database).is_err());
+    std::fs::write(repository.join("z.graphql"), "scalar Z\n")?;
+    let resumed = scan_workspace(&config, &database)?;
+
+    assert!(resumed.execution.checkpoint_hits >= 1);
+    assert!(resumed.execution.checkpoints_written >= 1);
+    assert!(
+        SqliteStore::open_read_only(&database)?
+            .current_snapshot_summary("resume-e2e")
+            .is_ok()
+    );
     Ok(())
 }

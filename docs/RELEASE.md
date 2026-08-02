@@ -33,7 +33,7 @@ Code System Graph 1.0.0 includes:
 - bounded search, trace, community analysis, compatibility, impact, and change analysis;
 - opt-in CodeGraph integration through public MCP or CLI contracts;
 - CLI, read-only MCP stdio, optional authenticated HTTP, exports, diagnostics, and host hooks;
-- SQLite backup, restore, integrity validation, and forward-migration support;
+- exact-schema SQLite backup, restore, and integrity validation;
 - deterministic Linux package archives, CycloneDX SBOMs, and SHA-256 checksums.
 
 ## Local validation
