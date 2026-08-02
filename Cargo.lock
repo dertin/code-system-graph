@@ -403,6 +403,7 @@ dependencies = [
  "code-system-graph-hooks",
  "code-system-graph-model",
  "code-system-graph-store-sqlite",
+ "nix 0.31.3",
  "notify",
  "reqwest",
  "rmcp",
@@ -410,13 +411,16 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "signal-hook",
  "subtle",
+ "sysinfo",
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
  "tokio-util",
  "tower",
  "tower-http 0.7.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2246,6 +2250,16 @@ name = "shlex"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
+
+[[package]]
+name = "signal-hook"
+version = "0.4.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b2a0c28ca5908dbdbcd52e6fdaa00358ab88637f8ab33e1f188dd510eb44b53d"
+dependencies = [
+ "libc",
+ "signal-hook-registry",
+]
 
 [[package]]
 name = "signal-hook-registry"

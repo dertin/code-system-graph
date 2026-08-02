@@ -3,6 +3,7 @@
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use code_system_graph_core::{EffectiveRepositoryConfig, IgnorePolicy};
 use schemars::JsonSchema;
@@ -68,6 +69,8 @@ pub struct CodeGraphSyncSummary {
 pub struct SyncSummary {
     /// Output schema version.
     pub schema_version: u8,
+    /// Resource accounting for the complete supervised sync pass.
+    pub execution: code_system_graph_core::ExecutionSummary,
     /// Incremental Code System Graph scan result.
     pub scan: ScanSummary,
     /// Local per-repository `CodeGraph` index results.
@@ -177,16 +180,48 @@ pub fn sync_workspace_with_overrides(
     overrides: &ScanOverrides,
     synchronize_codegraph: bool,
 ) -> Result<SyncSummary, ApplicationError> {
+    super::worker::supervise_sync(config_path, database_path, overrides, synchronize_codegraph)
+}
+
+#[doc(hidden)]
+pub fn sync_workspace_with_wall_time_cap(
+    config_path: &Path,
+    database_path: &Path,
+    overrides: &ScanOverrides,
+    synchronize_codegraph: bool,
+    wall_time_cap_ms: u64,
+) -> Result<SyncSummary, ApplicationError> {
+    super::worker::supervise_sync_with_wall_time_cap(
+        config_path,
+        database_path,
+        overrides,
+        synchronize_codegraph,
+        wall_time_cap_ms,
+    )
+}
+
+pub(crate) fn sync_workspace_direct(
+    config_path: &Path,
+    database_path: &Path,
+    overrides: &ScanOverrides,
+    synchronize_codegraph: bool,
+) -> Result<SyncSummary, ApplicationError> {
+    let policy = load_workspace_context(config_path, overrides)?.execution_policy;
     let targets = workspace_sync_targets(config_path, overrides)?;
     let binary = codegraph_binary(overrides);
     let codegraph = synchronize_codegraph_targets(&targets, synchronize_codegraph, |path| {
-        run_codegraph_sync(&binary, path)
+        run_codegraph_sync(
+            &binary,
+            path,
+            Duration::from_millis(policy.max_codegraph_sync_wall_time_ms_per_repo),
+        )
     });
     let mut scan_overrides = overrides.clone();
     scan_overrides.codegraph = codegraph.synchronized_count > 0;
-    let scan = super::scan_workspace_with_overrides(config_path, database_path, &scan_overrides)?;
+    let scan = super::scan_workspace_direct(config_path, database_path, &scan_overrides)?;
     Ok(SyncSummary {
         schema_version: 1,
+        execution: code_system_graph_core::ExecutionSummary::default(),
         scan,
         codegraph,
     })
@@ -203,21 +238,74 @@ fn codegraph_binary(overrides: &ScanOverrides) -> OsString {
         .unwrap_or_else(|| OsString::from("codegraph"))
 }
 
-fn run_codegraph_sync(binary: &OsStr, project_path: &Path) -> Result<(), String> {
-    let status = Command::new(binary)
+fn run_codegraph_sync(
+    binary: &OsStr,
+    project_path: &Path,
+    timeout: Duration,
+) -> Result<(), String> {
+    let mut command = Command::new(binary);
+    command
         .arg("sync")
         .arg("--quiet")
         .arg(project_path)
         .current_dir(project_path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
+        .stderr(Stdio::null());
+    configure_codegraph_process_group(&mut command);
+    let mut child = command
+        .spawn()
         .map_err(|error| format!("failed to start codegraph sync: {error}"))?;
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|error| format!("failed to wait for codegraph sync: {error}"))?
+        {
+            break status;
+        }
+        if started.elapsed() >= timeout {
+            super::worker::terminate_process_tree(child.id());
+            terminate_codegraph_process_group(&mut child);
+            return Err(format!(
+                "codegraph sync exceeded {} ms and was terminated",
+                timeout.as_millis()
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
     if status.success() {
         return Ok(());
     }
     Err(format!("codegraph sync exited with {status}"))
+}
+
+#[cfg(unix)]
+fn configure_codegraph_process_group(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    command.process_group(0);
+}
+
+#[cfg(not(unix))]
+fn configure_codegraph_process_group(_command: &mut Command) {}
+
+#[cfg(unix)]
+fn terminate_codegraph_process_group(child: &mut std::process::Child) {
+    if let Ok(process_group_id) = i32::try_from(child.id()) {
+        let process_group_id = nix::unistd::Pid::from_raw(process_group_id);
+        let _ = nix::sys::signal::killpg(process_group_id, nix::sys::signal::Signal::SIGTERM);
+        std::thread::sleep(Duration::from_millis(100));
+        if child.try_wait().ok().flatten().is_none() {
+            let _ = nix::sys::signal::killpg(process_group_id, nix::sys::signal::Signal::SIGKILL);
+        }
+    }
+    let _ = child.wait();
+}
+
+#[cfg(not(unix))]
+fn terminate_codegraph_process_group(child: &mut std::process::Child) {
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 fn synchronize_codegraph_targets<F>(
@@ -247,6 +335,7 @@ where
                 state,
                 detail,
             });
+            super::worker::report_progress(code_system_graph_core::JobPhase::CodeGraphSync, 1);
         }
     }
     repositories.sort_by(|left, right| left.repository.cmp(&right.repository));
@@ -348,5 +437,39 @@ mod tests {
         assert!(!report.enabled);
         assert_eq!(report.repository_count, 1);
         assert!(report.repositories.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codegraph_timeout_should_terminate_its_descendant_process() -> anyhow::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temporary = tempfile::tempdir()?;
+        let script = temporary.path().join("codegraph-test");
+        let descendant_pid = temporary.path().join("descendant.pid");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nsleep 30 &\nprintf '%s' \"$!\" > '{}'\nwait\n",
+                descendant_pid.display()
+            ),
+        )?;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700))?;
+
+        let error =
+            run_codegraph_sync(script.as_os_str(), temporary.path(), Duration::from_secs(2))
+                .expect_err("test process must time out");
+        assert!(
+            error.contains("was terminated"),
+            "unexpected error: {error}"
+        );
+        let pid = std::fs::read_to_string(&descendant_pid)?.parse::<i32>()?;
+        for _ in 0..20 {
+            if nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_err() {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        anyhow::bail!("CodeGraph descendant {pid} survived timeout")
     }
 }

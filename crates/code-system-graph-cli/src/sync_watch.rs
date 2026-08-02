@@ -4,14 +4,38 @@
 use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use code_system_graph::{
-    IgnorePolicy, ScanOverrides, sync_workspace_with_overrides, workspace_sync_targets
+    ApplicationError, IgnorePolicy, ScanOverrides, SyncSummary, finish_watcher_lease, heartbeat_watcher_lease, start_watcher_lease, sync_workspace_with_wall_time_cap, workspace_sync_targets
 };
 use notify::{Config, Event, PollWatcher, RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::sync::mpsc;
+
+#[derive(serde::Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum WatchOutput<'a> {
+    SyncResult {
+        #[serde(rename = "schemaVersion")]
+        schema_version: u8,
+        summary: &'a SyncSummary,
+    },
+    Termination {
+        #[serde(rename = "schemaVersion")]
+        schema_version: u8,
+        state: &'a str,
+        detail: &'a str,
+    },
+}
+
+enum WaitOutcome {
+    Change,
+    Heartbeat,
+    Shutdown,
+    ExpiredIdle,
+    ExpiredSession,
+}
 
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const MAX_SYNC_ATTEMPTS: usize = 3;
@@ -139,6 +163,10 @@ impl ActiveWatcher {
 }
 
 /// Runs initial synchronization and then keeps both local index layers current.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the watcher lifecycle is kept together so every terminal path closes its lease"
+)]
 pub(crate) async fn watch_workspace(
     config: PathBuf,
     database: PathBuf,
@@ -147,20 +175,117 @@ pub(crate) async fn watch_workspace(
     debounce: Duration,
     poll_interval: Option<Duration>,
 ) -> anyhow::Result<()> {
+    let (workspace, policy) = start_watcher_lease(&config, &database)?;
+    let session_started = Instant::now();
+    let mut idle_renewed = session_started;
+    let mut last_pass_started = session_started;
     let (sender, mut receiver) = mpsc::channel(1);
     let mut scope = WatchScope::load(&config, &database, &overrides)?;
     let mut watcher = build_watcher(&scope, sender.clone(), poll_interval)?;
 
-    emit_sync(&config, &database, &overrides, synchronize_codegraph)?;
-    loop {
-        if !wait_for_debounced_change(&mut receiver, debounce).await? {
-            drop(watcher);
+    if let Err(error) = retry_sync(
+        &config,
+        &database,
+        &overrides,
+        synchronize_codegraph,
+        session_started,
+        policy.max_watch_session_wall_time_ms,
+    )
+    .await
+    {
+        if session_expired(session_started, policy.max_watch_session_wall_time_ms) {
+            finish_and_emit(
+                &database,
+                &workspace,
+                "expired_session",
+                "watcher reached its absolute session deadline",
+            )?;
             return Ok(());
         }
-        let synchronized = retry_sync(&config, &database, &overrides, synchronize_codegraph).await;
-        if !synchronized {
-            continue;
+        finish_after_error(&database, &workspace, &error)?;
+        return Err(error);
+    }
+    loop {
+        heartbeat_watcher_lease(&database, &workspace, false)?;
+        let idle_deadline = idle_renewed + Duration::from_millis(policy.watch_idle_timeout_ms);
+        let session_deadline =
+            session_started + Duration::from_millis(policy.max_watch_session_wall_time_ms);
+        match wait_for_debounced_change(&mut receiver, debounce, idle_deadline, session_deadline)
+            .await?
+        {
+            WaitOutcome::Change => {}
+            WaitOutcome::Heartbeat => continue,
+            WaitOutcome::Shutdown => {
+                finish_and_emit(
+                    &database,
+                    &workspace,
+                    "stale",
+                    "watcher stopped by operator signal",
+                )?;
+                drop(watcher);
+                return Ok(());
+            }
+            WaitOutcome::ExpiredIdle => {
+                finish_and_emit(
+                    &database,
+                    &workspace,
+                    "expired_idle",
+                    "watcher reached its inactivity deadline",
+                )?;
+                drop(watcher);
+                return Ok(());
+            }
+            WaitOutcome::ExpiredSession => {
+                finish_and_emit(
+                    &database,
+                    &workspace,
+                    "expired_session",
+                    "watcher reached its absolute session deadline",
+                )?;
+                drop(watcher);
+                return Ok(());
+            }
         }
+        let minimum_start =
+            last_pass_started + Duration::from_millis(policy.min_watch_rescan_interval_ms);
+        if Instant::now() < minimum_start {
+            tokio::time::sleep(minimum_start.saturating_duration_since(Instant::now())).await;
+        }
+        if session_started.elapsed() >= Duration::from_millis(policy.max_watch_session_wall_time_ms)
+        {
+            finish_and_emit(
+                &database,
+                &workspace,
+                "expired_session",
+                "watcher reached its absolute session deadline",
+            )?;
+            return Ok(());
+        }
+        last_pass_started = Instant::now();
+        if let Err(error) = retry_sync(
+            &config,
+            &database,
+            &overrides,
+            synchronize_codegraph,
+            session_started,
+            policy.max_watch_session_wall_time_ms,
+        )
+        .await
+        {
+            if session_expired(session_started, policy.max_watch_session_wall_time_ms) {
+                finish_and_emit(
+                    &database,
+                    &workspace,
+                    "expired_session",
+                    "watcher reached its absolute session deadline",
+                )?;
+                return Ok(());
+            }
+            finish_after_error(&database, &workspace, &error)?;
+            return Err(error);
+        }
+        idle_renewed = Instant::now();
+        heartbeat_watcher_lease(&database, &workspace, true)?;
         let refreshed = match WatchScope::load(&config, &database, &overrides) {
             Ok(refreshed) => refreshed,
             Err(error) => {
@@ -192,14 +317,26 @@ fn emit_sync(
     database: &Path,
     overrides: &ScanOverrides,
     synchronize_codegraph: bool,
-) -> anyhow::Result<()> {
-    let summary =
-        sync_workspace_with_overrides(config, database, overrides, synchronize_codegraph)?;
-    println!("{}", serde_json::to_string(&summary)?);
+    wall_time_cap_ms: u64,
+) -> anyhow::Result<SyncSummary> {
+    let summary = sync_workspace_with_wall_time_cap(
+        config,
+        database,
+        overrides,
+        synchronize_codegraph,
+        wall_time_cap_ms,
+    )?;
+    println!(
+        "{}",
+        serde_json::to_string(&WatchOutput::SyncResult {
+            schema_version: 1,
+            summary: &summary,
+        })?
+    );
     std::io::stdout()
         .flush()
         .context("failed to flush sync result")?;
-    Ok(())
+    Ok(summary)
 }
 
 async fn retry_sync(
@@ -207,40 +344,80 @@ async fn retry_sync(
     database: &Path,
     overrides: &ScanOverrides,
     synchronize_codegraph: bool,
-) -> bool {
+    session_started: Instant,
+    max_session_wall_time_ms: u64,
+) -> anyhow::Result<()> {
     let mut delay = Duration::from_millis(250);
     for attempt in 1..=MAX_SYNC_ATTEMPTS {
-        match emit_sync(config, database, overrides, synchronize_codegraph) {
-            Ok(()) => return true,
-            Err(error) if attempt < MAX_SYNC_ATTEMPTS => {
+        match emit_sync(
+            config,
+            database,
+            overrides,
+            synchronize_codegraph,
+            remaining_session_ms(session_started, max_session_wall_time_ms),
+        ) {
+            Ok(_) => return Ok(()),
+            Err(error)
+                if error
+                    .downcast_ref::<ApplicationError>()
+                    .is_some_and(|error| {
+                        matches!(error, ApplicationError::TransientExecution(_))
+                    })
+                    && attempt < MAX_SYNC_ATTEMPTS =>
+            {
                 eprintln!(
                     "csgraph sync pass {attempt}/{MAX_SYNC_ATTEMPTS} failed: {error:#}; retrying"
                 );
                 tokio::time::sleep(delay).await;
                 delay = delay.saturating_mul(2);
             }
-            Err(error) => {
+            Err(error)
+                if error
+                    .downcast_ref::<ApplicationError>()
+                    .is_some_and(|error| {
+                        matches!(error, ApplicationError::TransientExecution(_))
+                    }) =>
+            {
                 eprintln!(
-                    "csgraph sync pass {attempt}/{MAX_SYNC_ATTEMPTS} failed: {error:#}; waiting for the next change"
+                    "csgraph sync pass {attempt}/{MAX_SYNC_ATTEMPTS} failed: {error:#}; stopping watcher"
                 );
+                return Err(error);
             }
+            Err(error) => return Err(error),
         }
     }
-    false
+    unreachable!("bounded retry loop always returns")
+}
+
+fn session_expired(session_started: Instant, maximum_ms: u64) -> bool {
+    session_started.elapsed().as_millis() >= u128::from(maximum_ms)
+}
+
+fn remaining_session_ms(session_started: Instant, maximum_ms: u64) -> u64 {
+    let elapsed = u64::try_from(session_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    maximum_ms.saturating_sub(elapsed).max(1)
 }
 
 async fn wait_for_debounced_change(
     receiver: &mut mpsc::Receiver<()>,
     debounce: Duration,
-) -> anyhow::Result<bool> {
+    idle_deadline: Instant,
+    session_deadline: Instant,
+) -> anyhow::Result<WaitOutcome> {
+    let heartbeat_deadline = tokio::time::Instant::now() + Duration::from_mins(1);
+    let idle_deadline = tokio::time::Instant::from_std(idle_deadline);
+    let session_deadline = tokio::time::Instant::from_std(session_deadline);
     tokio::select! {
         signal = super::shutdown_signal() => {
             signal.context("failed to listen for sync shutdown")?;
-            return Ok(false);
+            return Ok(WaitOutcome::Shutdown);
         }
         event = receiver.recv() => {
             anyhow::ensure!(event.is_some(), "filesystem watcher stopped unexpectedly");
         }
+        () = tokio::time::sleep_until(heartbeat_deadline) => return Ok(WaitOutcome::Heartbeat),
+        () = tokio::time::sleep_until(idle_deadline) => return Ok(WaitOutcome::ExpiredIdle),
+        () = tokio::time::sleep_until(session_deadline) => return Ok(WaitOutcome::ExpiredSession),
     }
 
     let started = tokio::time::Instant::now();
@@ -251,15 +428,56 @@ async fn wait_for_debounced_change(
         tokio::select! {
             signal = super::shutdown_signal() => {
                 signal.context("failed to listen for sync shutdown")?;
-                return Ok(false);
+                return Ok(WaitOutcome::Shutdown);
             }
             event = receiver.recv() => {
                 anyhow::ensure!(event.is_some(), "filesystem watcher stopped unexpectedly");
                 quiet_deadline = tokio::time::Instant::now() + debounce;
             }
-            () = tokio::time::sleep_until(deadline) => return Ok(true),
+            () = tokio::time::sleep_until(idle_deadline) => return Ok(WaitOutcome::ExpiredIdle),
+            () = tokio::time::sleep_until(session_deadline) => return Ok(WaitOutcome::ExpiredSession),
+            () = tokio::time::sleep_until(deadline) => return Ok(WaitOutcome::Change),
         }
     }
+}
+
+fn finish_after_error(
+    database: &Path,
+    workspace: &str,
+    error: &anyhow::Error,
+) -> anyhow::Result<()> {
+    let is_limit = error
+        .downcast_ref::<ApplicationError>()
+        .is_some_and(|error| {
+            matches!(
+                error,
+                ApplicationError::ExecutionLimit(_) | ApplicationError::ExtractionLimit(_)
+            )
+        });
+    let state = if is_limit { "failed_limit" } else { "stale" };
+    finish_and_emit(database, workspace, state, &format!("{error:#}"))
+}
+
+fn finish_and_emit(
+    database: &Path,
+    workspace: &str,
+    state: &str,
+    detail: &str,
+) -> anyhow::Result<()> {
+    let bounded_detail = detail.chars().take(512).collect::<String>();
+    finish_watcher_lease(database, workspace, state, Some(&bounded_detail))?;
+    println!(
+        "{}",
+        serde_json::to_string(&WatchOutput::Termination {
+            schema_version: 1,
+            state,
+            detail: &bounded_detail,
+        })?
+    );
+    std::io::stdout()
+        .flush()
+        .context("failed to flush watcher termination")?;
+    Ok(())
 }
 
 fn build_watcher(
@@ -378,6 +596,12 @@ fn forward_event(result: notify::Result<Event>, scope: &WatchScope, sender: &mps
             let _ignored = sender.try_send(());
         }
         Ok(_) => {}
+        Err(error)
+            if !error.paths.is_empty()
+                && error
+                    .paths
+                    .iter()
+                    .all(|path| database_artifact(path, &scope.database)) => {}
         Err(error) => {
             eprintln!("csgraph sync filesystem watcher reported: {error}");
             let _ignored = sender.try_send(());
@@ -411,6 +635,14 @@ fn database_artifact(path: &Path, database: &Path) -> bool {
     if path == database {
         return true;
     }
+    let work_database = {
+        let mut value = database.as_os_str().to_os_string();
+        value.push(".work-v1.db");
+        PathBuf::from(value)
+    };
+    if path == work_database {
+        return true;
+    }
     let Some(database_name) = database.file_name().and_then(|name| name.to_str()) else {
         return false;
     };
@@ -419,9 +651,17 @@ fn database_artifact(path: &Path, database: &Path) -> bool {
             .file_name()
             .and_then(|name| name.to_str())
             .is_some_and(|name| {
-                ["-wal", "-shm", "-journal"]
-                    .iter()
-                    .any(|suffix| name == format!("{database_name}{suffix}"))
+                [
+                    "-wal",
+                    "-shm",
+                    "-journal",
+                    ".work-v1.db",
+                    ".work-v1.db-wal",
+                    ".work-v1.db-shm",
+                    ".work-v1.db-journal",
+                ]
+                .iter()
+                .any(|suffix| name == format!("{database_name}{suffix}"))
             })
 }
 
@@ -492,6 +732,8 @@ mod tests {
         assert!(scope.relevant_path(Path::new("/workspace/code-system-graph.yaml")));
         assert!(!scope.relevant_path(Path::new("/workspace/repo/.codegraph/codegraph.db-wal")));
         assert!(!scope.relevant_path(Path::new("/workspace/.state/graph.db-wal")));
+        assert!(!scope.relevant_path(Path::new("/workspace/.state/graph.db.work-v1.db-wal")));
+        assert!(!scope.relevant_path(Path::new("/workspace/.state/graph.db.work-v1.db-shm")));
     }
 
     #[test]

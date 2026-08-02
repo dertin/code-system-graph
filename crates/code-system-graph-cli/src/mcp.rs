@@ -722,9 +722,10 @@ fn codegraph_disabled_error() -> McpError {
     )
 }
 
-#[expect(
+#[allow(unknown_lints)]
+#[allow(
     clippy::unused_async_trait_impl,
-    reason = "rmcp defines these ServerHandler methods as asynchronous"
+    reason = "rmcp requires async trait methods even when resource reads complete synchronously"
 )]
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for CodeSystemGraphServer {

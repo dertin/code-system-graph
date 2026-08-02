@@ -3,6 +3,8 @@
 pub mod http_server;
 pub mod mcp;
 mod sync;
+mod work_state;
+mod worker;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
@@ -10,11 +12,11 @@ use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use atomic_write_file::AtomicWriteFile;
 use code_system_graph_core::{
-    AffectedTestsRequest, AnalyzerVersions, ArtifactKey, BatchAction, BatchPlanError, BitbucketProvider, ChangeAnalysisError, ChangeAnalysisOptions, ChangeError, ChangeImpactReport, ChangeProvider, ChangeRequest, ChangeScope, ChangeSet, CodeGraphConfig, CodeGraphProvider, CommunityError, ConfigDoctorInput, ConfigError, ConfigExtractionError, ContractReport, ContractRequest, CorroborationReport, DataDocument, DataExtractionError, DeclaredImplementation, DeclaredTestCase, DoctorReport, DoctorRequest, DocumentationDocument, DocumentationExtractionError, EXTRACTION_CONTRACT_VERSION, EffectiveRepositoryConfig, EventDocument, EventExtractionError, EventGraphFacts, ExitCode, ExportReport, ExportRequest, ExtractionBudgets, ExtractionGraphFacts, ExtractionLimitExceeded, ExtractionTracker, ExtractorBatch, ExtractorBatchPlan, FederatedGraph, FreshnessDoctorInput, GeneratedClientError, GeneratedClientMetadata, GitCliChangeProvider, GitHubProvider, GraphqlDocument, GraphqlExtractionError, GraphqlGraphFacts, HttpBoundary, HttpExtractionError, ImpactContext, ImpactError, ImpactReport, ImpactRequest, ImpactTarget, IncrementalPlan, InfrastructureDocument, InfrastructureExtractionError, IntegrityDoctorInput, InterfaceError, LinkError, LocalCodeIntelligenceProvider, LocalContextRequest, LocalContextResult, LocalEnrichmentInput, LocalEnrichmentStatus, LocalImpactItem, LocalImpactRequest, ManifestEdit, ManifestEditError, ManifestError, ManualLinkConfig, ManualLinkError, PackageGraphFacts, PackageManifest, PackageManifestError, PrAuthToken, ProtobufDocument, ProtobufExtractionError, ProtobufGraphFacts, ProviderBudget, ProviderCapability, ProviderDoctorInput, ProviderDoctorStatus, ProviderError, ProviderRequest, ProviderStatus, PullRequestCoordinates, PullRequestError, PullRequestInspectRequest, PullRequestInspection, PullRequestListPage, PullRequestListRequest, PullRequestListState, PullRequestProvider, PullRequestProviderConfig, PullRequestProviderKind, QueryError, RecommendedCommand, RegisteredWorkspace, RegistryError, ReqwestPrHttpTransport, SafeConfigDocument, SchemaDoctorInput, SearchFilters, SearchReport, SearchRequest, SourceEpistemicStatus, SourceGraphFacts, SourceLanguage, SourceObservation, SourceRole, SourceSyntaxError, SourceSyntaxLanguage, SourceWarning, SymbolAnchor, SymbolCorroboration, TraceError, TraversalReport, TraversalRequest, WorkspaceManifest, affected_link_keys, analyze_changes, analyze_communities, analyze_impact, apply_openapi_override, classify_interface_error, commit_manifest_edit, compare_community_snapshots, corroborate_repository, declared_implementation, declared_test_case, doctor, documents_to_graph, encode_native_path, event_documents_to_graph, export_graph, extract_asyncapi, extract_codeowners, extract_data_artifact, extract_docker_compose, extract_generated_client_metadata, extract_graphql_document_with_tracker, extract_graphql_persisted_operations_with_tracker, extract_helm, extract_kubernetes, extract_markdown, extract_openapi, extract_package_manifest_with_tracker, extract_protobuf_with_tracker, extract_safe_config, extract_service_catalog, extract_terraform, graphql_documents_to_graph, inspect_contracts, inspect_source_syntax, link_declared_implementations, link_declared_tests, link_http_boundaries, link_registered_package_owners, load_extractor_batch, merge_affected_link_neighborhoods, package_manifest_to_graph, parse_event_source, parse_go_source, parse_graphql_source_with_tracker, parse_java_source, parse_javascript_source_at_path, parse_literal_sql_source_at_root, parse_manifest, parse_protobuf_generated_source, parse_python_source, parse_rust_source, parse_typescript_source_at_path, plan_extractor_batches, plan_incremental_scan, preview_add_manual_link, preview_add_repository, preview_remove_repository, protobuf_documents_to_graph, register_workspace, resolve_manual_links, resolve_repository_config, search, source_observations_to_graph, store_extractor_batch, traverse
+    AffectedTestsRequest, AnalyzerVersions, ArtifactKey, BatchAction, BatchPlanError, BitbucketProvider, ChangeAnalysisError, ChangeAnalysisOptions, ChangeError, ChangeImpactReport, ChangeProvider, ChangeRequest, ChangeScope, ChangeSet, CodeGraphConfig, CodeGraphProvider, CommunityError, ConfigDoctorInput, ConfigError, ConfigExtractionError, ContractReport, ContractRequest, CorroborationReport, DataDocument, DataExtractionError, DeclaredImplementation, DeclaredTestCase, DoctorReport, DoctorRequest, DocumentationDocument, DocumentationExtractionError, EXTRACTION_CONTRACT_VERSION, EffectiveRepositoryConfig, EventDocument, EventExtractionError, EventGraphFacts, ExecutionPolicy, ExitCode, ExportReport, ExportRequest, ExtractionBudgets, ExtractionGraphFacts, ExtractionLimitExceeded, ExtractionTracker, ExtractorBatch, ExtractorBatchPlan, FederatedGraph, FreshnessDoctorInput, GeneratedClientError, GeneratedClientMetadata, GitCliChangeProvider, GitHubProvider, GraphqlDocument, GraphqlExtractionError, GraphqlGraphFacts, HttpBoundary, HttpExtractionError, ImpactContext, ImpactError, ImpactReport, ImpactRequest, ImpactTarget, IncrementalPlan, InfrastructureDocument, InfrastructureExtractionError, IntegrityDoctorInput, InterfaceError, LinkError, LocalCodeIntelligenceProvider, LocalContextRequest, LocalContextResult, LocalEnrichmentInput, LocalEnrichmentStatus, LocalImpactItem, LocalImpactRequest, ManifestEdit, ManifestEditError, ManifestError, ManualLinkConfig, ManualLinkError, PackageGraphFacts, PackageManifest, PackageManifestError, PrAuthToken, ProtobufDocument, ProtobufExtractionError, ProtobufGraphFacts, ProviderBudget, ProviderCapability, ProviderDoctorInput, ProviderDoctorStatus, ProviderError, ProviderRequest, ProviderStatus, PullRequestCoordinates, PullRequestError, PullRequestInspectRequest, PullRequestInspection, PullRequestListPage, PullRequestListRequest, PullRequestListState, PullRequestProvider, PullRequestProviderConfig, PullRequestProviderKind, QueryError, RecommendedCommand, RegisteredWorkspace, RegistryError, ReqwestPrHttpTransport, SafeConfigDocument, SchemaDoctorInput, SearchFilters, SearchReport, SearchRequest, SourceEpistemicStatus, SourceGraphFacts, SourceLanguage, SourceObservation, SourceRole, SourceSyntaxError, SourceSyntaxLanguage, SourceWarning, SymbolAnchor, SymbolCorroboration, TraceError, TraversalReport, TraversalRequest, WorkspaceManifest, affected_link_keys, analyze_changes, analyze_communities_with_progress, analyze_impact, apply_openapi_override, classify_interface_error, commit_manifest_edit, compare_community_snapshots, corroborate_repository, declared_implementation, declared_test_case, doctor, documents_to_graph, encode_native_path, event_documents_to_graph, export_graph, extract_asyncapi, extract_codeowners, extract_data_artifact, extract_docker_compose, extract_generated_client_metadata, extract_graphql_document_with_tracker, extract_graphql_persisted_operations_with_tracker, extract_helm, extract_kubernetes, extract_markdown, extract_openapi, extract_package_manifest_with_tracker, extract_protobuf_with_tracker, extract_safe_config, extract_service_catalog, extract_terraform, graphql_documents_to_graph, inspect_contracts, inspect_source_syntax, link_declared_implementations, link_declared_tests, link_http_boundaries, link_registered_package_owners, load_extractor_batch, merge_affected_link_neighborhoods, package_manifest_to_graph, parse_event_source, parse_go_source, parse_graphql_source_with_tracker, parse_java_source, parse_javascript_source_at_path, parse_literal_sql_source_at_root, parse_manifest, parse_protobuf_generated_source, parse_python_source, parse_rust_source, parse_typescript_source_at_path, plan_extractor_batches, plan_incremental_scan, preview_add_manual_link, preview_add_repository, preview_remove_repository, protobuf_documents_to_graph, register_workspace, resolve_manual_links, resolve_repository_config, search, source_observations_to_graph, store_extractor_batch, traverse
 };
 pub use code_system_graph_core::{
     ConfigSource, DEFAULT_EXCLUDES, IgnorePolicy, PROTECTED_EXCLUDES
@@ -28,10 +30,12 @@ use code_system_graph_store_sqlite::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 pub use sync::{
-    CodeGraphRepositorySync, CodeGraphSyncState, CodeGraphSyncSummary, SyncSummary, SyncTarget, sync_workspace_with_overrides, workspace_sync_targets
+    CodeGraphRepositorySync, CodeGraphSyncState, CodeGraphSyncSummary, SyncSummary, SyncTarget, sync_workspace_with_overrides, sync_workspace_with_wall_time_cap, workspace_sync_targets
 };
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
+#[doc(hidden)]
+pub use worker::run_worker_from_stdio;
 
 const MAX_TRACE_DEPTH: usize = 32;
 const MAX_SCAN_DEGRADATIONS: usize = 25;
@@ -65,6 +69,9 @@ pub enum ApplicationError {
     /// An extractor exhausted one configured per-invocation resource.
     #[error(transparent)]
     ExtractionLimit(#[from] ExtractionLimitExceeded),
+    /// A supervised pass exhausted one configured execution resource.
+    #[error(transparent)]
+    ExecutionLimit(#[from] code_system_graph_core::ExecutionLimitExceeded),
     /// HTTP boundary artifact was invalid.
     #[error(transparent)]
     HttpExtraction(#[from] HttpExtractionError),
@@ -182,6 +189,9 @@ pub enum ApplicationError {
     /// Workspace initialization could not be completed safely.
     #[error("workspace initialization failed: {0}")]
     Initialization(String),
+    /// A supervised worker observed a retryable operating-system or storage contention failure.
+    #[error("transient supervised execution failure: {0}")]
+    TransientExecution(String),
     /// Client requested a traversal depth outside server bounds.
     #[error("trace max_depth must be between 1 and {maximum}; received {found}")]
     InvalidTraceDepth {
@@ -197,7 +207,11 @@ pub enum ApplicationError {
 pub const fn application_exit_code(error: &ApplicationError) -> ExitCode {
     match error {
         ApplicationError::Interface(source) => classify_interface_error(source),
-        ApplicationError::Change(ChangeError::Cancelled)
+        ApplicationError::ExecutionLimit(code_system_graph_core::ExecutionLimitExceeded {
+            resource: code_system_graph_core::ExecutionResource::Cancellation,
+            ..
+        })
+        | ApplicationError::Change(ChangeError::Cancelled)
         | ApplicationError::PullRequest(PullRequestError::Cancelled) => ExitCode::Cancelled,
         ApplicationError::Change(ChangeError::Timeout { .. })
         | ApplicationError::PullRequest(PullRequestError::Timeout) => ExitCode::Timeout,
@@ -205,6 +219,7 @@ pub const fn application_exit_code(error: &ApplicationError) -> ExitCode {
         ApplicationError::WorkspaceAlreadyExists(_) => ExitCode::Conflict,
         ApplicationError::Manifest(_)
         | ApplicationError::ExtractionLimit(_)
+        | ApplicationError::ExecutionLimit(_)
         | ApplicationError::HttpExtraction(_)
         | ApplicationError::PackageManifest(_)
         | ApplicationError::GeneratedClient(_)
@@ -239,13 +254,16 @@ pub const fn application_exit_code(error: &ApplicationError) -> ExitCode {
         | ApplicationError::WriteFile { .. }
         | ApplicationError::RegistryAliasMissing(_)
         | ApplicationError::Store(_)
-        | ApplicationError::Initialization(_) => ExitCode::Internal,
+        | ApplicationError::Initialization(_)
+        | ApplicationError::TransientExecution(_) => ExitCode::Internal,
     }
 }
 
 /// Observable result of a successful scan.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ScanSummary {
+    /// Resource accounting for this supervised pass.
+    pub execution: code_system_graph_core::ExecutionSummary,
     /// Workspace name.
     pub workspace: String,
     /// Published snapshot identifier.
@@ -277,7 +295,7 @@ pub struct ScanSummary {
 }
 
 /// Highest-precedence command-line scan overrides.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScanOverrides {
     /// Optional requested workspace name, verified against the manifest before mutation.
     pub workspace: Option<String>,
@@ -372,6 +390,10 @@ pub struct ConfigReport {
     pub workspace: String,
     /// Effective global extraction safety limits, including applied defaults.
     pub extraction_budgets: ExtractionBudgets,
+    /// Effective global supervised-execution policy, including applied defaults.
+    pub execution_policy: ExecutionPolicy,
+    /// Canonical fingerprint of the effective supervised-execution policy.
+    pub execution_policy_fingerprint: String,
     /// Effective per-repository configuration in alias order.
     pub repositories: Vec<RepositoryConfigReport>,
 }
@@ -389,6 +411,35 @@ pub struct WorkspaceStatus {
     pub freshness: FreshnessSummary,
     /// Per-checkout freshness in deterministic order.
     pub repositories: Vec<RepoFreshness>,
+    /// Last persisted finite-watcher lifecycle state.
+    pub watcher: WatcherStatus,
+}
+
+/// Persisted lifecycle of the foreground sync watcher.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WatcherState {
+    /// A verified watcher process currently owns the lease.
+    Active,
+    /// The watcher reached its inactivity deadline.
+    ExpiredIdle,
+    /// The watcher reached its absolute session deadline.
+    ExpiredSession,
+    /// A non-retryable execution limit ended the watcher.
+    FailedLimit,
+    /// The recorded process disappeared or no longer matches its start identity.
+    Stale,
+    /// No watcher session has been recorded for this workspace.
+    NeverStarted,
+}
+
+/// Observable finite-watcher status returned by `csgraph status`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct WatcherStatus {
+    /// Stable lifecycle state.
+    pub state: WatcherState,
+    /// Bounded termination or stale-state diagnostic.
+    pub detail: Option<String>,
 }
 
 /// Result of an explicit database backup.
@@ -398,21 +449,6 @@ pub struct BackupSummary {
     pub database: String,
     /// Created backup display path.
     pub backup: String,
-}
-
-/// Planned or completed database migration.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct MigrationSummary {
-    /// Schema version before migration.
-    pub from_version: i64,
-    /// Schema version required by this binary.
-    pub to_version: i64,
-    /// Automatic backup created before migration.
-    pub backup: Option<String>,
-    /// Whether migrations were applied.
-    pub applied: bool,
-    /// Whether this was a dry run.
-    pub dry_run: bool,
 }
 
 /// Result of an explicit database restore.
@@ -650,6 +686,7 @@ struct WorkspaceContext {
     registry: RegisteredWorkspace,
     repository_configs: BTreeMap<String, EffectiveRepositoryConfig>,
     extraction_budgets: ExtractionBudgets,
+    execution_policy: ExecutionPolicy,
 }
 
 /// Resolves and reports native discovery exclusions without opening a graph database.
@@ -695,6 +732,8 @@ pub fn show_config(
         schema_version: 1,
         workspace: context.manifest.name,
         extraction_budgets: context.extraction_budgets,
+        execution_policy_fingerprint: context.execution_policy.fingerprint(),
+        execution_policy: context.execution_policy,
         repositories,
     })
 }
@@ -793,6 +832,8 @@ struct FocusedBatchState {
     stored_batches: Vec<StoredExtractorBatch>,
     degradations: Vec<String>,
     force_relink: bool,
+    checkpoint_writes: u64,
+    artifact_durations_ms: Vec<u64>,
 }
 
 struct RepositoryCorroboration {
@@ -818,6 +859,35 @@ fn current_unix_millis() -> u64 {
         .ok()
         .and_then(|duration| u64::try_from(duration.as_millis()).ok())
         .unwrap_or(u64::MAX)
+}
+
+fn duration_millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+fn artifact_execution_summary(durations_ms: &[u64]) -> code_system_graph_core::ExecutionSummary {
+    let mut ordered = durations_ms.to_vec();
+    ordered.sort_unstable();
+    code_system_graph_core::ExecutionSummary {
+        measured_artifacts: u64::try_from(ordered.len()).unwrap_or(u64::MAX),
+        artifact_duration_p50_ms: duration_percentile(&ordered, 50),
+        artifact_duration_p95_ms: duration_percentile(&ordered, 95),
+        artifact_duration_p99_ms: duration_percentile(&ordered, 99),
+        ..code_system_graph_core::ExecutionSummary::default()
+    }
+}
+
+fn duration_percentile(ordered: &[u64], percentile: usize) -> u64 {
+    if ordered.is_empty() {
+        return 0;
+    }
+    let index = ordered
+        .len()
+        .saturating_mul(percentile)
+        .div_ceil(100)
+        .saturating_sub(1)
+        .min(ordered.len() - 1);
+    ordered[index]
 }
 
 fn default_search_limit() -> usize {
@@ -1016,16 +1086,26 @@ pub fn scan_workspace(
 ///
 /// Returns [`ApplicationError`] for unknown aliases, invalid overrides, unreadable inputs,
 /// invalid contracts, ambiguous links, or storage failure.
-#[expect(
-    clippy::too_many_lines,
-    reason = "Atomic scan orchestration keeps lock, reuse, publication, and summary sequencing visible"
-)]
 pub fn scan_workspace_with_overrides(
     config_path: &Path,
     database_path: &Path,
     overrides: &ScanOverrides,
 ) -> Result<ScanSummary, ApplicationError> {
+    worker::supervise_scan(config_path, database_path, overrides)
+}
+
+#[doc(hidden)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Atomic scan orchestration keeps lock, resume, publication, and summary sequencing visible"
+)]
+pub(crate) fn scan_workspace_direct(
+    config_path: &Path,
+    database_path: &Path,
+    overrides: &ScanOverrides,
+) -> Result<ScanSummary, ApplicationError> {
     let context = load_workspace_context(config_path, overrides)?;
+    worker::report_progress(code_system_graph_core::JobPhase::Configuration, 1);
     if let Some(requested) = &overrides.workspace
         && requested != &context.manifest.name
     {
@@ -1035,8 +1115,15 @@ pub fn scan_workspace_with_overrides(
         });
     }
     let mut fingerprints = discover_artifact_fingerprints(&context)?;
+    worker::report_progress(
+        code_system_graph_core::JobPhase::Fingerprinting,
+        u64::try_from(fingerprints.len()).unwrap_or(u64::MAX),
+    );
     let _writer_lock = StoreLock::acquire(database_path, Duration::from_mins(5))?;
     let mut store = SqliteStore::open(database_path)?;
+    let database_instance_id = store.database_instance_id()?;
+    let mut work_state = work_state::WorkState::open(database_path, &database_instance_id)
+        .map_err(ApplicationError::Initialization)?;
     let mut previous_fingerprints =
         match store.load_current_artifact_fingerprints(&context.manifest.name) {
             Ok(previous) => previous,
@@ -1079,13 +1166,54 @@ pub fn scan_workspace_with_overrides(
             context.registry.record.manifest_hash
         ),
     );
-    let previous_extractor_batches =
+    let mut previous_extractor_batches =
         match store.load_current_extractor_batches(&context.manifest.name) {
             Ok(previous) => previous,
             Err(StoreError::CurrentSnapshotMissing(_)) => Vec::new(),
             Err(error) => return Err(error.into()),
         };
     let budget_fingerprint = context.extraction_budgets.fingerprint();
+    let candidate_material = serde_json::to_vec(&(
+        &context.registry.record.manifest_hash,
+        &fingerprints,
+        &budget_fingerprint,
+        EXTRACTION_CONTRACT_VERSION,
+    ))
+    .map_err(|error| ApplicationError::Initialization(error.to_string()))?;
+    let candidate_fingerprint = stable_id_bytes("work-candidate-v1", &candidate_material);
+    let _resumed_candidate = work_state
+        .begin_candidate(
+            &context.manifest.name,
+            &candidate_fingerprint,
+            current_unix_millis(),
+        )
+        .map_err(ApplicationError::Initialization)?;
+    let cached_batches = if overrides.force {
+        Vec::new()
+    } else {
+        work_state
+            .load_batches(
+                &fingerprints,
+                &budget_fingerprint,
+                EXTRACTION_CONTRACT_VERSION,
+                current_unix_millis(),
+            )
+            .map_err(ApplicationError::Initialization)?
+    };
+    let cached_keys = cached_batches
+        .iter()
+        .map(|batch| ArtifactKey::from(&batch.source))
+        .collect::<BTreeSet<_>>();
+    for cached in cached_batches {
+        let key = ArtifactKey::from(&cached.source);
+        if !previous_extractor_batches
+            .iter()
+            .any(|batch| ArtifactKey::from(&batch.source) == key && batch.source == cached.source)
+        {
+            previous_extractor_batches.push(cached);
+        }
+    }
+    let checkpoint_hits = u64::try_from(cached_keys.len()).unwrap_or(u64::MAX);
     if overrides.repository.is_some()
         && previous_extractor_batches
             .iter()
@@ -1111,6 +1239,62 @@ pub fn scan_workspace_with_overrides(
         Err(error) => return Err(error.into()),
     };
     let plan = plan_incremental_scan(&previous_fingerprints, &fingerprints);
+    let staged_snapshot = if let Ok(candidate) =
+        work_state.load_candidate_snapshot(&context.manifest.name, &candidate_fingerprint)
+    {
+        candidate
+    } else {
+        work_state
+            .complete_candidate(&context.manifest.name)
+            .map_err(ApplicationError::Initialization)?;
+        work_state
+            .begin_candidate(
+                &context.manifest.name,
+                &candidate_fingerprint,
+                current_unix_millis(),
+            )
+            .map_err(ApplicationError::Initialization)?;
+        None
+    };
+    if let Some(candidate) = staged_snapshot {
+        publish_snapshot_candidate(
+            &mut store,
+            SnapshotBatch {
+                workspace: &context.registry.record,
+                snapshot_id: &candidate.snapshot_id,
+                nodes: &candidate.nodes,
+                edges: &candidate.edges,
+                evidence: &candidate.evidence,
+                fingerprints: &candidate.fingerprints,
+                extractor_batches: &candidate.extractor_batches,
+                extractor_runs: &candidate.extractor_runs,
+                manual_links: &candidate.manual_links,
+                community_snapshot: Some(&candidate.community_snapshot),
+            },
+        )?;
+        work_state
+            .complete_candidate(&context.manifest.name)
+            .map_err(ApplicationError::Initialization)?;
+        let mut execution = candidate.execution;
+        execution.checkpoint_hits = checkpoint_hits;
+        return Ok(ScanSummary {
+            execution,
+            workspace: context.manifest.name,
+            snapshot_id: candidate.snapshot_id,
+            node_count: candidate.nodes.len(),
+            edge_count: candidate.edges.len(),
+            evidence_count: candidate.evidence.len(),
+            community_count: candidate.community_snapshot.communities.len(),
+            community_delta_count: candidate.community_delta_count,
+            discovered_input_count: candidate.fingerprints.len(),
+            changed_input_count: plan.changed_count(),
+            reused_snapshot: false,
+            corroborated_symbol_count: candidate.corroborated_symbol_count,
+            affected_test_count: candidate.affected_test_count,
+            degradation_count: candidate.degradations.len(),
+            degradations: candidate.degradations,
+        });
+    }
     if previous_manifest_matches
         && !plan.has_changes()
         && focused_batch_cache_complete(
@@ -1121,10 +1305,17 @@ pub fn scan_workspace_with_overrides(
         && previous_communities.is_some()
         && !overrides.codegraph
     {
+        work_state
+            .complete_candidate(&context.manifest.name)
+            .map_err(ApplicationError::Initialization)?;
         let current = store.current_snapshot_summary(&context.manifest.name)?;
         let (degradation_count, degradations) =
             finalize_scan_degradations(stored_batch_degradations(&previous_extractor_batches)?);
         return Ok(ScanSummary {
+            execution: code_system_graph_core::ExecutionSummary {
+                checkpoint_hits,
+                ..code_system_graph_core::ExecutionSummary::default()
+            },
             workspace: context.manifest.name,
             snapshot_id: current.snapshot_id,
             node_count: current.node_count,
@@ -1150,7 +1341,16 @@ pub fn scan_workspace_with_overrides(
         &fingerprints,
         &previous_extractor_batches,
         &batch_plan,
+        &cached_keys,
+        &mut work_state,
     )?;
+    work_state
+        .set_candidate_phase(&context.manifest.name, "extracted", current_unix_millis())
+        .map_err(ApplicationError::Initialization)?;
+    worker::report_progress(
+        code_system_graph_core::JobPhase::Extraction,
+        u64::try_from(focused_batches.stored_batches.len()).unwrap_or(u64::MAX),
+    );
     let mut graph = assemble_graph(&context, &fingerprints, &focused_batches)?;
     relink_affected_graph(
         &mut graph,
@@ -1178,6 +1378,10 @@ pub fn scan_workspace_with_overrides(
     graph.evidence.sort_by(|left, right| left.id.cmp(&right.id));
     graph.evidence.dedup_by(|left, right| left.id == right.id);
     graph.link_decisions = manual_links.decisions;
+    worker::report_progress(
+        code_system_graph_core::JobPhase::GraphAssembly,
+        u64::try_from(graph.nodes.len().saturating_add(graph.edges.len())).unwrap_or(u64::MAX),
+    );
     let GraphAssembly {
         nodes,
         edges,
@@ -1200,7 +1404,20 @@ pub fn scan_workspace_with_overrides(
         })
         .cloned()
         .map_or_else(
-            || analyze_communities(&snapshot_id, &nodes, &edges, community_config.clone()),
+            || {
+                analyze_communities_with_progress(
+                    &snapshot_id,
+                    &nodes,
+                    &edges,
+                    community_config.clone(),
+                    |completed| {
+                        worker::report_progress(
+                            code_system_graph_core::JobPhase::Communities,
+                            completed,
+                        );
+                    },
+                )
+            },
             Ok,
         )?;
     let community_delta_count = previous_communities.as_ref().map_or(0, |previous| {
@@ -1208,23 +1425,59 @@ pub fn scan_workspace_with_overrides(
             .changes
             .len()
     });
+    worker::report_progress(
+        code_system_graph_core::JobPhase::Communities,
+        u64::try_from(community_snapshot.communities.len()).unwrap_or(u64::MAX),
+    );
     let extractor_runs = extractor_runs(&snapshot_id, &fingerprints, &plan);
     let manual_link_records = persisted_manual_link_records(&snapshot_id, &link_decisions)?;
-    store.clear_query_cache(&context.manifest.name)?;
-    store.publish_snapshot(SnapshotBatch {
-        workspace: &context.registry.record,
-        snapshot_id: &snapshot_id,
-        nodes: &nodes,
-        edges: &edges,
-        evidence: &evidence,
-        fingerprints: &fingerprints,
-        extractor_batches: &focused_batches.stored_batches,
-        extractor_runs: &extractor_runs,
-        manual_links: &manual_link_records,
-        community_snapshot: Some(&community_snapshot),
-    })?;
-    let mut degradations = focused_batches.degradations.clone();
-    degradations.extend(corroboration.degradations);
+    let mut staged_degradations = focused_batches.degradations.clone();
+    staged_degradations.extend(corroboration.degradations.clone());
+    staged_degradations.extend(stored_batch_degradations(&focused_batches.stored_batches)?);
+    let (_, staged_degradations) = finalize_scan_degradations(staged_degradations);
+    let mut artifact_execution = artifact_execution_summary(&focused_batches.artifact_durations_ms);
+    artifact_execution.checkpoint_hits = checkpoint_hits;
+    artifact_execution.checkpoints_written = focused_batches.checkpoint_writes;
+    let candidate = work_state::StagedSnapshot {
+        snapshot_id,
+        nodes,
+        edges,
+        evidence,
+        fingerprints,
+        extractor_batches: focused_batches.stored_batches,
+        extractor_runs,
+        manual_links: manual_link_records,
+        community_snapshot,
+        community_delta_count,
+        corroborated_symbol_count: corroboration.confirmed_symbols,
+        affected_test_count: corroboration.affected_tests,
+        execution: artifact_execution,
+        degradations: staged_degradations,
+    };
+    work_state
+        .store_candidate_snapshot(
+            &context.manifest.name,
+            &candidate_fingerprint,
+            &candidate,
+            current_unix_millis(),
+        )
+        .map_err(ApplicationError::Initialization)?;
+    publish_snapshot_candidate(
+        &mut store,
+        SnapshotBatch {
+            workspace: &context.registry.record,
+            snapshot_id: &candidate.snapshot_id,
+            nodes: &candidate.nodes,
+            edges: &candidate.edges,
+            evidence: &candidate.evidence,
+            fingerprints: &candidate.fingerprints,
+            extractor_batches: &candidate.extractor_batches,
+            extractor_runs: &candidate.extractor_runs,
+            manual_links: &candidate.manual_links,
+            community_snapshot: Some(&candidate.community_snapshot),
+        },
+    )?;
+    let mut degradations = candidate.degradations.clone();
     for item in &corroboration.reports {
         let Some(capability) = &item.report.capability else {
             continue;
@@ -1237,24 +1490,43 @@ pub fn scan_workspace_with_overrides(
             ));
         }
     }
-    degradations.extend(stored_batch_degradations(&focused_batches.stored_batches)?);
     let (degradation_count, degradations) = finalize_scan_degradations(degradations);
+    let _ = work_state.complete_candidate(&context.manifest.name);
     Ok(ScanSummary {
+        execution: candidate.execution,
         workspace: context.manifest.name,
-        snapshot_id,
-        node_count: nodes.len(),
-        edge_count: edges.len(),
-        evidence_count: evidence.len(),
-        community_count: community_snapshot.communities.len(),
-        community_delta_count,
-        discovered_input_count: fingerprints.len(),
+        snapshot_id: candidate.snapshot_id,
+        node_count: candidate.nodes.len(),
+        edge_count: candidate.edges.len(),
+        evidence_count: candidate.evidence.len(),
+        community_count: candidate.community_snapshot.communities.len(),
+        community_delta_count: candidate.community_delta_count,
+        discovered_input_count: candidate.fingerprints.len(),
         changed_input_count: plan.changed_count(),
         reused_snapshot: false,
-        corroborated_symbol_count: corroboration.confirmed_symbols,
-        affected_test_count: corroboration.affected_tests,
+        corroborated_symbol_count: candidate.corroborated_symbol_count,
+        affected_test_count: candidate.affected_test_count,
         degradation_count,
         degradations,
     })
+}
+
+fn publish_snapshot_candidate(
+    store: &mut SqliteStore,
+    batch: SnapshotBatch<'_>,
+) -> Result<(), StoreError> {
+    const REPORT_INTERVAL: u64 = 1_024;
+    let mut pending = 0_u64;
+    worker::report_progress(code_system_graph_core::JobPhase::Publication, 1);
+    store.publish_snapshot_with_progress(batch, |rows| {
+        worker::check_time(code_system_graph_core::JobPhase::Publication);
+        pending = pending.saturating_add(rows);
+        if pending >= REPORT_INTERVAL {
+            worker::report_progress(code_system_graph_core::JobPhase::Publication, pending);
+            pending = 0;
+        }
+    })?;
+    Ok(())
 }
 
 /// Traces the current stored graph and returns a versioned conservative envelope.
@@ -2590,13 +2862,130 @@ pub fn status_workspace(
     repositories.sort_by(|left, right| {
         (&left.repo_id, &left.checkout_id).cmp(&(&right.repo_id, &right.checkout_id))
     });
+    let watcher = watcher_status(
+        database_path,
+        &current.manifest.name,
+        current.execution_policy.max_no_progress_time_ms,
+        &store.database_instance_id()?,
+    );
     Ok(WorkspaceStatus {
         workspace: current.manifest.name,
         schema_version: store.schema_version()?,
         integrity_ok: store.integrity_check()?,
         freshness: freshness_summary(&repositories),
         repositories,
+        watcher,
     })
+}
+
+fn watcher_status(
+    database: &Path,
+    workspace: &str,
+    stale_after_ms: u64,
+    database_instance_id: &str,
+) -> WatcherStatus {
+    if !work_state::work_path(database).exists() {
+        return WatcherStatus {
+            state: WatcherState::NeverStarted,
+            detail: None,
+        };
+    }
+    let lease = work_state::WorkState::open(database, database_instance_id)
+        .and_then(|state| state.watcher_lease(workspace));
+    let Ok(Some(lease)) = lease else {
+        return WatcherStatus {
+            state: WatcherState::NeverStarted,
+            detail: None,
+        };
+    };
+    let persisted = match lease.state.as_str() {
+        "expired_idle" => Some(WatcherState::ExpiredIdle),
+        "expired_session" => Some(WatcherState::ExpiredSession),
+        "failed_limit" => Some(WatcherState::FailedLimit),
+        "active" => None,
+        _ => Some(WatcherState::Stale),
+    };
+    if let Some(state) = persisted {
+        return WatcherStatus {
+            state,
+            detail: lease.detail,
+        };
+    }
+    let identity_matches = lease
+        .pid
+        .zip(lease.process_start_identity.as_deref())
+        .is_some_and(|(pid, expected)| worker::process_identity(pid).as_deref() == Some(expected));
+    let heartbeat_fresh = lease.heartbeat_unix_ms.is_some_and(|heartbeat| {
+        current_unix_millis().saturating_sub(heartbeat) <= stale_after_ms.saturating_mul(2)
+    });
+    if identity_matches && heartbeat_fresh {
+        WatcherStatus {
+            state: WatcherState::Active,
+            detail: lease.detail,
+        }
+    } else {
+        WatcherStatus {
+            state: WatcherState::Stale,
+            detail: Some("watcher heartbeat or process start identity is stale".to_owned()),
+        }
+    }
+}
+
+/// Initializes the operational lease used by the hidden finite-watcher implementation.
+#[doc(hidden)]
+pub fn start_watcher_lease(
+    config: &Path,
+    database: &Path,
+) -> Result<(String, ExecutionPolicy), ApplicationError> {
+    let context = load_workspace_context(config, &ScanOverrides::default())?;
+    let identity = worker::process_identity(std::process::id()).ok_or_else(|| {
+        ApplicationError::Initialization("failed to resolve watcher process identity".to_owned())
+    })?;
+    let database_instance_id = SqliteStore::open(database)?.database_instance_id()?;
+    work_state::WorkState::open(database, &database_instance_id)
+        .and_then(|state| {
+            state.start_watcher(
+                &context.manifest.name,
+                std::process::id(),
+                &identity,
+                current_unix_millis(),
+            )
+        })
+        .map_err(ApplicationError::Initialization)?;
+    Ok((context.manifest.name, context.execution_policy))
+}
+
+/// Renews the hidden finite-watcher heartbeat and, for relevant success, its idle lease.
+#[doc(hidden)]
+pub fn heartbeat_watcher_lease(
+    database: &Path,
+    workspace: &str,
+    successful_activity: bool,
+) -> Result<(), ApplicationError> {
+    let database_instance_id = work_database_instance_id(database)?;
+    work_state::WorkState::open(database, &database_instance_id)
+        .and_then(|state| {
+            state.heartbeat_watcher(workspace, current_unix_millis(), successful_activity)
+        })
+        .map_err(ApplicationError::Initialization)
+}
+
+/// Persists one terminal hidden finite-watcher state.
+#[doc(hidden)]
+pub fn finish_watcher_lease(
+    database: &Path,
+    workspace: &str,
+    state: &str,
+    detail: Option<&str>,
+) -> Result<(), ApplicationError> {
+    let database_instance_id = work_database_instance_id(database)?;
+    work_state::WorkState::open(database, &database_instance_id)
+        .and_then(|work| work.finish_watcher(workspace, state, detail, current_unix_millis()))
+        .map_err(ApplicationError::Initialization)
+}
+
+fn work_database_instance_id(database: &Path) -> Result<String, ApplicationError> {
+    Ok(SqliteStore::open_read_only(database)?.database_instance_id()?)
 }
 
 /// Inspects, validates, compares, or explains contracts in the current immutable graph.
@@ -2685,7 +3074,7 @@ pub fn doctor_workspace(
             name: "sqlite".to_owned(),
             expected_version,
             actual_version,
-            migrations_consistent: Some(actual_version == Some(expected_version)),
+            metadata_consistent: Some(actual_version == Some(expected_version)),
         }],
         integrity: vec![
             IntegrityDoctorInput {
@@ -2847,31 +3236,6 @@ pub fn backup_database(
     Ok(BackupSummary {
         database: database_path.to_string_lossy().into_owned(),
         backup: backup_path.to_string_lossy().into_owned(),
-    })
-}
-
-/// Plans or applies database migrations.
-///
-/// # Errors
-///
-/// Returns [`ApplicationError`] when schema validation, backup, or migration fails.
-pub fn migrate_database(
-    database_path: &Path,
-    dry_run: bool,
-) -> Result<MigrationSummary, ApplicationError> {
-    let report = if dry_run {
-        SqliteStore::migration_plan(database_path)?
-    } else {
-        SqliteStore::migrate(database_path)?
-    };
-    Ok(MigrationSummary {
-        from_version: report.from_version,
-        to_version: report.to_version,
-        backup: report
-            .backup_path
-            .map(|path| path.to_string_lossy().into_owned()),
-        applied: report.applied,
-        dry_run,
     })
 }
 
@@ -3157,6 +3521,8 @@ fn load_workspace_context(
     let manifest = parse_manifest(&manifest_source)?;
     let extraction_budgets = ExtractionBudgets::resolve(manifest.extraction_budgets.as_ref())
         .map_err(ManifestError::from)?;
+    let execution_policy = ExecutionPolicy::resolve(manifest.execution_policy.as_ref())
+        .map_err(ManifestError::from)?;
     for alias in overrides.repo_openapi.keys() {
         if !manifest.repos.contains_key(alias) {
             return Err(ApplicationError::UnknownOverrideRepository(alias.clone()));
@@ -3164,7 +3530,10 @@ fn load_workspace_context(
     }
     let mut registry = register_workspace(config_path, &manifest_source, &manifest)?;
     let mut repository_configs = BTreeMap::new();
-    let mut fingerprint_material = manifest_source;
+    let mut semantic_manifest = manifest.clone();
+    semantic_manifest.execution_policy = None;
+    let mut fingerprint_material = serde_json::to_string(&semantic_manifest)
+        .map_err(|error| ApplicationError::Initialization(error.to_string()))?;
     for (alias, repository) in &manifest.repos {
         let checkout_path = registry
             .checkout_path(alias)
@@ -3185,6 +3554,7 @@ fn load_workspace_context(
         registry,
         repository_configs,
         extraction_budgets,
+        execution_policy,
     })
 }
 
@@ -3252,6 +3622,8 @@ fn assemble_focused_batches(
     fingerprints: &[ArtifactFingerprint],
     previous: &[StoredExtractorBatch],
     plan: &ExtractorBatchPlan,
+    cached_keys: &BTreeSet<ArtifactKey>,
+    work_state: &mut work_state::WorkState,
 ) -> Result<FocusedBatchState, ApplicationError> {
     let previous_by_key = previous
         .iter()
@@ -3294,13 +3666,16 @@ fn assemble_focused_batches(
     let mut stored_batches = Vec::new();
     let mut degradations = Vec::new();
     let mut force_relink = false;
+    let mut checkpoint_writes = 0_u64;
+    let mut artifact_durations_ms = Vec::new();
     for fingerprint in fingerprints
         .iter()
         .filter(|fingerprint| focused_extractor(&fingerprint.extractor))
     {
+        let artifact_started = Instant::now();
         let key = ArtifactKey::from(fingerprint);
         let reusable = previous_by_key.get(&key).copied().filter(|batch| {
-            planned_actions.get(&key) == Some(&BatchAction::Reuse)
+            (planned_actions.get(&key) == Some(&BatchAction::Reuse) || cached_keys.contains(&key))
                 && batch.source.content_hash == fingerprint.content_hash
                 && batch.extractor_version == EXTRACTION_CONTRACT_VERSION
                 && batch.budget_fingerprint == context.extraction_budgets.fingerprint()
@@ -3328,6 +3703,8 @@ fn assemble_focused_batches(
             } else {
                 generated_client_batches.push(load_extractor_batch(stored)?);
             }
+            worker::report_progress(code_system_graph_core::JobPhase::Extraction, 1);
+            artifact_durations_ms.push(duration_millis(artifact_started.elapsed()));
             continue;
         }
         if previous_by_key.contains_key(&key) {
@@ -3347,6 +3724,24 @@ fn assemble_focused_batches(
         if source_was_lossy {
             degradations.push(format!("{} contains invalid UTF-8 and was decoded lossily; extracted evidence is incomplete", fingerprint.path.display));
         }
+        let mut persist = |stored: StoredExtractorBatch| -> Result<(), ApplicationError> {
+            if work_state
+                .put_batch(
+                    &stored,
+                    context.execution_policy.max_checkpoint_cache_bytes,
+                    current_unix_millis(),
+                )
+                .map_err(ApplicationError::Initialization)?
+            {
+                checkpoint_writes = checkpoint_writes.checked_add(1).ok_or_else(|| {
+                    ApplicationError::Initialization(
+                        "checkpoint write counter overflowed".to_owned(),
+                    )
+                })?;
+            }
+            stored_batches.push(stored);
+            Ok(())
+        };
         if source_extractor(&fingerprint.extractor) {
             let syntax = inspect_source_syntax(
                 source_syntax_language(&fingerprint.extractor),
@@ -3393,22 +3788,22 @@ fn assemble_focused_batches(
                 }
             }
             let batch = ExtractorBatch::new(fingerprint.clone(), observations);
-            stored_batches.push(store_extractor_batch(
+            persist(store_extractor_batch(
                 &batch,
                 &mut tracker,
                 source_was_lossy,
-            )?);
+            )?)?;
             source_batches.push(batch);
         } else if fingerprint.extractor == "code-system-graph.packages" {
             let portable_path = portable_path(&fingerprint.path.display);
             let manifest =
                 extract_package_manifest_with_tracker(&portable_path, &source, &mut tracker)?;
             let batch = ExtractorBatch::new(fingerprint.clone(), vec![manifest]);
-            stored_batches.push(store_extractor_batch(
+            persist(store_extractor_batch(
                 &batch,
                 &mut tracker,
                 source_was_lossy,
-            )?);
+            )?)?;
             package_batches.push(batch);
         } else if graphql_extractor(&fingerprint.extractor) {
             let portable_path = portable_path(&fingerprint.path.display);
@@ -3445,11 +3840,11 @@ fn assemble_focused_batches(
                 _ => unreachable!("graphql extractor classification must be exhaustive"),
             };
             let batch = ExtractorBatch::new(fingerprint.clone(), vec![document]);
-            stored_batches.push(store_extractor_batch(
+            persist(store_extractor_batch(
                 &batch,
                 &mut tracker,
                 source_was_lossy,
-            )?);
+            )?)?;
             graphql_batches.push(batch);
         } else if event_extractor(&fingerprint.extractor) {
             let portable_path = portable_path(&fingerprint.path.display);
@@ -3466,11 +3861,11 @@ fn assemble_focused_batches(
                 document
             };
             let batch = ExtractorBatch::new(fingerprint.clone(), vec![document]);
-            stored_batches.push(store_extractor_batch(
+            persist(store_extractor_batch(
                 &batch,
                 &mut tracker,
                 source_was_lossy,
-            )?);
+            )?)?;
             event_batches.push(batch);
         } else if protobuf_extractor(&fingerprint.extractor) {
             let portable_path = portable_path(&fingerprint.path.display);
@@ -3493,11 +3888,11 @@ fn assemble_focused_batches(
                 ))
             };
             let batch = ExtractorBatch::new(fingerprint.clone(), vec![document]);
-            stored_batches.push(store_extractor_batch(
+            persist(store_extractor_batch(
                 &batch,
                 &mut tracker,
                 source_was_lossy,
-            )?);
+            )?)?;
             protobuf_batches.push(batch);
         } else if data_extractor(&fingerprint.extractor) {
             let portable_path = portable_path(&fingerprint.path.display);
@@ -3519,11 +3914,11 @@ fn assemble_focused_batches(
                 ));
             }
             let batch = ExtractorBatch::new(fingerprint.clone(), vec![document]);
-            stored_batches.push(store_extractor_batch(
+            persist(store_extractor_batch(
                 &batch,
                 &mut tracker,
                 source_was_lossy,
-            )?);
+            )?)?;
             data_batches.push(batch);
         } else if infrastructure_extractor(&fingerprint.extractor) {
             let portable_path = portable_path(&fingerprint.path.display);
@@ -3541,11 +3936,11 @@ fn assemble_focused_batches(
                 _ => unreachable!("infrastructure extractor classification must be exhaustive"),
             };
             let batch = ExtractorBatch::new(fingerprint.clone(), vec![document]);
-            stored_batches.push(store_extractor_batch(
+            persist(store_extractor_batch(
                 &batch,
                 &mut tracker,
                 source_was_lossy,
-            )?);
+            )?)?;
             infrastructure_batches.push(batch);
         } else if documentation_extractor(&fingerprint.extractor) {
             let portable_path = portable_path(&fingerprint.path.display);
@@ -3562,34 +3957,36 @@ fn assemble_focused_batches(
                 _ => unreachable!("documentation extractor classification must be exhaustive"),
             };
             let batch = ExtractorBatch::new(fingerprint.clone(), vec![document]);
-            stored_batches.push(store_extractor_batch(
+            persist(store_extractor_batch(
                 &batch,
                 &mut tracker,
                 source_was_lossy,
-            )?);
+            )?)?;
             documentation_batches.push(batch);
         } else if fingerprint.extractor == "code-system-graph.config.safe" {
             let portable_path = portable_path(&fingerprint.path.display);
             let document = extract_safe_config(&portable_path, &source)?;
             let batch = ExtractorBatch::new(fingerprint.clone(), vec![document]);
-            stored_batches.push(store_extractor_batch(
+            persist(store_extractor_batch(
                 &batch,
                 &mut tracker,
                 source_was_lossy,
-            )?);
+            )?)?;
             config_batches.push(batch);
         } else {
             let portable_path = portable_path(&fingerprint.path.display);
             let metadata =
                 extract_generated_client_metadata(&portable_path, &source, &mut tracker)?;
             let batch = ExtractorBatch::new(fingerprint.clone(), metadata);
-            stored_batches.push(store_extractor_batch(
+            persist(store_extractor_batch(
                 &batch,
                 &mut tracker,
                 source_was_lossy,
-            )?);
+            )?)?;
             generated_client_batches.push(batch);
         }
+        worker::report_progress(code_system_graph_core::JobPhase::Extraction, 1);
+        artifact_durations_ms.push(duration_millis(artifact_started.elapsed()));
     }
     source_batches.sort_by_key(ExtractorBatch::key);
     package_batches.sort_by_key(ExtractorBatch::key);
@@ -3619,6 +4016,8 @@ fn assemble_focused_batches(
         stored_batches,
         degradations,
         force_relink,
+        checkpoint_writes,
+        artifact_durations_ms,
     })
 }
 
@@ -4917,8 +5316,29 @@ fn discover_focused_artifacts(
     ignore_policy: &IgnorePolicy,
 ) -> Result<Vec<(PathBuf, &'static str)>, ApplicationError> {
     let mut pending = vec![checkout_path.to_path_buf()];
+    let canonical_checkout =
+        fs::canonicalize(checkout_path).map_err(|source| ApplicationError::ReadFile {
+            path: checkout_path.to_path_buf(),
+            source,
+        })?;
+    let mut visited = BTreeSet::new();
     let mut discovered = Vec::new();
     while let Some(directory) = pending.pop() {
+        let canonical_directory =
+            fs::canonicalize(&directory).map_err(|source| ApplicationError::ReadFile {
+                path: directory.clone(),
+                source,
+            })?;
+        if !canonical_directory.starts_with(&canonical_checkout) {
+            return Err(ApplicationError::ArtifactOutsideCheckout {
+                path: canonical_directory,
+                checkout: canonical_checkout,
+            });
+        }
+        if !visited.insert(canonical_directory) {
+            continue;
+        }
+        worker::report_progress(code_system_graph_core::JobPhase::Discovery, 1);
         let entries = fs::read_dir(&directory).map_err(|source| ApplicationError::ReadFile {
             path: directory.clone(),
             source,
@@ -5194,14 +5614,16 @@ fn fingerprint_artifact(
             checkout: checkout_path.to_path_buf(),
         }
     })?;
-    Ok(ArtifactFingerprint {
+    let fingerprint = ArtifactFingerprint {
         repo_id: repository.id.clone(),
         checkout_id: repository.checkout_id.clone(),
         path: encode_native_path(relative),
         extractor: extractor.to_owned(),
         content_hash: stable_id_bytes("artifact-content", &content),
         size_bytes: metadata.len(),
-    })
+    };
+    worker::report_progress(code_system_graph_core::JobPhase::Fingerprinting, 1);
+    Ok(fingerprint)
 }
 
 fn artifact_key(

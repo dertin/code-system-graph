@@ -2,6 +2,7 @@ PRAGMA foreign_keys = ON;
 
 CREATE TABLE IF NOT EXISTS schema_metadata (
     version INTEGER PRIMARY KEY,
+    instance_id TEXT NOT NULL,
     applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 

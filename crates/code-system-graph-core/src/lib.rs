@@ -13,6 +13,7 @@ mod data_contracts;
 mod documents;
 mod event_graph;
 mod events;
+mod execution_policy;
 mod extraction_budget;
 mod extraction_graph;
 mod extractor;
@@ -58,7 +59,9 @@ pub use changes::{
     AnalyzerVersions, ChangeError, ChangeHunk, ChangeProvider, ChangeRequest, ChangeScope, ChangeSet, ChangeSourceLayer, ChangeValidity, ChangeValidityInput, ChangedFile, ChangedFileStatus, ChangedLine, ChangedLineKind, CommitFileSelection, CommitGate, CommitIntent, CommitSelection, GitCliChangeProvider, StaleReason, evaluate_commit_gate, validate_change_set
 };
 pub use codegraph::{CodeGraphConfig, CodeGraphProvider};
-pub use communities::{CommunityError, analyze_communities, compare_community_snapshots};
+pub use communities::{
+    CommunityError, analyze_communities, analyze_communities_with_progress, compare_community_snapshots
+};
 pub use config::{
     ConfigError, ConfigSource, EffectiveRepositoryConfig, apply_openapi_override, resolve_repository_config
 };
@@ -77,6 +80,9 @@ pub use documents::{
 pub use event_graph::{EventGraphFacts, event_documents_to_graph};
 pub use events::{
     DeliverySemantics, EventBroker, EventDocument, EventEvidenceLine, EventExtractionError, EventObservation, EventRole, EventSchemaDefinition, EventSchemaField, extract_asyncapi, parse_event_source
+};
+pub use execution_policy::{
+    ExecutionLimitExceeded, ExecutionPolicy, ExecutionPolicyOverrides, ExecutionResource, ExecutionSummary, InvalidExecutionPolicy, JobPhase, MonotonicClock, ScanJobTracker
 };
 pub use extraction_budget::{
     BoundedJsonWriter, EXTRACTION_CONTRACT_VERSION, ExtractionBudgetOverrides, ExtractionBudgets, ExtractionClock, ExtractionLimitExceeded, ExtractionResource, ExtractionTracker, InvalidExtractionBudget

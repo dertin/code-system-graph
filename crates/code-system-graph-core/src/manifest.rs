@@ -5,6 +5,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::execution_policy::{ExecutionPolicy, ExecutionPolicyOverrides, InvalidExecutionPolicy};
 use crate::extraction_budget::{
     ExtractionBudgetOverrides, ExtractionBudgets, InvalidExtractionBudget
 };
@@ -33,6 +34,9 @@ pub struct WorkspaceManifest {
     /// Optional operator-owned extraction safety limit overrides.
     #[serde(rename = "extractionBudgets", default)]
     pub extraction_budgets: Option<ExtractionBudgetOverrides>,
+    /// Optional operator-owned supervised-execution policy overrides.
+    #[serde(rename = "executionPolicy", default)]
+    pub execution_policy: Option<ExecutionPolicyOverrides>,
 }
 
 /// Repository registration and boundary inputs.
@@ -170,6 +174,9 @@ pub enum ManifestError {
     /// An extraction budget is zero or cannot be represented internally.
     #[error("invalid workspace manifest: {0}")]
     InvalidExtractionBudget(#[from] InvalidExtractionBudget),
+    /// An execution policy value or relationship is invalid.
+    #[error("invalid workspace manifest: {0}")]
+    InvalidExecutionPolicy(#[from] InvalidExecutionPolicy),
     /// The workspace does not register any repositories.
     #[error("manifest field `repos` must contain at least one repository")]
     EmptyRepositories,
@@ -227,6 +234,7 @@ pub fn parse_manifest(input: &str) -> Result<WorkspaceManifest, ManifestError> {
     }
     validate_manual_links(&manifest.manual_links)?;
     ExtractionBudgets::resolve(manifest.extraction_budgets.as_ref())?;
+    ExecutionPolicy::resolve(manifest.execution_policy.as_ref())?;
     for (alias, repository) in &manifest.repos {
         validate_not_empty(&format!("repos.{alias}"), alias)?;
         validate_not_empty(&format!("repos.{alias}.path"), &repository.path)?;
@@ -392,7 +400,7 @@ mod tests {
     use code_system_graph_model::EdgeKind;
 
     use super::{MANUAL_REASON_MAX_BYTES, ManifestError, parse_manifest};
-    use crate::{ExtractionBudgets, IgnorePatternError};
+    use crate::{ExecutionPolicy, ExtractionBudgets, IgnorePatternError};
 
     const VALID: &str = r"
 version: 1
@@ -492,6 +500,70 @@ repos:
             parse_manifest(&unknown),
             Err(ManifestError::InvalidYaml(_))
         ));
+    }
+
+    #[test]
+    fn execution_policy_should_resolve_defaults_and_partial_overrides() {
+        let manifest = parse_manifest(VALID).expect("manifest without execution policy is valid");
+        assert_eq!(
+            ExecutionPolicy::resolve(manifest.execution_policy.as_ref()).expect("defaults"),
+            ExecutionPolicy::default()
+        );
+
+        let input = VALID.replace(
+            "name: commerce",
+            "name: commerce\nexecutionPolicy:\n  maxScanWallTimeMs: 28800000\n  maxNoProgressTimeMs: 600000",
+        );
+        let manifest = parse_manifest(&input).expect("partial policy override is valid");
+        let effective = ExecutionPolicy::resolve(manifest.execution_policy.as_ref())
+            .expect("partial policy resolves");
+        assert_eq!(effective.max_scan_wall_time_ms, 28_800_000);
+        assert_eq!(effective.max_no_progress_time_ms, 600_000);
+        assert_eq!(
+            effective.max_worker_memory_bytes,
+            ExecutionPolicy::default().max_worker_memory_bytes
+        );
+    }
+
+    #[test]
+    fn execution_policy_should_reject_zero_overflow_unknown_and_invalid_relationships() {
+        let zero = VALID.replace(
+            "name: commerce",
+            "name: commerce\nexecutionPolicy:\n  maxWorkerMemoryBytes: 0",
+        );
+        let overflow = VALID.replace(
+            "name: commerce",
+            "name: commerce\nexecutionPolicy:\n  maxWorkerMemoryBytes: 18446744073709551616",
+        );
+        let unknown = VALID.replace(
+            "name: commerce",
+            "name: commerce\nexecutionPolicy:\n  maximumMagic: 1",
+        );
+        let invalid = VALID.replace(
+            "name: commerce",
+            "name: commerce\nexecutionPolicy:\n  maxScanWallTimeMs: 1000\n  maxNoProgressTimeMs: 1001\n  maxCodeGraphSyncWallTimeMsPerRepo: 1000\n  gracefulTerminationMs: 1",
+        );
+
+        assert!(matches!(
+            parse_manifest(&zero),
+            Err(ManifestError::InvalidExecutionPolicy(_))
+        ));
+        assert!(matches!(
+            parse_manifest(&overflow),
+            Err(ManifestError::InvalidYaml(_))
+        ));
+        assert!(matches!(
+            parse_manifest(&unknown),
+            Err(ManifestError::InvalidYaml(_))
+        ));
+        let invalid_result = parse_manifest(&invalid);
+        assert!(
+            matches!(
+                invalid_result,
+                Err(ManifestError::InvalidExecutionPolicy(_))
+            ),
+            "unexpected invalid relationship result: {invalid_result:?}"
+        );
     }
 
     #[test]
