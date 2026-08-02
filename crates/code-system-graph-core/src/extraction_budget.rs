@@ -602,7 +602,7 @@ impl ExtractionTracker {
 
     fn sample_time(&mut self, tree_sitter: bool) -> Result<(), ExtractionLimitExceeded> {
         let units = self.work_units.saturating_add(self.tree_sitter_nodes);
-        if units / 1_024 > self.sampled_units / 1_024 {
+        if (self.sampled_units == 0 && units > 0) || units / 1_024 > self.sampled_units / 1_024 {
             self.sampled_units = units;
             self.check_elapsed(tree_sitter)?;
         }
@@ -860,7 +860,7 @@ mod tests {
     }
 
     #[test]
-    fn monotonic_time_should_sample_every_1024_units_and_preserve_counter_precedence() {
+    fn monotonic_time_should_check_first_work_and_preserve_counter_precedence() {
         let mut budgets = ExtractionBudgets {
             max_work_units_per_artifact: 2_048,
             max_structured_wall_time_ms_per_artifact: 5,
@@ -872,7 +872,6 @@ mod tests {
             &budgets,
             Box::new(FixedClock(Duration::from_millis(6))),
         );
-        assert!(tracker.charge_work(1_023).is_ok());
         assert!(matches!(
             tracker.charge_work(1),
             Err(ExtractionLimitExceeded {

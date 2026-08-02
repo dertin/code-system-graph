@@ -59,6 +59,8 @@ pub fn inspect_source_syntax(
     source: &str,
     tracker: &mut ExtractionTracker,
 ) -> Result<SourceSyntaxInspection, SourceSyntaxError> {
+    tracker.check_input_bytes(u64::try_from(source.len()).unwrap_or(u64::MAX))?;
+    tracker.check_tree_sitter_time()?;
     let grammar = grammar(language, source_path);
     let mut parser = Parser::new();
     parser.set_language(&grammar)?;
@@ -86,6 +88,7 @@ pub fn inspect_source_syntax(
     let root = tree.root_node();
     let mut boundary_candidate_count = 0;
     count_candidates(language, root, &mut boundary_candidate_count, tracker)?;
+    tracker.check_tree_sitter_time()?;
     Ok(SourceSyntaxInspection {
         has_error: root.has_error(),
         boundary_candidate_count,

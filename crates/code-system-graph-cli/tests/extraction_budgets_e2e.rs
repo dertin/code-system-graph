@@ -3,6 +3,7 @@
 use code_system_graph::{
     ApplicationError, ScanOverrides, scan_workspace, scan_workspace_with_overrides
 };
+use code_system_graph_core::ExtractionResource;
 use code_system_graph_store_sqlite::SqliteStore;
 
 fn manifest(max_work: Option<u64>) -> String {
@@ -16,6 +17,32 @@ fn graphql_with_exact_bytes(size: usize) -> String {
     let prefix = "type Query { viewer: String }\n#";
     assert!(size > prefix.len());
     format!("{prefix}{}", "x".repeat(size - prefix.len()))
+}
+
+#[test]
+fn configured_openapi_budget_should_apply_during_extraction() -> anyhow::Result<()> {
+    let temporary = tempfile::tempdir()?;
+    let repository = temporary.path().join("api");
+    std::fs::create_dir_all(&repository)?;
+    std::fs::write(
+        repository.join("openapi.yaml"),
+        "openapi: 3.1.0\npaths:\n  /orders:\n    get: {}\n    post: {}\n",
+    )?;
+    let config = temporary.path().join("code-system-graph.yaml");
+    let database = temporary.path().join("code-system-graph.db");
+    std::fs::write(
+        &config,
+        "version: 1\nname: openapi-budget-e2e\nextractionBudgets:\n  maxObservationsPerArtifact: 1\nrepos:\n  api:\n    path: api\n    openapi: openapi.yaml\n",
+    )?;
+
+    assert!(matches!(
+        scan_workspace(&config, &database),
+        Err(ApplicationError::ExtractionLimit(error))
+            if error.resource == ExtractionResource::Observations
+                && error.artifact == "openapi.yaml"
+                && error.extractor == "code-system-graph.http.openapi"
+    ));
+    Ok(())
 }
 
 #[test]

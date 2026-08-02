@@ -1,5 +1,6 @@
 //! Supervised process boundary for mutating workspace passes.
 
+use std::ffi::OsStr;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -14,7 +15,9 @@ use code_system_graph_core::{
 use serde::{Deserialize, Serialize};
 use sysinfo::{Pid, ProcessesToUpdate, System};
 
-use super::{ApplicationError, ScanOverrides, ScanSummary, load_workspace_context};
+use super::{
+    ApplicationError, ScanOverrides, ScanSummary, application_exit_code, load_execution_policy
+};
 use crate::sync::{SyncSummary, sync_workspace_direct};
 
 const PROTOCOL_VERSION: u8 = 1;
@@ -34,7 +37,6 @@ static WORKER_TRACKER: OnceLock<Mutex<ScanJobTracker>> = OnceLock::new();
 struct WorkerEnvelope {
     schema_version: u8,
     run_id: String,
-    execution_policy: ExecutionPolicy,
     request: WorkerRequest,
 }
 
@@ -57,6 +59,10 @@ enum WorkerRequest {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum WorkerMessage {
+    Policy {
+        schema_version: u8,
+        policy: ExecutionPolicy,
+    },
     Progress {
         schema_version: u8,
         phase: JobPhase,
@@ -79,11 +85,20 @@ enum WorkerMessage {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum WorkerFailure {
-    ExtractionLimit { error: ExtractionLimitExceeded },
-    ExecutionLimit { error: ExecutionLimitExceeded },
+    ExtractionLimit {
+        error: ExtractionLimitExceeded,
+    },
+    ExecutionLimit {
+        error: ExecutionLimitExceeded,
+    },
     PartialScanBudgetChanged,
-    Transient { message: String },
-    Other { message: String },
+    Transient {
+        message: String,
+    },
+    Other {
+        exit_code: code_system_graph_core::ExitCode,
+        message: String,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -136,11 +151,19 @@ pub fn run_worker_from_stdio() -> Result<(), String> {
     WORKER_PROTOCOL_ACTIVE.store(true, Ordering::Release);
     WORKER_LIMIT_REPORTED.store(false, Ordering::Release);
     COMPLETED_UNITS.store(0, Ordering::Release);
+    let config = match &envelope.request {
+        WorkerRequest::Scan { config, .. } | WorkerRequest::Sync { config, .. } => config,
+    };
+    let policy = match load_execution_policy(config) {
+        Ok(policy) => policy,
+        Err(error) => return write_message(&failure_message(error)),
+    };
+    write_message(&WorkerMessage::Policy {
+        schema_version: PROTOCOL_VERSION,
+        policy: policy.clone(),
+    })?;
     WORKER_TRACKER
-        .set(Mutex::new(ScanJobTracker::new(
-            envelope.run_id,
-            envelope.execution_policy,
-        )))
+        .set(Mutex::new(ScanJobTracker::new(envelope.run_id, policy)))
         .map_err(|_| "worker execution tracker was already initialized".to_owned())?;
     report_progress(JobPhase::Configuration, 1);
     let message = match envelope.request {
@@ -174,16 +197,30 @@ pub fn run_worker_from_stdio() -> Result<(), String> {
 fn failure_message(error: ApplicationError) -> WorkerMessage {
     let retryable = retryable_application_error(&error);
     let failure = match error {
-        ApplicationError::ExtractionLimit(error) => WorkerFailure::ExtractionLimit { error },
-        ApplicationError::Graphql(GraphqlExtractionError::LimitExceeded(error)) => {
-            WorkerFailure::ExtractionLimit { error }
-        }
+        ApplicationError::ExtractionLimit(error)
+        | ApplicationError::HttpExtraction(
+            code_system_graph_core::HttpExtractionError::LimitExceeded(error),
+        )
+        | ApplicationError::PackageManifest(
+            code_system_graph_core::PackageManifestError::LimitExceeded(error),
+        )
+        | ApplicationError::GeneratedClient(
+            code_system_graph_core::GeneratedClientError::LimitExceeded(error),
+        )
+        | ApplicationError::Graphql(GraphqlExtractionError::LimitExceeded(error))
+        | ApplicationError::Protobuf(
+            code_system_graph_core::ProtobufExtractionError::LimitExceeded(error),
+        )
+        | ApplicationError::SourceSyntax(
+            code_system_graph_core::SourceSyntaxError::LimitExceeded(error),
+        ) => WorkerFailure::ExtractionLimit { error },
         ApplicationError::ExecutionLimit(error) => WorkerFailure::ExecutionLimit { error },
         ApplicationError::PartialScanBudgetChanged => WorkerFailure::PartialScanBudgetChanged,
         error if retryable => WorkerFailure::Transient {
             message: error.to_string(),
         },
         error => WorkerFailure::Other {
+            exit_code: application_exit_code(&error),
             message: error.to_string(),
         },
     };
@@ -326,7 +363,30 @@ pub(crate) fn supervise_scan(
         database: database.to_path_buf(),
         overrides: overrides.clone(),
     };
-    match supervise(config, &request, ExpectedResult::Scan, None)? {
+    match supervise(config, &request, ExpectedResult::Scan, None, None)? {
+        SupervisedResult::Scan(summary) => Ok(summary),
+        SupervisedResult::Sync(_) => unreachable!("worker result kind was validated"),
+    }
+}
+
+pub(crate) fn supervise_scan_with_executable(
+    config: &Path,
+    database: &Path,
+    overrides: &ScanOverrides,
+    executable: &Path,
+) -> Result<ScanSummary, ApplicationError> {
+    let request = WorkerRequest::Scan {
+        config: config.to_path_buf(),
+        database: database.to_path_buf(),
+        overrides: overrides.clone(),
+    };
+    match supervise(
+        config,
+        &request,
+        ExpectedResult::Scan,
+        None,
+        Some(executable),
+    )? {
         SupervisedResult::Scan(summary) => Ok(summary),
         SupervisedResult::Sync(_) => unreachable!("worker result kind was validated"),
     }
@@ -344,7 +404,32 @@ pub(crate) fn supervise_sync(
         overrides: overrides.clone(),
         synchronize_codegraph,
     };
-    match supervise(config, &request, ExpectedResult::Sync, None)? {
+    match supervise(config, &request, ExpectedResult::Sync, None, None)? {
+        SupervisedResult::Sync(summary) => Ok(summary),
+        SupervisedResult::Scan(_) => unreachable!("worker result kind was validated"),
+    }
+}
+
+pub(crate) fn supervise_sync_with_executable(
+    config: &Path,
+    database: &Path,
+    overrides: &ScanOverrides,
+    synchronize_codegraph: bool,
+    executable: &Path,
+) -> Result<SyncSummary, ApplicationError> {
+    let request = WorkerRequest::Sync {
+        config: config.to_path_buf(),
+        database: database.to_path_buf(),
+        overrides: overrides.clone(),
+        synchronize_codegraph,
+    };
+    match supervise(
+        config,
+        &request,
+        ExpectedResult::Sync,
+        None,
+        Some(executable),
+    )? {
         SupervisedResult::Sync(summary) => Ok(summary),
         SupervisedResult::Scan(_) => unreachable!("worker result kind was validated"),
     }
@@ -368,6 +453,7 @@ pub(crate) fn supervise_sync_with_wall_time_cap(
         &request,
         ExpectedResult::Sync,
         Some(wall_time_cap_ms),
+        None,
     )? {
         SupervisedResult::Sync(summary) => Ok(summary),
         SupervisedResult::Scan(_) => unreachable!("worker result kind was validated"),
@@ -375,21 +461,21 @@ pub(crate) fn supervise_sync_with_wall_time_cap(
 }
 
 fn supervise(
-    config: &Path,
+    _config: &Path,
     request: &WorkerRequest,
     expected: ExpectedResult,
     wall_time_cap_ms: Option<u64>,
+    explicit_executable: Option<&Path>,
 ) -> Result<SupervisedResult, ApplicationError> {
-    let policy = load_workspace_context(config, &ScanOverrides::default())?.execution_policy;
-    let mut supervisory_policy = policy.clone();
+    let mut supervisory_policy = ExecutionPolicy::default();
     if let Some(cap) = wall_time_cap_ms {
-        supervisory_policy.max_scan_wall_time_ms = policy.max_scan_wall_time_ms.min(cap.max(1));
+        supervisory_policy.max_scan_wall_time_ms =
+            supervisory_policy.max_scan_wall_time_ms.min(cap.max(1));
     }
     let run_id = next_run_id();
     let envelope = WorkerEnvelope {
         schema_version: PROTOCOL_VERSION,
         run_id: run_id.clone(),
-        execution_policy: policy,
         request: request.clone(),
     };
     let request_bytes = serde_json::to_vec(&envelope)
@@ -405,7 +491,8 @@ fn supervise(
         ));
     }
 
-    let executable = worker_executable()?;
+    let executable =
+        explicit_executable.map_or_else(worker_executable, validate_worker_executable)?;
     let mut command = Command::new(executable);
     command
         .arg("__worker-v1")
@@ -441,7 +528,8 @@ fn supervise(
         &group,
         &reader,
         &run_id,
-        &supervisory_policy,
+        &mut supervisory_policy,
+        wall_time_cap_ms,
         expected,
         &cancellation.requested,
     )
@@ -449,6 +537,7 @@ fn supervise(
 
 #[expect(
     clippy::too_many_lines,
+    clippy::too_many_arguments,
     reason = "Supervisor keeps protocol, deadlines, memory, termination, and final accounting together"
 )]
 fn monitor_worker(
@@ -456,7 +545,8 @@ fn monitor_worker(
     group: &ProcessGroup,
     reader: &ProtocolReader,
     run_id: &str,
-    policy: &ExecutionPolicy,
+    policy: &mut ExecutionPolicy,
+    wall_time_cap_ms: Option<u64>,
     expected: ExpectedResult,
     cancellation: &AtomicBool,
 ) -> Result<SupervisedResult, ApplicationError> {
@@ -467,6 +557,7 @@ fn monitor_worker(
     let mut peak_memory = 0;
     let mut final_result = None;
     let mut successful_exit_observed = None;
+    let mut policy_received = false;
     let mut system = System::new();
     let root_pid = Pid::from_u32(child.id());
 
@@ -487,11 +578,25 @@ fn monitor_worker(
                 break;
             };
             match message {
+                Ok(WorkerMessage::Policy {
+                    schema_version,
+                    policy: mut effective,
+                }) if schema_version == PROTOCOL_VERSION && !policy_received => {
+                    if let Some(cap) = wall_time_cap_ms {
+                        effective.max_scan_wall_time_ms =
+                            effective.max_scan_wall_time_ms.min(cap.max(1));
+                    }
+                    *policy = effective;
+                    policy_received = true;
+                }
                 Ok(WorkerMessage::Progress {
                     schema_version,
                     phase: next_phase,
                     completed_units: next_completed,
-                }) if schema_version == PROTOCOL_VERSION && next_completed > completed_units => {
+                }) if schema_version == PROTOCOL_VERSION
+                    && policy_received
+                    && next_completed > completed_units =>
+                {
                     completed_units = next_completed;
                     phase = next_phase;
                     last_progress = Instant::now();
@@ -501,6 +606,7 @@ fn monitor_worker(
                     schema_version,
                     summary,
                 }) if schema_version == PROTOCOL_VERSION
+                    && policy_received
                     && matches!(expected, ExpectedResult::Scan) =>
                 {
                     final_result = Some(SupervisedResult::Scan(summary));
@@ -509,6 +615,7 @@ fn monitor_worker(
                     schema_version,
                     summary,
                 }) if schema_version == PROTOCOL_VERSION
+                    && policy_received
                     && matches!(expected, ExpectedResult::Sync) =>
                 {
                     final_result = Some(SupervisedResult::Sync(summary));
@@ -673,7 +780,9 @@ fn application_failure(failure: WorkerFailure) -> ApplicationError {
         WorkerFailure::ExecutionLimit { error } => ApplicationError::ExecutionLimit(error),
         WorkerFailure::PartialScanBudgetChanged => ApplicationError::PartialScanBudgetChanged,
         WorkerFailure::Transient { message } => ApplicationError::TransientExecution(message),
-        WorkerFailure::Other { message } => ApplicationError::Initialization(message),
+        WorkerFailure::Other { exit_code, message } => {
+            ApplicationError::SupervisedApplication { exit_code, message }
+        }
     }
 }
 
@@ -705,19 +814,70 @@ fn worker_executable() -> Result<PathBuf, ApplicationError> {
     {
         return Ok(current);
     }
-    let candidate = current.parent().and_then(Path::parent).map(|directory| {
-        directory.join(if cfg!(windows) {
-            "csgraph.exe"
-        } else {
-            "csgraph"
-        })
-    });
-    if let Some(candidate) = candidate.filter(|path| path.is_file()) {
+    let worker_name = if cfg!(windows) {
+        "csgraph.exe"
+    } else {
+        "csgraph"
+    };
+    if current.parent().and_then(Path::file_name) != Some(OsStr::new("out"))
+        && let Some(candidate) = current
+            .parent()
+            .map(|directory| directory.join(worker_name))
+        && candidate.is_file()
+    {
         return Ok(candidate);
     }
+    if current
+        .parent()
+        .and_then(Path::file_name)
+        .is_some_and(|name| name == "deps")
+        && let Some(candidate) = current
+            .parent()
+            .and_then(Path::parent)
+            .map(|directory| directory.join(worker_name))
+        && candidate.is_file()
+    {
+        return Ok(candidate);
+    }
+    let cargo_build_layout = current
+        .ancestors()
+        .any(|path| path.file_name() == Some(OsStr::new("code-system-graph")))
+        && current
+            .ancestors()
+            .any(|path| path.file_name() == Some(OsStr::new("build")));
+    if cargo_build_layout
+        && let Some(candidate) = current.ancestors().find_map(|directory| {
+            matches!(
+                directory.file_name().and_then(OsStr::to_str),
+                Some("debug" | "release")
+            )
+            .then(|| directory.join(worker_name))
+        })
+        && candidate.is_file()
+    {
+        return Ok(candidate);
+    }
+    if let Some(paths) = std::env::var_os("PATH") {
+        for directory in std::env::split_paths(&paths) {
+            let candidate = directory.join(worker_name);
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
+        }
+    }
     Err(ApplicationError::Initialization(format!(
-        "could not locate the csgraph worker next to `{}`",
+        "could not locate a csgraph worker for `{}`; install `csgraph` on PATH or use the explicit worker-executable library API",
         current.display()
+    )))
+}
+
+fn validate_worker_executable(path: &Path) -> Result<PathBuf, ApplicationError> {
+    if path.is_file() {
+        return Ok(path.to_path_buf());
+    }
+    Err(ApplicationError::Initialization(format!(
+        "configured scan worker `{}` is not a file",
+        path.display()
     )))
 }
 
@@ -1038,8 +1198,28 @@ mod tests {
         assert!(!retryable_application_error(&deterministic));
     }
 
+    #[test]
+    fn worker_failure_should_preserve_public_application_classification() {
+        for original in [
+            ApplicationError::UnknownOverrideRepository("missing".to_owned()),
+            ApplicationError::WorkspaceNameMismatch {
+                requested: "wrong".to_owned(),
+                manifest: "expected".to_owned(),
+            },
+        ] {
+            let expected = application_exit_code(&original);
+            let WorkerMessage::Failure { failure, .. } = failure_message(original) else {
+                panic!("failure message expected");
+            };
+            let restored = application_failure(failure);
+            assert_eq!(application_exit_code(&restored), expected);
+            assert!(!restored.to_string().is_empty());
+        }
+    }
+
     #[cfg(unix)]
     fn supervise_script(script: &str, policy: &ExecutionPolicy) -> ApplicationError {
+        let mut policy = policy.clone();
         let mut command = Command::new("sh");
         command
             .args(["-c", script])
@@ -1055,7 +1235,8 @@ mod tests {
             &group,
             &ProtocolReader::spawn(stdout),
             "test-run",
-            policy,
+            &mut policy,
+            None,
             ExpectedResult::Scan,
             &AtomicBool::new(false),
         )
@@ -1083,6 +1264,37 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn worker_reported_policy_should_cover_the_running_child() {
+        let effective = ExecutionPolicy {
+            max_scan_wall_time_ms: 75,
+            max_no_progress_time_ms: 500,
+            graceful_termination_ms: 10,
+            ..ExecutionPolicy::default()
+        };
+        let message = serde_json::to_string(&WorkerMessage::Policy {
+            schema_version: PROTOCOL_VERSION,
+            policy: effective,
+        })
+        .expect("policy protocol");
+        let outer = ExecutionPolicy {
+            max_scan_wall_time_ms: 5_000,
+            max_no_progress_time_ms: 5_000,
+            graceful_termination_ms: 10,
+            ..ExecutionPolicy::default()
+        };
+        let error = supervise_script(&format!("printf '%s\\n' '{message}'; sleep 30"), &outer);
+        assert!(matches!(
+            error,
+            ApplicationError::ExecutionLimit(ExecutionLimitExceeded {
+                resource: ExecutionResource::WallTimeMs,
+                maximum: 75,
+                ..
+            })
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn repeated_activity_without_completed_work_should_not_renew_watchdog() {
         let policy = ExecutionPolicy {
             max_scan_wall_time_ms: 1_000,
@@ -1090,8 +1302,15 @@ mod tests {
             graceful_termination_ms: 10,
             ..ExecutionPolicy::default()
         };
-        let script = "while true; do printf '%s\\n' '{\"type\":\"progress\",\"schema_version\":1,\"phase\":\"discovery\",\"completed_units\":1}'; sleep 0.02; done";
-        let error = supervise_script(script, &policy);
+        let policy_message = serde_json::to_string(&WorkerMessage::Policy {
+            schema_version: PROTOCOL_VERSION,
+            policy: policy.clone(),
+        })
+        .expect("policy protocol");
+        let script = format!(
+            "printf '%s\\n' '{policy_message}'; while true; do printf '%s\\n' '{{\"type\":\"progress\",\"schema_version\":1,\"phase\":\"discovery\",\"completed_units\":1}}'; sleep 0.02; done"
+        );
+        let error = supervise_script(&script, &policy);
         assert!(
             matches!(
                 error,

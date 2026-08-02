@@ -410,6 +410,7 @@ pub fn extract_graphql_document_with_tracker(
             append_schema_document(document, &mut output);
             finish_document(&mut output);
             charge_graphql_document(&output, tracker)?;
+            tracker.check_structured_time()?;
             Ok(output)
         }
         (Err(_), Ok(document)) => {
@@ -417,6 +418,7 @@ pub fn extract_graphql_document_with_tracker(
             append_query_document(document, &mut output, tracker)?;
             finish_document(&mut output);
             charge_graphql_document(&output, tracker)?;
+            tracker.check_structured_time()?;
             Ok(output)
         }
         (Err(schema_error), Err(query_error)) => Err(GraphqlExtractionError::InvalidGraphql {
@@ -460,12 +462,13 @@ pub fn extract_graphql_persisted_operations_with_tracker(
     tracker: &mut ExtractionTracker,
 ) -> Result<Vec<GraphqlPersistedOperation>, GraphqlExtractionError> {
     tracker.check_input_bytes(u64::try_from(input.len()).unwrap_or(u64::MAX))?;
-    let value: serde_json::Value =
-        serde_json::from_str(input).map_err(|error| GraphqlExtractionError::InvalidJson {
-            source_path: source_path.to_owned(),
-            line: usize_to_u32(error.line()),
-            message: error.to_string(),
-        })?;
+    let parsed = serde_json::from_str(input);
+    tracker.check_structured_time()?;
+    let value: serde_json::Value = parsed.map_err(|error| GraphqlExtractionError::InvalidJson {
+        source_path: source_path.to_owned(),
+        line: usize_to_u32(error.line()),
+        message: error.to_string(),
+    })?;
     let mut candidates = Vec::new();
     collect_persisted_candidates(&value, None, &mut candidates, 1, tracker)?;
     if candidates.is_empty() {
@@ -482,6 +485,7 @@ pub fn extract_graphql_persisted_operations_with_tracker(
     }
     output.sort();
     output.dedup();
+    tracker.check_structured_time()?;
     Ok(output)
 }
 
@@ -529,20 +533,28 @@ pub fn parse_graphql_source_with_tracker(
             continue;
         }
         tracker.charge_work(1)?;
-        if let Ok(mut document) = extract_graphql_document_with_tracker("", &literal.text, tracker)
-        {
-            shift_document_lines(&mut document, literal.start_line.saturating_sub(1));
-            merge_document(&mut output, document);
-        } else {
-            output.complete = false;
-            output
-                .warnings
-                .push(format!("invalid_embedded_graphql:{}", literal.start_line));
+        match extract_graphql_document_with_tracker("", &literal.text, tracker) {
+            Ok(mut document) => {
+                shift_document_lines(&mut document, literal.start_line.saturating_sub(1));
+                merge_document(&mut output, document);
+            }
+            Err(GraphqlExtractionError::LimitExceeded(error)) => return Err(error.into()),
+            Err(
+                GraphqlExtractionError::InvalidGraphql { .. }
+                | GraphqlExtractionError::InvalidJson { .. }
+                | GraphqlExtractionError::UnsupportedPersistedManifest { .. },
+            ) => {
+                output.complete = false;
+                output
+                    .warnings
+                    .push(format!("invalid_embedded_graphql:{}", literal.start_line));
+            }
         }
     }
     output.resolvers = extract_resolvers(language, input);
     tracker.charge_observation(u64::try_from(output.resolvers.len()).unwrap_or(u64::MAX))?;
     finish_document(&mut output);
+    tracker.check_structured_time()?;
     Ok(output)
 }
 
@@ -2614,6 +2626,7 @@ fn usize_to_u32(value: usize) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ExtractionResource;
 
     #[test]
     fn extracts_complete_sdl_type_shapes_and_federation() {
@@ -2909,6 +2922,30 @@ mod tests {
 
         assert!(!document.complete);
         assert_eq!(document.warnings, vec!["invalid_embedded_graphql:1"]);
+    }
+
+    #[test]
+    fn embedded_graphql_should_propagate_budget_failures() {
+        let budgets = ExtractionBudgets {
+            max_work_units_per_artifact: 1,
+            ..ExtractionBudgets::default()
+        };
+        let mut tracker = ExtractionTracker::new("source.js", "graphql-source", &budgets);
+        let result = parse_graphql_source_with_tracker(
+            SourceLanguage::JavaScript,
+            "const operation = gql`query Viewer { viewer { id } }`;",
+            &mut tracker,
+        );
+
+        assert!(matches!(
+            result,
+            Err(GraphqlExtractionError::LimitExceeded(
+                ExtractionLimitExceeded {
+                    resource: ExtractionResource::WorkUnits,
+                    ..
+                }
+            ))
+        ));
     }
 
     #[test]

@@ -175,7 +175,7 @@ pub(crate) async fn watch_workspace(
     debounce: Duration,
     poll_interval: Option<Duration>,
 ) -> anyhow::Result<()> {
-    let (workspace, policy) = start_watcher_lease(&config, &database)?;
+    let (workspace, owner_token, policy) = start_watcher_lease(&config, &database)?;
     let session_started = Instant::now();
     let mut idle_renewed = session_started;
     let mut last_pass_started = session_started;
@@ -197,16 +197,17 @@ pub(crate) async fn watch_workspace(
             finish_and_emit(
                 &database,
                 &workspace,
+                &owner_token,
                 "expired_session",
                 "watcher reached its absolute session deadline",
             )?;
             return Ok(());
         }
-        finish_after_error(&database, &workspace, &error)?;
+        finish_after_error(&database, &workspace, &owner_token, &error)?;
         return Err(error);
     }
     loop {
-        heartbeat_watcher_lease(&database, &workspace, false)?;
+        heartbeat_watcher_lease(&database, &workspace, &owner_token, false)?;
         let idle_deadline = idle_renewed + Duration::from_millis(policy.watch_idle_timeout_ms);
         let session_deadline =
             session_started + Duration::from_millis(policy.max_watch_session_wall_time_ms);
@@ -219,6 +220,7 @@ pub(crate) async fn watch_workspace(
                 finish_and_emit(
                     &database,
                     &workspace,
+                    &owner_token,
                     "stale",
                     "watcher stopped by operator signal",
                 )?;
@@ -229,6 +231,7 @@ pub(crate) async fn watch_workspace(
                 finish_and_emit(
                     &database,
                     &workspace,
+                    &owner_token,
                     "expired_idle",
                     "watcher reached its inactivity deadline",
                 )?;
@@ -239,6 +242,7 @@ pub(crate) async fn watch_workspace(
                 finish_and_emit(
                     &database,
                     &workspace,
+                    &owner_token,
                     "expired_session",
                     "watcher reached its absolute session deadline",
                 )?;
@@ -256,6 +260,7 @@ pub(crate) async fn watch_workspace(
             finish_and_emit(
                 &database,
                 &workspace,
+                &owner_token,
                 "expired_session",
                 "watcher reached its absolute session deadline",
             )?;
@@ -276,16 +281,17 @@ pub(crate) async fn watch_workspace(
                 finish_and_emit(
                     &database,
                     &workspace,
+                    &owner_token,
                     "expired_session",
                     "watcher reached its absolute session deadline",
                 )?;
                 return Ok(());
             }
-            finish_after_error(&database, &workspace, &error)?;
+            finish_after_error(&database, &workspace, &owner_token, &error)?;
             return Err(error);
         }
         idle_renewed = Instant::now();
-        heartbeat_watcher_lease(&database, &workspace, true)?;
+        heartbeat_watcher_lease(&database, &workspace, &owner_token, true)?;
         let refreshed = match WatchScope::load(&config, &database, &overrides) {
             Ok(refreshed) => refreshed,
             Err(error) => {
@@ -444,6 +450,7 @@ async fn wait_for_debounced_change(
 fn finish_after_error(
     database: &Path,
     workspace: &str,
+    owner_token: &str,
     error: &anyhow::Error,
 ) -> anyhow::Result<()> {
     let is_limit = error
@@ -455,17 +462,30 @@ fn finish_after_error(
             )
         });
     let state = if is_limit { "failed_limit" } else { "stale" };
-    finish_and_emit(database, workspace, state, &format!("{error:#}"))
+    finish_and_emit(
+        database,
+        workspace,
+        owner_token,
+        state,
+        &format!("{error:#}"),
+    )
 }
 
 fn finish_and_emit(
     database: &Path,
     workspace: &str,
+    owner_token: &str,
     state: &str,
     detail: &str,
 ) -> anyhow::Result<()> {
     let bounded_detail = detail.chars().take(512).collect::<String>();
-    finish_watcher_lease(database, workspace, state, Some(&bounded_detail))?;
+    finish_watcher_lease(
+        database,
+        workspace,
+        owner_token,
+        state,
+        Some(&bounded_detail),
+    )?;
     println!(
         "{}",
         serde_json::to_string(&WatchOutput::Termination {

@@ -16,7 +16,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use atomic_write_file::AtomicWriteFile;
 use code_system_graph_core::{
-    AffectedTestsRequest, AnalyzerVersions, ArtifactKey, BatchAction, BatchPlanError, BitbucketProvider, ChangeAnalysisError, ChangeAnalysisOptions, ChangeError, ChangeImpactReport, ChangeProvider, ChangeRequest, ChangeScope, ChangeSet, CodeGraphConfig, CodeGraphProvider, CommunityError, ConfigDoctorInput, ConfigError, ConfigExtractionError, ContractReport, ContractRequest, CorroborationReport, DataDocument, DataExtractionError, DeclaredImplementation, DeclaredTestCase, DoctorReport, DoctorRequest, DocumentationDocument, DocumentationExtractionError, EXTRACTION_CONTRACT_VERSION, EffectiveRepositoryConfig, EventDocument, EventExtractionError, EventGraphFacts, ExecutionPolicy, ExitCode, ExportReport, ExportRequest, ExtractionBudgets, ExtractionGraphFacts, ExtractionLimitExceeded, ExtractionTracker, ExtractorBatch, ExtractorBatchPlan, FederatedGraph, FreshnessDoctorInput, GeneratedClientError, GeneratedClientMetadata, GitCliChangeProvider, GitHubProvider, GraphqlDocument, GraphqlExtractionError, GraphqlGraphFacts, HttpBoundary, HttpExtractionError, ImpactContext, ImpactError, ImpactReport, ImpactRequest, ImpactTarget, IncrementalPlan, InfrastructureDocument, InfrastructureExtractionError, IntegrityDoctorInput, InterfaceError, LinkError, LocalCodeIntelligenceProvider, LocalContextRequest, LocalContextResult, LocalEnrichmentInput, LocalEnrichmentStatus, LocalImpactItem, LocalImpactRequest, ManifestEdit, ManifestEditError, ManifestError, ManualLinkConfig, ManualLinkError, PackageGraphFacts, PackageManifest, PackageManifestError, PrAuthToken, ProtobufDocument, ProtobufExtractionError, ProtobufGraphFacts, ProviderBudget, ProviderCapability, ProviderDoctorInput, ProviderDoctorStatus, ProviderError, ProviderRequest, ProviderStatus, PullRequestCoordinates, PullRequestError, PullRequestInspectRequest, PullRequestInspection, PullRequestListPage, PullRequestListRequest, PullRequestListState, PullRequestProvider, PullRequestProviderConfig, PullRequestProviderKind, QueryError, RecommendedCommand, RegisteredWorkspace, RegistryError, ReqwestPrHttpTransport, SafeConfigDocument, SchemaDoctorInput, SearchFilters, SearchReport, SearchRequest, SourceEpistemicStatus, SourceGraphFacts, SourceLanguage, SourceObservation, SourceRole, SourceSyntaxError, SourceSyntaxLanguage, SourceWarning, SymbolAnchor, SymbolCorroboration, TraceError, TraversalReport, TraversalRequest, WorkspaceManifest, affected_link_keys, analyze_changes, analyze_communities_with_progress, analyze_impact, apply_openapi_override, classify_interface_error, commit_manifest_edit, compare_community_snapshots, corroborate_repository, declared_implementation, declared_test_case, doctor, documents_to_graph, encode_native_path, event_documents_to_graph, export_graph, extract_asyncapi, extract_codeowners, extract_data_artifact, extract_docker_compose, extract_generated_client_metadata, extract_graphql_document_with_tracker, extract_graphql_persisted_operations_with_tracker, extract_helm, extract_kubernetes, extract_markdown, extract_openapi, extract_package_manifest_with_tracker, extract_protobuf_with_tracker, extract_safe_config, extract_service_catalog, extract_terraform, graphql_documents_to_graph, inspect_contracts, inspect_source_syntax, link_declared_implementations, link_declared_tests, link_http_boundaries, link_registered_package_owners, load_extractor_batch, merge_affected_link_neighborhoods, package_manifest_to_graph, parse_event_source, parse_go_source, parse_graphql_source_with_tracker, parse_java_source, parse_javascript_source_at_path, parse_literal_sql_source_at_root, parse_manifest, parse_protobuf_generated_source, parse_python_source, parse_rust_source, parse_typescript_source_at_path, plan_extractor_batches, plan_incremental_scan, preview_add_manual_link, preview_add_repository, preview_remove_repository, protobuf_documents_to_graph, register_workspace, resolve_manual_links, resolve_repository_config, search, source_observations_to_graph, store_extractor_batch, traverse
+    AffectedTestsRequest, AnalyzerVersions, ArtifactKey, BatchAction, BatchPlanError, BitbucketProvider, ChangeAnalysisError, ChangeAnalysisOptions, ChangeError, ChangeImpactReport, ChangeProvider, ChangeRequest, ChangeScope, ChangeSet, CodeGraphConfig, CodeGraphProvider, CommunityError, ConfigDoctorInput, ConfigError, ConfigExtractionError, ContractReport, ContractRequest, CorroborationReport, DataDocument, DataExtractionError, DeclaredImplementation, DeclaredTestCase, DoctorReport, DoctorRequest, DocumentationDocument, DocumentationExtractionError, EXTRACTION_CONTRACT_VERSION, EffectiveRepositoryConfig, EventDocument, EventExtractionError, EventGraphFacts, ExecutionPolicy, ExitCode, ExportReport, ExportRequest, ExtractionBudgets, ExtractionGraphFacts, ExtractionLimitExceeded, ExtractionTracker, ExtractorBatch, ExtractorBatchPlan, FederatedGraph, FreshnessDoctorInput, GeneratedClientError, GeneratedClientMetadata, GitCliChangeProvider, GitHubProvider, GraphqlDocument, GraphqlExtractionError, GraphqlGraphFacts, HttpBoundary, HttpExtractionError, ImpactContext, ImpactError, ImpactReport, ImpactRequest, ImpactTarget, IncrementalPlan, InfrastructureDocument, InfrastructureExtractionError, IntegrityDoctorInput, InterfaceError, LinkError, LocalCodeIntelligenceProvider, LocalContextRequest, LocalContextResult, LocalEnrichmentInput, LocalEnrichmentStatus, LocalImpactItem, LocalImpactRequest, ManifestEdit, ManifestEditError, ManifestError, ManualLinkConfig, ManualLinkError, PackageGraphFacts, PackageManifest, PackageManifestError, PrAuthToken, ProtobufDocument, ProtobufExtractionError, ProtobufGraphFacts, ProviderBudget, ProviderCapability, ProviderDoctorInput, ProviderDoctorStatus, ProviderError, ProviderRequest, ProviderStatus, PullRequestCoordinates, PullRequestError, PullRequestInspectRequest, PullRequestInspection, PullRequestListPage, PullRequestListRequest, PullRequestListState, PullRequestProvider, PullRequestProviderConfig, PullRequestProviderKind, QueryError, RecommendedCommand, RegisteredWorkspace, RegistryError, ReqwestPrHttpTransport, SafeConfigDocument, SchemaDoctorInput, SearchFilters, SearchReport, SearchRequest, SourceEpistemicStatus, SourceGraphFacts, SourceLanguage, SourceObservation, SourceRole, SourceSyntaxError, SourceSyntaxLanguage, SourceWarning, SymbolAnchor, SymbolCorroboration, TraceError, TraversalReport, TraversalRequest, WorkspaceManifest, affected_link_keys, analyze_changes, analyze_communities_with_progress, analyze_impact, apply_openapi_override, classify_interface_error, commit_manifest_edit, compare_community_snapshots, corroborate_repository, declared_implementation, declared_test_case, doctor, documents_to_graph, encode_native_path, event_documents_to_graph, export_graph, extract_asyncapi, extract_codeowners, extract_data_artifact, extract_docker_compose, extract_generated_client_metadata, extract_graphql_document_with_tracker, extract_graphql_persisted_operations_with_tracker, extract_helm, extract_kubernetes, extract_markdown, extract_openapi_with_tracker, extract_package_manifest_with_tracker, extract_protobuf_with_tracker, extract_safe_config, extract_service_catalog, extract_terraform, graphql_documents_to_graph, inspect_contracts, inspect_source_syntax, link_declared_implementations, link_declared_tests, link_http_boundaries, link_registered_package_owners, load_extractor_batch, merge_affected_link_neighborhoods, package_manifest_to_graph, parse_event_source, parse_go_source, parse_graphql_source_with_tracker, parse_java_source, parse_javascript_source_at_path, parse_literal_sql_source_at_root, parse_manifest, parse_protobuf_generated_source, parse_python_source, parse_rust_source, parse_typescript_source_at_path, plan_extractor_batches, plan_incremental_scan, preview_add_manual_link, preview_add_repository, preview_remove_repository, protobuf_documents_to_graph, register_workspace, resolve_manual_links, resolve_repository_config, search, source_observations_to_graph, store_extractor_batch, traverse
 };
 pub use code_system_graph_core::{
     ConfigSource, DEFAULT_EXCLUDES, IgnorePolicy, PROTECTED_EXCLUDES
@@ -30,7 +30,7 @@ use code_system_graph_store_sqlite::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 pub use sync::{
-    CodeGraphRepositorySync, CodeGraphSyncState, CodeGraphSyncSummary, SyncSummary, SyncTarget, sync_workspace_with_overrides, sync_workspace_with_wall_time_cap, workspace_sync_targets
+    CodeGraphRepositorySync, CodeGraphSyncState, CodeGraphSyncSummary, SyncSummary, SyncTarget, sync_workspace_with_overrides, sync_workspace_with_wall_time_cap, sync_workspace_with_worker_executable, workspace_sync_targets
 };
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
@@ -143,6 +143,9 @@ pub enum ApplicationError {
     /// Workspace already exists in the selected registry.
     #[error("workspace `{0}` is already registered")]
     WorkspaceAlreadyExists(String),
+    /// Another verified watcher owns the workspace lease.
+    #[error("watcher for workspace `{0}` is already active")]
+    WatcherAlreadyActive(String),
     /// Workspace is absent from the selected registry.
     #[error("workspace `{0}` is not registered")]
     WorkspaceNotFound(String),
@@ -192,6 +195,14 @@ pub enum ApplicationError {
     /// A supervised worker observed a retryable operating-system or storage contention failure.
     #[error("transient supervised execution failure: {0}")]
     TransientExecution(String),
+    /// A worker preserved the public classification of an application failure across IPC.
+    #[error("supervised execution failed: {message}")]
+    SupervisedApplication {
+        /// Stable public exit classification produced inside the worker.
+        exit_code: ExitCode,
+        /// Bounded error explanation produced inside the worker.
+        message: String,
+    },
     /// Client requested a traversal depth outside server bounds.
     #[error("trace max_depth must be between 1 and {maximum}; received {found}")]
     InvalidTraceDepth {
@@ -206,6 +217,7 @@ pub enum ApplicationError {
 #[must_use]
 pub const fn application_exit_code(error: &ApplicationError) -> ExitCode {
     match error {
+        ApplicationError::SupervisedApplication { exit_code, .. } => *exit_code,
         ApplicationError::Interface(source) => classify_interface_error(source),
         ApplicationError::ExecutionLimit(code_system_graph_core::ExecutionLimitExceeded {
             resource: code_system_graph_core::ExecutionResource::Cancellation,
@@ -216,7 +228,9 @@ pub const fn application_exit_code(error: &ApplicationError) -> ExitCode {
         ApplicationError::Change(ChangeError::Timeout { .. })
         | ApplicationError::PullRequest(PullRequestError::Timeout) => ExitCode::Timeout,
         ApplicationError::WorkspaceNotFound(_) => ExitCode::NotFound,
-        ApplicationError::WorkspaceAlreadyExists(_) => ExitCode::Conflict,
+        ApplicationError::WorkspaceAlreadyExists(_) | ApplicationError::WatcherAlreadyActive(_) => {
+            ExitCode::Conflict
+        }
         ApplicationError::Manifest(_)
         | ApplicationError::ExtractionLimit(_)
         | ApplicationError::ExecutionLimit(_)
@@ -257,6 +271,16 @@ pub const fn application_exit_code(error: &ApplicationError) -> ExitCode {
         | ApplicationError::Initialization(_)
         | ApplicationError::TransientExecution(_) => ExitCode::Internal,
     }
+}
+
+pub(crate) fn load_execution_policy(
+    config_path: &Path,
+) -> Result<ExecutionPolicy, ApplicationError> {
+    let manifest_source = read_file(config_path)?;
+    let manifest = parse_manifest(&manifest_source)?;
+    ExecutionPolicy::resolve(manifest.execution_policy.as_ref())
+        .map_err(ManifestError::from)
+        .map_err(Into::into)
 }
 
 /// Observable result of a successful scan.
@@ -1092,6 +1116,24 @@ pub fn scan_workspace_with_overrides(
     overrides: &ScanOverrides,
 ) -> Result<ScanSummary, ApplicationError> {
     worker::supervise_scan(config_path, database_path, overrides)
+}
+
+/// Scans through an explicitly selected compatible worker executable.
+///
+/// This entry point lets an embedding application re-execute its own binary after dispatching
+/// `__worker-v1` to [`run_worker_from_stdio`], so using the library does not require Cargo to have
+/// built the `csgraph` binary target next to the host executable.
+///
+/// # Errors
+///
+/// Returns [`ApplicationError`] when the worker cannot start or the supervised scan fails.
+pub fn scan_workspace_with_worker_executable(
+    config_path: &Path,
+    database_path: &Path,
+    overrides: &ScanOverrides,
+    worker_executable: &Path,
+) -> Result<ScanSummary, ApplicationError> {
+    worker::supervise_scan_with_executable(config_path, database_path, overrides, worker_executable)
 }
 
 #[doc(hidden)]
@@ -2936,23 +2978,43 @@ fn watcher_status(
 pub fn start_watcher_lease(
     config: &Path,
     database: &Path,
-) -> Result<(String, ExecutionPolicy), ApplicationError> {
-    let context = load_workspace_context(config, &ScanOverrides::default())?;
+) -> Result<(String, String, ExecutionPolicy), ApplicationError> {
+    let manifest_source = read_file(config)?;
+    let manifest = parse_manifest(&manifest_source)?;
+    let execution_policy = ExecutionPolicy::resolve(manifest.execution_policy.as_ref())
+        .map_err(ManifestError::from)?;
     let identity = worker::process_identity(std::process::id()).ok_or_else(|| {
         ApplicationError::Initialization("failed to resolve watcher process identity".to_owned())
     })?;
+    let now = current_unix_millis();
+    let owner_token = stable_id(
+        "watcher-lease",
+        &format!("{}:{}:{identity}:{now}", manifest.name, std::process::id()),
+    );
     let database_instance_id = SqliteStore::open(database)?.database_instance_id()?;
-    work_state::WorkState::open(database, &database_instance_id)
-        .and_then(|state| {
+    let result =
+        work_state::WorkState::open(database, &database_instance_id).and_then(|mut state| {
             state.start_watcher(
-                &context.manifest.name,
+                &manifest.name,
+                &owner_token,
                 std::process::id(),
                 &identity,
-                current_unix_millis(),
+                now,
+                execution_policy.max_no_progress_time_ms,
             )
-        })
-        .map_err(ApplicationError::Initialization)?;
-    Ok((context.manifest.name, context.execution_policy))
+        });
+    if let Err(message) = result {
+        if message
+            == format!(
+                "watcher for workspace `{}` is already active",
+                manifest.name
+            )
+        {
+            return Err(ApplicationError::WatcherAlreadyActive(manifest.name));
+        }
+        return Err(ApplicationError::Initialization(message));
+    }
+    Ok((manifest.name, owner_token, execution_policy))
 }
 
 /// Renews the hidden finite-watcher heartbeat and, for relevant success, its idle lease.
@@ -2960,12 +3022,18 @@ pub fn start_watcher_lease(
 pub fn heartbeat_watcher_lease(
     database: &Path,
     workspace: &str,
+    owner_token: &str,
     successful_activity: bool,
 ) -> Result<(), ApplicationError> {
     let database_instance_id = work_database_instance_id(database)?;
     work_state::WorkState::open(database, &database_instance_id)
         .and_then(|state| {
-            state.heartbeat_watcher(workspace, current_unix_millis(), successful_activity)
+            state.heartbeat_watcher(
+                workspace,
+                owner_token,
+                current_unix_millis(),
+                successful_activity,
+            )
         })
         .map_err(ApplicationError::Initialization)
 }
@@ -2975,12 +3043,15 @@ pub fn heartbeat_watcher_lease(
 pub fn finish_watcher_lease(
     database: &Path,
     workspace: &str,
+    owner_token: &str,
     state: &str,
     detail: Option<&str>,
 ) -> Result<(), ApplicationError> {
     let database_instance_id = work_database_instance_id(database)?;
     work_state::WorkState::open(database, &database_instance_id)
-        .and_then(|work| work.finish_watcher(workspace, state, detail, current_unix_millis()))
+        .and_then(|work| {
+            work.finish_watcher(workspace, owner_token, state, detail, current_unix_millis())
+        })
         .map_err(ApplicationError::Initialization)
 }
 
@@ -5126,7 +5197,12 @@ fn extract_boundaries(context: &WorkspaceContext) -> Result<Vec<HttpBoundary>, A
                 &context.extraction_budgets,
             );
             let (openapi_source, _) = read_source_file(&openapi_path, &mut tracker)?;
-            boundaries.extend(extract_openapi(&registered.id, openapi, &openapi_source)?);
+            boundaries.extend(extract_openapi_with_tracker(
+                &registered.id,
+                openapi,
+                &openapi_source,
+                &mut tracker,
+            )?);
         }
     }
     Ok(boundaries)

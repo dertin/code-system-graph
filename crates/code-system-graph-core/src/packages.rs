@@ -265,9 +265,16 @@ pub fn extract_package_manifest_with_tracker(
         _ => Err(PackageManifestError::UnsupportedPath(
             relative_path.to_owned(),
         )),
-    }?;
+    };
+    if matches!(result, Err(PackageManifestError::LimitExceeded(_))) {
+        return result;
+    }
+    tracker.check_structured_time()?;
+    let result = result?;
 
-    Ok(finalize(result))
+    let result = finalize(result);
+    tracker.check_structured_time()?;
+    Ok(result)
 }
 
 fn validate_relative_path(path: &str) -> Result<(), PackageManifestError> {
@@ -2294,8 +2301,19 @@ fn reject_nul(path: &str, content: &str) -> Result<(), PackageManifestError> {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
-    use crate::ExtractionResource;
+    use crate::{ExtractionClock, ExtractionResource};
+
+    #[derive(Debug)]
+    struct FixedClock(Duration);
+
+    impl ExtractionClock for FixedClock {
+        fn elapsed(&self) -> Duration {
+            self.0
+        }
+    }
 
     fn extract(path: &str, source: &str) -> PackageManifest {
         extract_package_manifest(path, source).expect("fixture should parse")
@@ -2327,6 +2345,26 @@ mod tests {
                 if error.resource == ExtractionResource::StructuralDepth
                     && error.observed == 65
                     && error.maximum == 64
+        ));
+    }
+
+    #[test]
+    fn short_package_extraction_should_check_its_final_deadline() {
+        let budgets = ExtractionBudgets {
+            max_structured_wall_time_ms_per_artifact: 1,
+            ..ExtractionBudgets::default()
+        };
+        let mut tracker = ExtractionTracker::with_clock(
+            "Cargo.toml",
+            "packages",
+            &budgets,
+            Box::new(FixedClock(Duration::from_millis(2))),
+        );
+
+        assert!(matches!(
+            extract_package_manifest_with_tracker("Cargo.toml", "", &mut tracker),
+            Err(PackageManifestError::LimitExceeded(error))
+                if error.resource == ExtractionResource::StructuredWallTimeMs
         ));
     }
 

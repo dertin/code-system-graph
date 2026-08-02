@@ -183,6 +183,30 @@ pub fn sync_workspace_with_overrides(
     super::worker::supervise_sync(config_path, database_path, overrides, synchronize_codegraph)
 }
 
+/// Synchronizes through an explicitly selected compatible worker executable.
+///
+/// Embedding applications can pass their own executable after dispatching `__worker-v1` to
+/// [`crate::run_worker_from_stdio`].
+///
+/// # Errors
+///
+/// Returns [`ApplicationError`] when the worker cannot start or synchronization fails.
+pub fn sync_workspace_with_worker_executable(
+    config_path: &Path,
+    database_path: &Path,
+    overrides: &ScanOverrides,
+    synchronize_codegraph: bool,
+    worker_executable: &Path,
+) -> Result<SyncSummary, ApplicationError> {
+    super::worker::supervise_sync_with_executable(
+        config_path,
+        database_path,
+        overrides,
+        synchronize_codegraph,
+        worker_executable,
+    )
+}
+
 #[doc(hidden)]
 pub fn sync_workspace_with_wall_time_cap(
     config_path: &Path,

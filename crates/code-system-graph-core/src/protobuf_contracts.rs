@@ -344,14 +344,14 @@ pub fn extract_protobuf_with_tracker(
     tracker.check_input_bytes(u64::try_from(input.len()).unwrap_or(u64::MAX))?;
     precheck_protobuf_depth(input, tracker)?;
     let mut parser = Parser::with_filename(input, source_path);
-    let parsed = parser
-        .parse()
-        .map_err(|error| ProtobufExtractionError::Parse {
-            source_path: source_path.to_owned(),
-            line: source_line(error.position.line),
-            column: source_line(error.position.column),
-            message: "parser rejected malformed input".to_owned(),
-        })?;
+    let parsed = parser.parse();
+    tracker.check_structured_time()?;
+    let parsed = parsed.map_err(|error| ProtobufExtractionError::Parse {
+        source_path: source_path.to_owned(),
+        line: source_line(error.position.line),
+        column: source_line(error.position.column),
+        message: "parser rejected malformed input".to_owned(),
+    })?;
 
     let (syntax, syntax_line) = extract_syntax(source_path, &parsed.elements)?;
     let (package, package_line) = extract_package(source_path, &parsed.elements)?;
@@ -407,7 +407,7 @@ pub fn extract_protobuf_with_tracker(
     services.sort_by(|left, right| left.full_name.cmp(&right.full_name));
     services.dedup_by(|left, right| left.full_name == right.full_name);
 
-    Ok(ProtoFile {
+    let output = ProtoFile {
         source_path: source_path.to_owned(),
         syntax,
         syntax_line,
@@ -421,7 +421,9 @@ pub fn extract_protobuf_with_tracker(
         messages,
         enums,
         services,
-    })
+    };
+    tracker.check_structured_time()?;
+    Ok(output)
 }
 
 /// Finds exact gRPC method paths in explicitly generated source.

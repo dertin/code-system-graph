@@ -99,7 +99,7 @@ pub use graphql_contracts::{
 };
 pub use graphql_graph::{GraphqlGraphFacts, graphql_documents_to_graph};
 pub use http::{
-    BoundaryRole, HttpBoundary, HttpExtractionError, extract_openapi, normalize_http_path
+    BoundaryRole, HttpBoundary, HttpExtractionError, extract_openapi, extract_openapi_with_tracker, normalize_http_path
 };
 pub use ignore_policy::{
     DEFAULT_EXCLUDES, IGNORE_POLICY_VERSION, IgnorePatternError, IgnorePolicy, PROTECTED_EXCLUDES, validate_excludes, validate_include_defaults

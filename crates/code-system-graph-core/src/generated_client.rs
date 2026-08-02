@@ -51,10 +51,17 @@ pub fn extract_generated_client_metadata(
     content: &str,
     tracker: &mut ExtractionTracker,
 ) -> Result<Vec<GeneratedClientMetadata>, GeneratedClientError> {
+    tracker.check_input_bytes(u64::try_from(content.len()).unwrap_or(u64::MAX))?;
+    tracker.check_structured_time()?;
     let normalized = source_path.replace('\\', "/");
     tracker.charge_portable_path(&normalized)?;
     if normalized.ends_with("openapitools.json") {
-        return extract_openapitools(&normalized, content, tracker);
+        let output = extract_openapitools(&normalized, content, tracker);
+        if matches!(output, Err(GeneratedClientError::LimitExceeded(_))) {
+            return output;
+        }
+        tracker.check_structured_time()?;
+        return output;
     }
     if normalized.ends_with(".openapi-generator/VERSION") {
         for _ in content.lines() {
@@ -62,11 +69,12 @@ pub fn extract_generated_client_metadata(
         }
         let version = content.trim();
         if version.is_empty() {
+            tracker.check_structured_time()?;
             return Ok(Vec::new());
         }
         tracker.charge_string(version)?;
         tracker.charge_observation(1)?;
-        return Ok(vec![GeneratedClientMetadata {
+        let output = vec![GeneratedClientMetadata {
             tool: "openapi-generator".to_owned(),
             name: None,
             generator_name: None,
@@ -75,7 +83,9 @@ pub fn extract_generated_client_metadata(
             version: Some(version.to_owned()),
             generated_file: None,
             line: 1,
-        }]);
+        }];
+        tracker.check_structured_time()?;
+        return Ok(output);
     }
     if normalized.ends_with(".openapi-generator/FILES") {
         let mut output = Vec::new();
@@ -99,6 +109,7 @@ pub fn extract_generated_client_metadata(
                 line: u32::try_from(index + 1).unwrap_or(u32::MAX),
             });
         }
+        tracker.check_structured_time()?;
         return Ok(output);
     }
     Err(GeneratedClientError::UnsupportedPath(

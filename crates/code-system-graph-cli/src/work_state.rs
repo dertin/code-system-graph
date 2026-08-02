@@ -8,11 +8,11 @@ use code_system_graph_model::{
     ArtifactFingerprint, CommunitySnapshot, Edge, Evidence, ExtractorRun, LinkDecision, Node, NodeId, StoredExtractorBatch, stable_id_bytes
 };
 use code_system_graph_store_sqlite::{ManualLinkDisposition, ManualLinkRecord};
-use rusqlite::{Connection, ErrorCode, OptionalExtension, params};
+use rusqlite::{Connection, ErrorCode, OptionalExtension, TransactionBehavior, params};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-const WORK_SCHEMA_VERSION: &str = "1";
+const WORK_SCHEMA_VERSION: &str = "1.0.0";
 
 enum WorkOpenError {
     Recreate,
@@ -134,6 +134,7 @@ impl WorkState {
                  CREATE TABLE IF NOT EXISTS watcher_lease (
                      workspace TEXT PRIMARY KEY,
                      state TEXT NOT NULL,
+                     owner_token TEXT NOT NULL,
                      pid INTEGER,
                      process_start_identity TEXT,
                      session_started_unix_ms INTEGER,
@@ -589,68 +590,122 @@ impl WorkState {
     }
 
     pub(crate) fn start_watcher(
-        &self,
+        &mut self,
         workspace: &str,
+        owner_token: &str,
         pid: u32,
         process_start_identity: &str,
         now_unix_ms: u64,
+        stale_after_ms: u64,
     ) -> Result<(), String> {
         let pid = i64::from(pid);
         let now = sqlite_integer(now_unix_ms, "watcher timestamp")?;
-        self.connection
+        let stale_before = sqlite_integer(
+            now_unix_ms.saturating_sub(stale_after_ms.saturating_mul(2)),
+            "watcher stale timestamp",
+        )?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| error.to_string())?;
+        let active_owner = transaction
+            .query_row(
+                "SELECT pid, process_start_identity
+                 FROM watcher_lease
+                 WHERE workspace = ?1 AND state = 'active' AND heartbeat_unix_ms >= ?2",
+                params![workspace, stale_before],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<i64>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        if active_owner.is_some_and(|(active_pid, identity)| {
+            let Some((active_pid, expected)) = active_pid
+                .and_then(|value| u32::try_from(value).ok())
+                .zip(identity.as_deref())
+            else {
+                return true;
+            };
+            crate::worker::process_identity(active_pid).is_none_or(|actual| actual == expected)
+        }) {
+            return Err(format!(
+                "watcher for workspace `{workspace}` is already active"
+            ));
+        }
+        transaction
             .execute(
                 "INSERT INTO watcher_lease(
-                     workspace, state, pid, process_start_identity, session_started_unix_ms,
+                     workspace, state, owner_token, pid, process_start_identity, session_started_unix_ms,
                      heartbeat_unix_ms, last_success_unix_ms, detail
-                 ) VALUES (?1, 'active', ?2, ?3, ?4, ?4, ?4, NULL)
+                 ) VALUES (?1, 'active', ?2, ?3, ?4, ?5, ?5, ?5, NULL)
                  ON CONFLICT(workspace) DO UPDATE SET
                      state = excluded.state,
+                     owner_token = excluded.owner_token,
                      pid = excluded.pid,
                      process_start_identity = excluded.process_start_identity,
                      session_started_unix_ms = excluded.session_started_unix_ms,
                      heartbeat_unix_ms = excluded.heartbeat_unix_ms,
                      last_success_unix_ms = excluded.last_success_unix_ms,
                      detail = NULL",
-                params![workspace, pid, process_start_identity, now],
+                params![workspace, owner_token, pid, process_start_identity, now],
             )
             .map_err(|error| error.to_string())?;
+        transaction.commit().map_err(|error| error.to_string())?;
         Ok(())
     }
 
     pub(crate) fn heartbeat_watcher(
         &self,
         workspace: &str,
+        owner_token: &str,
         now_unix_ms: u64,
         successful_activity: bool,
     ) -> Result<(), String> {
         let now = sqlite_integer(now_unix_ms, "watcher timestamp")?;
-        self.connection
+        let changed = self
+            .connection
             .execute(
                 "UPDATE watcher_lease SET
-                     heartbeat_unix_ms = ?2,
-                     last_success_unix_ms = CASE WHEN ?3 THEN ?2 ELSE last_success_unix_ms END
-                 WHERE workspace = ?1 AND state = 'active'",
-                params![workspace, now, successful_activity],
+                     heartbeat_unix_ms = ?3,
+                     last_success_unix_ms = CASE WHEN ?4 THEN ?3 ELSE last_success_unix_ms END
+                 WHERE workspace = ?1 AND owner_token = ?2 AND state = 'active'",
+                params![workspace, owner_token, now, successful_activity],
             )
             .map_err(|error| error.to_string())?;
+        if changed != 1 {
+            return Err(format!(
+                "watcher lease for workspace `{workspace}` is no longer owned"
+            ));
+        }
         Ok(())
     }
 
     pub(crate) fn finish_watcher(
         &self,
         workspace: &str,
+        owner_token: &str,
         state: &str,
         detail: Option<&str>,
         now_unix_ms: u64,
     ) -> Result<(), String> {
         let now = sqlite_integer(now_unix_ms, "watcher timestamp")?;
-        self.connection
+        let changed = self
+            .connection
             .execute(
-                "UPDATE watcher_lease SET state = ?2, heartbeat_unix_ms = ?3, detail = ?4
-                 WHERE workspace = ?1",
-                params![workspace, state, now, detail],
+                "UPDATE watcher_lease SET state = ?3, heartbeat_unix_ms = ?4, detail = ?5
+                 WHERE workspace = ?1 AND owner_token = ?2",
+                params![workspace, owner_token, state, now, detail],
             )
             .map_err(|error| error.to_string())?;
+        if changed != 1 {
+            return Err(format!(
+                "watcher lease for workspace `{workspace}` is no longer owned"
+            ));
+        }
         Ok(())
     }
 
@@ -1037,6 +1092,76 @@ mod tests {
             )
             .expect("bound instance");
         assert_eq!(stored, "database-two");
+    }
+
+    #[test]
+    fn watcher_lease_should_be_exclusive_and_owner_scoped() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let database = temporary.path().join("graph.db");
+        let identity =
+            crate::worker::process_identity(std::process::id()).expect("current process identity");
+        let mut state = WorkState::open(&database, "database-instance").expect("work state");
+
+        state
+            .start_watcher(
+                "workspace",
+                "owner-one",
+                std::process::id(),
+                &identity,
+                1_000,
+                100,
+            )
+            .expect("first owner acquires lease");
+        let second = state.start_watcher(
+            "workspace",
+            "owner-two",
+            std::process::id(),
+            &identity,
+            1_001,
+            100,
+        );
+        assert!(second.is_err());
+        assert!(
+            state
+                .heartbeat_watcher("workspace", "owner-two", 1_002, true)
+                .is_err()
+        );
+        assert!(
+            state
+                .finish_watcher("workspace", "owner-two", "stale", None, 1_003)
+                .is_err()
+        );
+        state
+            .finish_watcher("workspace", "owner-one", "expired_idle", None, 1_004)
+            .expect("owner closes lease");
+        state
+            .start_watcher(
+                "workspace",
+                "owner-two",
+                std::process::id(),
+                &identity,
+                1_005,
+                100,
+            )
+            .expect("new owner acquires terminal lease");
+        assert!(
+            state
+                .heartbeat_watcher("workspace", "owner-one", 1_006, false)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn fresh_watcher_lease_should_fail_closed_when_process_identity_is_unavailable() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let database = temporary.path().join("graph.db");
+        let mut state = WorkState::open(&database, "database-instance").expect("work state");
+
+        state
+            .start_watcher("workspace", "owner-one", u32::MAX, "missing", 1_000, 100)
+            .expect("first owner acquires lease");
+        let second = state.start_watcher("workspace", "owner-two", u32::MAX, "missing", 1_001, 100);
+        assert!(second.is_err());
     }
 
     #[test]
