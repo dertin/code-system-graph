@@ -249,7 +249,12 @@ fn precheck_openapi_depth(
         let block_depth = u64::try_from(block_indents.len())
             .unwrap_or(u64::MAX)
             .saturating_add(1);
-        tracker.check_structural_depth(block_depth.saturating_add(flow_depth))?;
+        let compact_sequence_depth = compact_yaml_sequence_depth(trimmed);
+        tracker.check_structural_depth(
+            block_depth
+                .saturating_add(flow_depth)
+                .saturating_add(compact_sequence_depth),
+        )?;
 
         let mut comment = false;
         for current in source_line.chars() {
@@ -287,13 +292,36 @@ fn precheck_openapi_depth(
         if structural.ends_with(['|', '>']) {
             block_scalar_indent = Some(indentation);
         } else if structural == "-" || structural.ends_with(':') {
-            tracker
-                .check_structural_depth(block_depth.saturating_add(flow_depth).saturating_add(1))?;
+            tracker.check_structural_depth(
+                block_depth
+                    .saturating_add(flow_depth)
+                    .saturating_add(compact_sequence_depth)
+                    .saturating_add(1),
+            )?;
             block_indents.push(indentation);
         }
     }
     tracker.check_structured_time()?;
     Ok(())
+}
+
+fn compact_yaml_sequence_depth(mut value: &str) -> u64 {
+    let mut depth = 0_u64;
+    loop {
+        let Some(remainder) = value.strip_prefix('-') else {
+            return depth;
+        };
+        if !remainder.is_empty()
+            && !remainder
+                .as_bytes()
+                .first()
+                .is_some_and(u8::is_ascii_whitespace)
+        {
+            return depth;
+        }
+        depth = depth.saturating_add(1);
+        value = remainder.trim_start();
+    }
 }
 
 fn charge_openapi_document(
@@ -384,7 +412,9 @@ fn boundary(
 mod tests {
     use code_system_graph_model::RepoId;
 
-    use super::{extract_openapi, extract_openapi_with_tracker, normalize_http_path};
+    use super::{
+        extract_openapi, extract_openapi_with_tracker, normalize_http_path, precheck_openapi_depth
+    };
     use crate::{ExtractionBudgets, ExtractionResource, ExtractionTracker};
 
     #[test]
@@ -496,6 +526,28 @@ paths:
                 &mut above,
             ),
             Err(super::HttpExtractionError::LimitExceeded(error))
+                if error.resource == ExtractionResource::StructuralDepth
+                    && error.observed == 65
+                    && error.maximum == 64
+        ));
+    }
+
+    #[test]
+    fn openapi_precheck_should_count_compact_yaml_sequence_depth() {
+        fn compact_sequence(depth: usize) -> String {
+            format!("x:\n {}value\n", "- ".repeat(depth))
+        }
+
+        let budgets = ExtractionBudgets {
+            max_structural_depth_per_artifact: 64,
+            ..ExtractionBudgets::default()
+        };
+        let mut exact = ExtractionTracker::new("exact.yaml", "openapi", &budgets);
+        let mut above = ExtractionTracker::new("above.yaml", "openapi", &budgets);
+        assert!(precheck_openapi_depth(&compact_sequence(62), &mut exact).is_ok());
+        assert!(matches!(
+            precheck_openapi_depth(&compact_sequence(63), &mut above),
+            Err(error)
                 if error.resource == ExtractionResource::StructuralDepth
                     && error.observed == 65
                     && error.maximum == 64
