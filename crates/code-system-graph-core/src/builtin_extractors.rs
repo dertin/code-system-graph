@@ -117,7 +117,8 @@ impl BoundaryExtractor for FocusedSourceExtractor {
         let reserved_observations = u64::try_from(syntax.boundary_candidate_count)
             .map_err(|_| ExtractorError::InvalidInput("too many syntax candidates".to_owned()))?;
         tracker.check_observations(reserved_observations)?;
-        precheck_focused_source_values(source, &tracker)?;
+        tracker.charge_work(reserved_observations)?;
+        precheck_focused_source_values(source, &mut tracker)?;
         let observations = match self.language {
             FocusedSourceLanguage::JavaScript => {
                 parse_javascript_source_at_path(&input.file.path.display, source)
@@ -208,9 +209,16 @@ fn syntax_language(language: FocusedSourceLanguage) -> SourceSyntaxLanguage {
     }
 }
 
-fn precheck_focused_source_values(
+/// Preflights source tokens before focused parsers allocate owned observation fields.
+///
+/// # Errors
+///
+/// Returns [`crate::ExtractionLimitExceeded`] when work, value, accumulated-string, or time
+/// budgets are exceeded.
+#[doc(hidden)]
+pub fn precheck_focused_source_values(
     source: &str,
-    tracker: &ExtractionTracker,
+    tracker: &mut ExtractionTracker,
 ) -> Result<(), crate::ExtractionLimitExceeded> {
     let bytes = source.as_bytes();
     let mut cursor = 0_usize;
@@ -221,6 +229,7 @@ fn precheck_focused_source_values(
         }
         let byte = bytes[cursor];
         if matches!(byte, b'"' | b'\'' | b'`') {
+            tracker.charge_work(1)?;
             let delimiter = byte;
             cursor = cursor.saturating_add(1);
             let start = cursor;
@@ -244,6 +253,7 @@ fn precheck_focused_source_values(
             accumulated = accumulated.saturating_add(observed);
             tracker.check_accumulated_string_bytes(accumulated)?;
         } else if byte == b'_' || byte.is_ascii_alphabetic() {
+            tracker.charge_work(1)?;
             let start = cursor;
             cursor = cursor.saturating_add(1);
             while cursor < bytes.len()
@@ -516,10 +526,16 @@ fn fingerprint_with_budgets(
     })
 }
 
-fn charge_source_observation(
+/// Charges every retained value in one focused source observation.
+///
+/// # Errors
+///
+/// Returns [`crate::ExtractionLimitExceeded`] before retaining values beyond effective budgets.
+#[doc(hidden)]
+pub fn charge_source_observation(
     observation: &SourceObservation,
     tracker: &mut ExtractionTracker,
-) -> Result<(), ExtractorError> {
+) -> Result<(), crate::ExtractionLimitExceeded> {
     if let Some(method) = &observation.method {
         tracker.charge_identifier(method)?;
     }
@@ -636,6 +652,51 @@ mod tests {
                 if batch.output_count == 1
                     && !String::from_utf8_lossy(&batch.payload).contains("Router::new")
         ));
+    }
+
+    #[tokio::test]
+    async fn source_extractor_should_preflight_work_observations_and_values() {
+        let file = file("src/routes.rs");
+        let source =
+            b"use axum::{Router, routing::get}; Router::new().route(\"/health\", get(health));";
+        let cases = [
+            (
+                ExtractionBudgets {
+                    max_work_units_per_artifact: 1,
+                    ..ExtractionBudgets::default()
+                },
+                crate::ExtractionResource::WorkUnits,
+            ),
+            (
+                ExtractionBudgets {
+                    max_observations_per_artifact: 1,
+                    ..ExtractionBudgets::default()
+                },
+                crate::ExtractionResource::Observations,
+            ),
+            (
+                ExtractionBudgets {
+                    max_string_bytes_per_value: 3,
+                    ..ExtractionBudgets::default()
+                },
+                crate::ExtractionResource::StringBytesPerValue,
+            ),
+        ];
+
+        for (budgets, resource) in cases {
+            let extractor =
+                FocusedSourceExtractor::with_budgets(FocusedSourceLanguage::Rust, budgets);
+            let result = extractor
+                .extract(&ExtractInput {
+                    file: &file,
+                    content: source,
+                })
+                .await;
+            assert!(matches!(
+                result,
+                Err(ExtractorError::LimitExceeded(error)) if error.resource == resource
+            ));
+        }
     }
 
     #[tokio::test]

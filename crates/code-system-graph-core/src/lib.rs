@@ -47,10 +47,10 @@ mod trace;
 mod yaml;
 
 pub use batch::{
-    ArtifactKey, BatchAction, BatchPlanError, ExtractorBatch, ExtractorBatchPlan, PlannedBatch, affected_link_keys, load_extractor_batch, load_extractor_batch_with_limit, plan_extractor_batches, store_extractor_batch
+    ArtifactKey, BatchAction, BatchPlanError, ExtractorBatch, ExtractorBatchPlan, PlannedBatch, affected_link_keys, load_extractor_batch, load_extractor_batch_with_budgets, plan_extractor_batches, store_extractor_batch
 };
 pub use builtin_extractors::{
-    FocusedSourceExtractor, FocusedSourceLanguage, GeneratedClientMetadataExtractor, PackageManifestExtractor
+    FocusedSourceExtractor, FocusedSourceLanguage, GeneratedClientMetadataExtractor, PackageManifestExtractor, charge_source_observation, precheck_focused_source_values
 };
 pub use change_analysis::{
     CHANGE_ANALYZER_VERSION, ChangeAnalysisCoverage, ChangeAnalysisError, ChangeAnalysisOptions, ChangeAnalysisSummary, ChangeConclusion, ChangeImpactReport, ChangedArtifactMapping, ChangedEntity, ChangedEntityRole, ChangedPathSide, ContractCompatibilityInput, EvidenceMatchKind, HunkLineMatch, MappingCompleteness, SemanticContractDelta, analyze_changes, validate_change_analysis

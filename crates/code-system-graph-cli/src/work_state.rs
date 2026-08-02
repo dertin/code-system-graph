@@ -8,7 +8,7 @@ use code_system_graph_model::{
     ArtifactFingerprint, CommunitySnapshot, Edge, Evidence, ExtractorRun, LinkDecision, Node, NodeId, StoredExtractorBatch, stable_id_bytes
 };
 use code_system_graph_store_sqlite::{ManualLinkDisposition, ManualLinkRecord};
-use rusqlite::{Connection, ErrorCode, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
@@ -97,8 +97,9 @@ impl WorkState {
     fn open_existing(path: &Path, database_instance_id: &str) -> Result<Self, WorkOpenError> {
         // Opening can fail for permissions, I/O, or locking reasons. None of those make
         // the sidecar disposable, so never remove it based on this operation alone.
-        let connection =
-            Connection::open(path).map_err(|error| WorkOpenError::Fatal(error.to_string()))?;
+        let flags = OpenFlags::default() | OpenFlags::SQLITE_OPEN_NOFOLLOW;
+        let connection = Connection::open_with_flags(path, flags)
+            .map_err(|error| WorkOpenError::Fatal(error.to_string()))?;
         connection
             .execute_batch(
                 "PRAGMA journal_mode=WAL;
@@ -1064,8 +1065,16 @@ fn ensure_safe_sqlite_siblings(path: &Path) -> Result<(), String> {
 
 #[cfg(unix)]
 fn set_owner_only(path: &Path) -> Result<(), String> {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(|error| error.to_string())
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(nix::fcntl::OFlag::O_NOFOLLOW.bits())
+        .open(path)
+        .map_err(|error| error.to_string())?;
+    file.set_permissions(fs::Permissions::from_mode(0o600))
+        .map_err(|error| error.to_string())
 }
 
 #[cfg(windows)]
@@ -1372,6 +1381,46 @@ mod tests {
             .expect("companion symlink must fail closed");
         assert!(error.contains("unsafe work sidecar companion"));
         assert_eq!(fs::read(&target).expect("target contents"), b"unchanged");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sqlite_open_should_refuse_a_replaced_main_sidecar_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let target = temporary.path().join("target.db");
+        let marker = b"do-not-modify";
+        fs::write(&target, marker).expect("target marker");
+        let sidecar = work_path(&temporary.path().join("graph.db"));
+        symlink(&target, &sidecar).expect("replacement symlink");
+
+        assert!(matches!(
+            WorkState::open_existing(&sidecar, "database-instance"),
+            Err(WorkOpenError::Fatal(_))
+        ));
+        assert_eq!(fs::read(target).expect("target readback"), marker);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn work_sidecar_should_remain_owner_only_in_a_shared_parent() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let unsafe_parent = temporary.path().join("shared");
+        fs::create_dir(&unsafe_parent).expect("shared parent");
+        fs::set_permissions(&unsafe_parent, fs::Permissions::from_mode(0o777))
+            .expect("shared mode");
+        let database = unsafe_parent.join("graph.db");
+
+        let state = WorkState::open(&database, "database-instance").expect("work state");
+        drop(state);
+        let mode = fs::metadata(work_path(&database))
+            .expect("sidecar metadata")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o077, 0);
     }
 
     #[cfg(unix)]

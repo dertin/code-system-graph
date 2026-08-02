@@ -46,6 +46,36 @@ fn configured_openapi_budget_should_apply_during_extraction() -> anyhow::Result<
 }
 
 #[test]
+fn configured_source_value_budget_should_apply_before_focused_observations() -> anyhow::Result<()> {
+    let temporary = tempfile::tempdir()?;
+    let repository = temporary.path().join("api");
+    std::fs::create_dir_all(repository.join("src"))?;
+    std::fs::write(
+        repository.join("src/routes.rs"),
+        "fn focused_source_boundary() {}",
+    )?;
+    let config = temporary.path().join("code-system-graph.yaml");
+    let database = temporary.path().join("code-system-graph.db");
+    std::fs::write(
+        &config,
+        "version: 1\nname: source-budget-e2e\nextractionBudgets:\n  maxIdentifierBytesPerValue: 3\nrepos:\n  api:\n    path: api\n",
+    )?;
+
+    let result = scan_workspace(&config, &database);
+    assert!(
+        matches!(
+            &result,
+            Err(ApplicationError::ExtractionLimit(error))
+                if error.resource == ExtractionResource::IdentifierBytesPerValue
+                    && error.artifact == "src/routes.rs"
+                    && error.extractor == "code-system-graph.source.rust"
+        ),
+        "unexpected source budget result: {result:?}"
+    );
+    Ok(())
+}
+
+#[test]
 fn bounded_artifact_read_should_accept_below_and_exact_but_reject_maximum_plus_one()
 -> anyhow::Result<()> {
     let temporary = tempfile::tempdir()?;

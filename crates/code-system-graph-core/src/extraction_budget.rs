@@ -505,6 +505,22 @@ impl ExtractionTracker {
         self.sample_time(false)
     }
 
+    /// Checks a conservative prospective work count without accepting it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ExtractionLimitExceeded`] when `observed` exceeds the work maximum.
+    pub fn check_work_units(&self, observed: u64) -> Result<(), ExtractionLimitExceeded> {
+        if observed > self.budgets.max_work_units_per_artifact {
+            return Err(self.exceeded(
+                ExtractionResource::WorkUnits,
+                observed,
+                self.budgets.max_work_units_per_artifact,
+            ));
+        }
+        Ok(())
+    }
+
     /// Charges one Tree-sitter node before visiting its children.
     ///
     /// # Errors

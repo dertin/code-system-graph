@@ -255,9 +255,11 @@ and numeric overflow are rejected. Higher values are accepted, but increase the 
 memory, input, or output consumption explicitly authorized by the operator. Lower values can
 reject artifacts that scan successfully with the defaults.
 
-This block is accepted only in the trusted global `code-system-graph.yaml`. Repository-local
-`.code-system-graph.yaml`, environment variables, and CLI arguments cannot set or raise these
-limits. `csgraph config show` reports every effective value, including defaults.
+This block is accepted only in a trusted global `code-system-graph.yaml` located outside every
+checkout listed in `repos`. A manifest inside an analyzed checkout cannot set this block, even when
+that checkout uses `path: .`. Repository-local `.code-system-graph.yaml`, environment variables,
+and CLI arguments also cannot set or raise these limits. `csgraph config show` reports every
+effective value, including defaults.
 
 Effective values are fingerprinted into each extractor batch. A changed fingerprint prevents
 batch reuse. If budgets changed, a scan restricted with `--repo` fails early and requests a full
@@ -291,7 +293,8 @@ surface until one atomic publication transaction succeeds.
 All values must be positive and representable. The no-progress and per-repository CodeGraph
 deadlines cannot exceed the pass deadline; the termination grace cannot exceed the no-progress
 deadline; and watcher sub-deadlines cannot exceed the session deadline. Raising values explicitly
-authorizes greater maximum CPU, memory, or cloud-agent cost. This block is rejected in repository
+authorizes greater maximum CPU, memory, or cloud-agent cost. Like extraction budgets, this block is
+accepted only from a global manifest outside every analyzed checkout; it is rejected in repository
 local configuration and has no environment or CLI equivalent. Changing it does not invalidate
 deterministic extractor batches.
 

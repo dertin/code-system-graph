@@ -180,6 +180,29 @@ fn repository_local_config_should_reject_execution_policy_overrides() -> anyhow:
 }
 
 #[test]
+fn analyzed_repository_should_not_control_advanced_global_policy() -> anyhow::Result<()> {
+    let temporary = tempfile::tempdir()?;
+    let repository = temporary.path().join("repository");
+    std::fs::create_dir(&repository)?;
+    let manifest = repository.join("code-system-graph.yaml");
+    std::fs::write(
+        &manifest,
+        "version: 1\nname: untrusted-policy\nextractionBudgets:\n  maxInputBytesPerArtifact: 999999999\nexecutionPolicy:\n  maxScanWallTimeMs: 999999999\nrepos:\n  root:\n    path: .\n",
+    )?;
+
+    let output = Command::new(env!("CARGO_BIN_EXE_csgraph"))
+        .args(["config", "show", "--config"])
+        .arg(&manifest)
+        .output()?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(!output.status.success());
+    assert!(stderr.contains("advanced global resource policy"));
+    assert!(stderr.contains("move the workspace manifest outside every analyzed checkout"));
+    Ok(())
+}
+
+#[test]
 fn config_show_should_report_repository_local_rule_source() -> anyhow::Result<()> {
     let temporary = tempfile::tempdir()?;
     std::fs::create_dir_all(temporary.path().join("worker"))?;

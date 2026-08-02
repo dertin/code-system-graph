@@ -199,33 +199,40 @@ pub fn store_extractor_batch<T: Serialize>(
 pub fn load_extractor_batch<T: DeserializeOwned>(
     stored: &code_system_graph_model::StoredExtractorBatch,
 ) -> Result<ExtractorBatch<T>, BatchPlanError> {
-    load_extractor_batch_with_limit(
-        stored,
-        ExtractionBudgets::default().max_serialized_output_bytes_per_artifact,
-    )
+    load_extractor_batch_with_budgets(stored, &ExtractionBudgets::default())
 }
 
-/// Decodes one persisted source-owned output batch after enforcing an effective byte maximum.
+/// Decodes one persisted source-owned output batch after enforcing effective budgets.
 ///
-/// The byte check deliberately precedes deserialization so a corrupt or untrusted persisted batch
-/// cannot force an allocation larger than the active extraction policy.
+/// The count and byte checks deliberately precede deserialization so a corrupt or untrusted
+/// persisted batch cannot force allocations beyond the active extraction policy.
 ///
 /// # Errors
 ///
-/// Returns [`BatchPlanError`] when the payload exceeds `maximum_bytes`, its schema is invalid, or
-/// its count is inconsistent.
-pub fn load_extractor_batch_with_limit<T: DeserializeOwned>(
+/// Returns [`BatchPlanError`] when the payload exceeds `budgets`, its schema is invalid, or its
+/// count is inconsistent.
+pub fn load_extractor_batch_with_budgets<T: DeserializeOwned>(
     stored: &code_system_graph_model::StoredExtractorBatch,
-    maximum_bytes: u64,
+    budgets: &ExtractionBudgets,
 ) -> Result<ExtractorBatch<T>, BatchPlanError> {
+    if stored.output_count > budgets.max_observations_per_artifact {
+        return Err(ExtractionLimitExceeded {
+            artifact: stored.source.path.display.clone(),
+            extractor: stored.source.extractor.clone(),
+            resource: ExtractionResource::Observations,
+            observed: stored.output_count,
+            maximum: budgets.max_observations_per_artifact,
+        }
+        .into());
+    }
     let observed = u64::try_from(stored.payload.len()).unwrap_or(u64::MAX);
-    if observed > maximum_bytes {
+    if observed > budgets.max_serialized_output_bytes_per_artifact {
         return Err(ExtractionLimitExceeded {
             artifact: stored.source.path.display.clone(),
             extractor: stored.source.extractor.clone(),
             resource: ExtractionResource::SerializedOutputBytes,
             observed,
-            maximum: maximum_bytes,
+            maximum: budgets.max_serialized_output_bytes_per_artifact,
         }
         .into());
     }
@@ -345,7 +352,7 @@ mod tests {
     };
 
     use super::{
-        BatchAction, BatchPlanError, ExtractorBatch, affected_link_keys, load_extractor_batch, load_extractor_batch_with_limit, plan_extractor_batches, store_extractor_batch
+        BatchAction, BatchPlanError, ExtractorBatch, affected_link_keys, load_extractor_batch, load_extractor_batch_with_budgets, plan_extractor_batches, store_extractor_batch
     };
     use crate::{ExtractionBudgets, ExtractionLimitExceeded, ExtractionTracker, IncrementalPlan};
 
@@ -474,19 +481,47 @@ mod tests {
         let original = batch("src/routes.rs", "hash", &["GET:/orders"]);
         let stored = store_extractor_batch(&original, &mut tracker(), false).expect("stored batch");
         let exact = u64::try_from(stored.payload.len()).expect("payload length");
+        let exact_budgets = ExtractionBudgets {
+            max_serialized_output_bytes_per_artifact: exact,
+            ..ExtractionBudgets::default()
+        };
+        let below_budgets = ExtractionBudgets {
+            max_serialized_output_bytes_per_artifact: exact - 1,
+            ..ExtractionBudgets::default()
+        };
 
         assert_eq!(
-            load_extractor_batch_with_limit::<String>(&stored, exact),
+            load_extractor_batch_with_budgets::<String>(&stored, &exact_budgets),
             Ok(original)
         );
         assert!(matches!(
-            load_extractor_batch_with_limit::<String>(&stored, exact - 1),
+            load_extractor_batch_with_budgets::<String>(&stored, &below_budgets),
             Err(BatchPlanError::ExtractionLimit(ExtractionLimitExceeded {
                 resource: crate::ExtractionResource::SerializedOutputBytes,
                 observed,
                 maximum,
                 ..
             })) if observed == exact && maximum == exact - 1
+        ));
+    }
+
+    #[test]
+    fn stored_batch_should_check_observation_limit_before_decoding() {
+        let original = batch("src/routes.rs", "hash", &["GET:/orders", "POST:/orders"]);
+        let stored = store_extractor_batch(&original, &mut tracker(), false).expect("stored batch");
+        let budgets = ExtractionBudgets {
+            max_observations_per_artifact: 1,
+            ..ExtractionBudgets::default()
+        };
+
+        assert!(matches!(
+            load_extractor_batch_with_budgets::<String>(&stored, &budgets),
+            Err(BatchPlanError::ExtractionLimit(ExtractionLimitExceeded {
+                resource: crate::ExtractionResource::Observations,
+                observed: 2,
+                maximum: 1,
+                ..
+            }))
         ));
     }
 }

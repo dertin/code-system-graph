@@ -412,7 +412,7 @@ pub fn extract_graphql_document_with_tracker(
             tracker.check_structured_time()?;
             Ok(output)
         }
-        Err(schema_error) => match query::parse_query::<String>(input) {
+        Err(_schema_error) => match query::parse_query::<String>(input) {
             Ok(document) => {
                 let mut output = GraphqlDocument::empty(source_path);
                 append_query_document(document, &mut output, tracker)?;
@@ -421,9 +421,10 @@ pub fn extract_graphql_document_with_tracker(
                 tracker.check_structured_time()?;
                 Ok(output)
             }
-            Err(query_error) => Err(GraphqlExtractionError::InvalidGraphql {
+            Err(_query_error) => Err(GraphqlExtractionError::InvalidGraphql {
                 source_path: source_path.to_owned(),
-                message: format!("{schema_error}; {query_error}"),
+                message: "document is neither valid GraphQL schema nor executable syntax"
+                    .to_owned(),
             }),
         },
     }
@@ -3240,6 +3241,26 @@ mod tests {
         assert!(matches!(
             error,
             GraphqlExtractionError::InvalidGraphql { .. }
+        ));
+    }
+
+    #[test]
+    fn invalid_graphql_errors_should_not_retain_parser_literals() {
+        let secret = "TOP_SECRET_LITERAL_71A9";
+        let input = format!("query Q {{ field }} \"{secret}\" query");
+        let error = extract_graphql_document("broken.graphql", &input)
+            .expect_err("invalid GraphQL should fail");
+        let serialized = serde_json::to_string(&error).expect("error should serialize");
+        let displayed = error.to_string();
+        let debugged = format!("{error:?}");
+
+        for representation in [serialized, displayed, debugged] {
+            assert!(!representation.contains(secret));
+        }
+        assert!(matches!(
+            error,
+            GraphqlExtractionError::InvalidGraphql { message, .. }
+                if message == "document is neither valid GraphQL schema nor executable syntax"
         ));
     }
 

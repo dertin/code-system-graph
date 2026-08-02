@@ -820,11 +820,15 @@ fn worker_executable() -> Result<PathBuf, ApplicationError> {
     let current = std::env::current_exe().map_err(|error| {
         ApplicationError::Initialization(format!("failed to resolve scan worker: {error}"))
     })?;
+    worker_executable_for(&current)
+}
+
+fn worker_executable_for(current: &Path) -> Result<PathBuf, ApplicationError> {
     if current
         .file_stem()
         .is_some_and(|name| name == "csgraph" || name == "csgraph.exe")
     {
-        return Ok(current);
+        return Ok(current.to_path_buf());
     }
     let worker_name = if cfg!(windows) {
         "csgraph.exe"
@@ -869,16 +873,8 @@ fn worker_executable() -> Result<PathBuf, ApplicationError> {
     {
         return Ok(candidate);
     }
-    if let Some(paths) = std::env::var_os("PATH") {
-        for directory in std::env::split_paths(&paths) {
-            let candidate = directory.join(worker_name);
-            if candidate.is_file() {
-                return Ok(candidate);
-            }
-        }
-    }
     Err(ApplicationError::Initialization(format!(
-        "could not locate a csgraph worker for `{}`; install `csgraph` on PATH or use the explicit worker-executable library API",
+        "could not locate a trusted csgraph worker for `{}`; embedding applications must use the explicit worker-executable library API",
         current.display()
     )))
 }
@@ -1198,6 +1194,16 @@ pub fn terminate_supervised_process(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn embedded_host_should_not_resolve_worker_from_external_search_paths() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let host = temporary.path().join("embedding-host");
+        let error = worker_executable_for(&host).expect_err("untrusted lookup must fail closed");
+
+        assert!(matches!(error, ApplicationError::Initialization(_)));
+        assert!(error.to_string().contains("explicit worker-executable"));
+    }
 
     #[test]
     fn bounded_reader_should_reject_oversized_line() {

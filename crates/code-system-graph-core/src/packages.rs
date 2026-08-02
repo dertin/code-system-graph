@@ -251,24 +251,26 @@ pub fn extract_package_manifest_with_tracker(
     }
 
     let result = match lower_name.as_str() {
-        "package.json" => parse_package_json(relative_path, content),
-        "package-lock.json" | "npm-shrinkwrap.json" => parse_npm_lockfile(relative_path, content),
-        "pnpm-lock.yaml" => parse_pnpm_lockfile(relative_path, content),
-        "yarn.lock" => parse_yarn_lockfile(relative_path, content),
-        "pyproject.toml" => parse_pyproject(relative_path, content),
-        "cargo.toml" => parse_cargo_manifest(relative_path, content),
-        "cargo.lock" => parse_cargo_lockfile(relative_path, content),
-        "go.mod" => parse_go_mod(relative_path, content),
-        "go.work" => parse_go_work(relative_path, content),
+        "package.json" => parse_package_json(relative_path, content, tracker),
+        "package-lock.json" | "npm-shrinkwrap.json" => {
+            parse_npm_lockfile(relative_path, content, tracker)
+        }
+        "pnpm-lock.yaml" => parse_pnpm_lockfile(relative_path, content, tracker),
+        "yarn.lock" => parse_yarn_lockfile(relative_path, content, tracker),
+        "pyproject.toml" => parse_pyproject(relative_path, content, tracker),
+        "cargo.toml" => parse_cargo_manifest(relative_path, content, tracker),
+        "cargo.lock" => parse_cargo_lockfile(relative_path, content, tracker),
+        "go.mod" => parse_go_mod(relative_path, content, tracker),
+        "go.work" => parse_go_work(relative_path, content, tracker),
         "pom.xml" => parse_maven(relative_path, content, tracker),
-        "build.gradle" | "build.gradle.kts" => parse_gradle(relative_path, content),
+        "build.gradle" | "build.gradle.kts" => parse_gradle(relative_path, content, tracker),
         "packages.config" => parse_packages_config(relative_path, content, tracker),
         _ if lower_name.starts_with("requirements")
             && std::path::Path::new(&lower_name)
                 .extension()
                 .is_some_and(|extension| extension.eq_ignore_ascii_case("txt")) =>
         {
-            parse_requirements(relative_path, content)
+            parse_requirements(relative_path, content, tracker)
         }
         _ if lower_name.ends_with(".csproj") => parse_csproj(relative_path, content, tracker),
         _ => Err(PackageManifestError::UnsupportedPath(
@@ -280,7 +282,6 @@ pub fn extract_package_manifest_with_tracker(
     }
     tracker.check_structured_time()?;
     let result = result?;
-    charge_package_manifest(&result, tracker)?;
 
     let result = finalize(result);
     tracker.check_structured_time()?;
@@ -353,57 +354,63 @@ fn precheck_package_text(
     Ok(())
 }
 
-fn charge_package_manifest(
-    manifest: &PackageManifest,
+fn push_package(
+    output: &mut Vec<PackageCoordinate>,
+    package: PackageCoordinate,
     tracker: &mut ExtractionTracker,
 ) -> Result<(), ExtractionLimitExceeded> {
-    let observations = [
-        manifest.packages.len(),
-        manifest.dependencies.len(),
-        manifest.workspace_members.len(),
-        manifest.exports.len(),
-        manifest.features.len(),
-        manifest.lockfiles.len(),
-    ]
-    .into_iter()
-    .fold(0_u64, |total, count| {
-        total.saturating_add(u64::try_from(count).unwrap_or(u64::MAX))
-    });
-    tracker.charge_observation(observations)?;
+    tracker.charge_observation(1)?;
+    tracker.charge_identifier(&package.name)?;
+    if let Some(version) = &package.version {
+        tracker.charge_string(version)?;
+    }
+    tracker.charge_portable_path(&package.source_path)?;
+    output.push(package);
+    Ok(())
+}
 
-    for package in &manifest.packages {
-        tracker.charge_identifier(&package.name)?;
-        if let Some(version) = &package.version {
-            tracker.charge_string(version)?;
-        }
-        tracker.charge_portable_path(&package.source_path)?;
+fn push_dependency(
+    output: &mut Vec<PackageDependency>,
+    dependency: PackageDependency,
+    tracker: &mut ExtractionTracker,
+) -> Result<(), ExtractionLimitExceeded> {
+    tracker.charge_observation(1)?;
+    tracker.charge_identifier(&dependency.name)?;
+    if let Some(version) = &dependency.version_or_range {
+        tracker.charge_string(version)?;
     }
-    for dependency in &manifest.dependencies {
-        tracker.charge_identifier(&dependency.name)?;
-        if let Some(version) = &dependency.version_or_range {
-            tracker.charge_string(version)?;
-        }
-        if let Some(condition) = &dependency.condition {
-            tracker.charge_string(condition)?;
-        }
-        tracker.charge_portable_path(&dependency.source_path)?;
+    if let Some(condition) = &dependency.condition {
+        tracker.charge_string(condition)?;
     }
-    for value in manifest
-        .workspace_members
-        .iter()
-        .chain(&manifest.exports)
-        .chain(&manifest.features)
-    {
-        tracker.charge_string(&value.value)?;
-        tracker.charge_portable_path(&value.source_path)?;
+    tracker.charge_portable_path(&dependency.source_path)?;
+    output.push(dependency);
+    Ok(())
+}
+
+fn push_value(
+    output: &mut Vec<PackageManifestValue>,
+    value: PackageManifestValue,
+    tracker: &mut ExtractionTracker,
+) -> Result<(), ExtractionLimitExceeded> {
+    tracker.charge_observation(1)?;
+    tracker.charge_string(&value.value)?;
+    tracker.charge_portable_path(&value.source_path)?;
+    output.push(value);
+    Ok(())
+}
+
+fn push_lockfile(
+    output: &mut Vec<LockfileMetadata>,
+    lockfile: LockfileMetadata,
+    tracker: &mut ExtractionTracker,
+) -> Result<(), ExtractionLimitExceeded> {
+    tracker.charge_observation(1)?;
+    tracker.charge_identifier(&lockfile.package_manager)?;
+    if let Some(version) = &lockfile.format_version {
+        tracker.charge_string(version)?;
     }
-    for lockfile in &manifest.lockfiles {
-        tracker.charge_identifier(&lockfile.package_manager)?;
-        if let Some(version) = &lockfile.format_version {
-            tracker.charge_string(version)?;
-        }
-        tracker.charge_portable_path(&lockfile.source_path)?;
-    }
+    tracker.charge_portable_path(&lockfile.source_path)?;
+    output.push(lockfile);
     Ok(())
 }
 
@@ -491,15 +498,10 @@ fn evidence_at(_content: &str, line: usize) -> PackageEvidenceLine {
     }
 }
 
-fn evidence_for(content: &str, start_line: usize, token: &str) -> PackageEvidenceLine {
-    let start = start_line.saturating_sub(1);
-    let line = content
-        .lines()
-        .enumerate()
-        .skip(start)
-        .find_map(|(index, source)| source.contains(token).then_some(index + 1))
-        .unwrap_or(start_line);
-    evidence_at(content, line)
+fn evidence_for(_content: &str, start_line: usize, _token: &str) -> PackageEvidenceLine {
+    // Parser-owned declaration positions avoid repeatedly rescanning an attacker-controlled
+    // prefix for every emitted fact. Multi-line declarations intentionally use their first line.
+    evidence_at("", start_line)
 }
 
 fn value_fact(
@@ -617,7 +619,11 @@ fn json_string_line(lines: &BTreeMap<String, Vec<usize>>, value: &str, minimum: 
         .unwrap_or(minimum)
 }
 
-fn parse_package_json(path: &str, content: &str) -> Result<PackageManifest, PackageManifestError> {
+fn parse_package_json(
+    path: &str,
+    content: &str,
+    tracker: &mut ExtractionTracker,
+) -> Result<PackageManifest, PackageManifestError> {
     let root: Value =
         serde_json::from_str(content).map_err(|error| malformed(path, error.to_string()))?;
     let string_lines = json_string_lines(content);
@@ -632,13 +638,17 @@ fn parse_package_json(path: &str, content: &str) -> Result<PackageManifest, Pack
             .get("version")
             .map(|value| required_json_string(path, "version", value))
             .transpose()?;
-        result.packages.push(package(
-            PackageEcosystem::Npm,
-            name.to_owned(),
-            version.map(str::to_owned),
-            path,
-            evidence_at(content, json_string_line(&string_lines, "name", 1)),
-        ));
+        push_package(
+            &mut result.packages,
+            package(
+                PackageEcosystem::Npm,
+                name.to_owned(),
+                version.map(str::to_owned),
+                path,
+                evidence_at(content, json_string_line(&string_lines, "name", 1)),
+            ),
+            tracker,
+        )?;
     } else if object.contains_key("version") {
         return Err(malformed(path, "`version` requires a static `name`"));
     }
@@ -661,17 +671,24 @@ fn parse_package_json(path: &str, content: &str) -> Result<PackageManifest, Pack
             let version = required_json_string(path, section, version)?;
             let optional = section_optional
                 || (section == "peerDependencies" && optional_peers.contains(name));
-            result.dependencies.push(dependency(DependencyInput {
-                ecosystem: PackageEcosystem::Npm,
-                name: name.clone(),
-                version: Some(version.to_owned()),
-                scope,
-                optional,
-                condition: None,
-                path,
-                evidence: evidence_at(content, json_string_line(&string_lines, name, section_line)),
-                confidence: EXACT_CONFIDENCE,
-            }));
+            push_dependency(
+                &mut result.dependencies,
+                dependency(DependencyInput {
+                    ecosystem: PackageEcosystem::Npm,
+                    name: name.clone(),
+                    version: Some(version.to_owned()),
+                    scope,
+                    optional,
+                    condition: None,
+                    path,
+                    evidence: evidence_at(
+                        content,
+                        json_string_line(&string_lines, name, section_line),
+                    ),
+                    confidence: EXACT_CONFIDENCE,
+                }),
+                tracker,
+            )?;
         }
     }
 
@@ -692,16 +709,20 @@ fn parse_package_json(path: &str, content: &str) -> Result<PackageManifest, Pack
         };
         for value in values {
             let member = required_json_string(path, "workspaces", value)?;
-            result.workspace_members.push(value_fact_at(
-                path,
-                member.to_owned(),
-                json_string_line(&string_lines, member, 1),
-            ));
+            push_value(
+                &mut result.workspace_members,
+                value_fact_at(
+                    path,
+                    member.to_owned(),
+                    json_string_line(&string_lines, member, 1),
+                ),
+                tracker,
+            )?;
         }
     }
 
     if let Some(exports) = object.get("exports") {
-        collect_json_export_keys(path, exports, &string_lines, &mut result.exports)?;
+        collect_json_export_keys(path, exports, &string_lines, &mut result.exports, tracker)?;
     }
     Ok(result)
 }
@@ -755,23 +776,28 @@ fn collect_json_export_keys(
     exports: &Value,
     string_lines: &BTreeMap<String, Vec<usize>>,
     output: &mut Vec<PackageManifestValue>,
+    tracker: &mut ExtractionTracker,
 ) -> Result<(), PackageManifestError> {
     match exports {
         Value::String(target) if !target.is_empty() => {
-            output.push(value_fact_at(
-                path,
-                ".".to_owned(),
-                json_string_line(string_lines, "exports", 1),
-            ));
+            push_value(
+                output,
+                value_fact_at(
+                    path,
+                    ".".to_owned(),
+                    json_string_line(string_lines, "exports", 1),
+                ),
+                tracker,
+            )?;
         }
         Value::Object(map) => {
             for (key, value) in map {
                 if key.starts_with('.') {
-                    output.push(value_fact_at(
-                        path,
-                        key.clone(),
-                        json_string_line(string_lines, key, 1),
-                    ));
+                    push_value(
+                        output,
+                        value_fact_at(path, key.clone(), json_string_line(string_lines, key, 1)),
+                        tracker,
+                    )?;
                 }
                 validate_json_export_target(path, value)?;
             }
@@ -803,7 +829,11 @@ fn validate_json_export_target(path: &str, value: &Value) -> Result<(), PackageM
     }
 }
 
-fn parse_npm_lockfile(path: &str, content: &str) -> Result<PackageManifest, PackageManifestError> {
+fn parse_npm_lockfile(
+    path: &str,
+    content: &str,
+    tracker: &mut ExtractionTracker,
+) -> Result<PackageManifest, PackageManifestError> {
     let root: Value =
         serde_json::from_str(content).map_err(|error| malformed(path, error.to_string()))?;
     let object = root
@@ -828,10 +858,14 @@ fn parse_npm_lockfile(path: &str, content: &str) -> Result<PackageManifest, Pack
     } else {
         "{"
     };
-    Ok(lockfile_result(path, content, "npm", version, token))
+    lockfile_result(path, content, "npm", version, token, tracker)
 }
 
-fn parse_pnpm_lockfile(path: &str, content: &str) -> Result<PackageManifest, PackageManifestError> {
+fn parse_pnpm_lockfile(
+    path: &str,
+    content: &str,
+    tracker: &mut ExtractionTracker,
+) -> Result<PackageManifest, PackageManifestError> {
     reject_nul(path, content)?;
     let declaration = content
         .lines()
@@ -846,16 +880,21 @@ fn parse_pnpm_lockfile(path: &str, content: &str) -> Result<PackageManifest, Pac
     if declaration.1.is_empty() {
         return Err(malformed(path, "`lockfileVersion` must not be empty"));
     }
-    Ok(lockfile_result_at(
+    lockfile_result_at(
         path,
         content,
         "pnpm",
         Some(declaration.1),
         declaration.0,
-    ))
+        tracker,
+    )
 }
 
-fn parse_yarn_lockfile(path: &str, content: &str) -> Result<PackageManifest, PackageManifestError> {
+fn parse_yarn_lockfile(
+    path: &str,
+    content: &str,
+    tracker: &mut ExtractionTracker,
+) -> Result<PackageManifest, PackageManifestError> {
     reject_nul(path, content)?;
     let first = content
         .lines()
@@ -885,13 +924,14 @@ fn parse_yarn_lockfile(path: &str, content: &str) -> Result<PackageManifest, Pac
                 .map(unquote_scalar)
         })
     };
-    Ok(lockfile_result_at(
+    lockfile_result_at(
         path,
         content,
         "yarn",
         version,
         metadata_line.unwrap_or(first.0 + 1),
-    ))
+        tracker,
+    )
 }
 
 fn lockfile_result(
@@ -900,9 +940,10 @@ fn lockfile_result(
     manager: &str,
     version: Option<String>,
     token: &str,
-) -> PackageManifest {
+    tracker: &mut ExtractionTracker,
+) -> Result<PackageManifest, PackageManifestError> {
     let evidence = evidence_for(content, 1, token);
-    lockfile_result_with_evidence(path, manager, version, evidence)
+    lockfile_result_with_evidence(path, manager, version, evidence, tracker)
 }
 
 fn lockfile_result_at(
@@ -911,8 +952,9 @@ fn lockfile_result_at(
     manager: &str,
     version: Option<String>,
     line: usize,
-) -> PackageManifest {
-    lockfile_result_with_evidence(path, manager, version, evidence_at(content, line))
+    tracker: &mut ExtractionTracker,
+) -> Result<PackageManifest, PackageManifestError> {
+    lockfile_result_with_evidence(path, manager, version, evidence_at(content, line), tracker)
 }
 
 fn lockfile_result_with_evidence(
@@ -920,8 +962,16 @@ fn lockfile_result_with_evidence(
     manager: &str,
     version: Option<String>,
     evidence: PackageEvidenceLine,
-) -> PackageManifest {
-    ecosystem_lockfile_result(path, PackageEcosystem::Npm, manager, version, evidence)
+    tracker: &mut ExtractionTracker,
+) -> Result<PackageManifest, PackageManifestError> {
+    ecosystem_lockfile_result(
+        path,
+        PackageEcosystem::Npm,
+        manager,
+        version,
+        evidence,
+        tracker,
+    )
 }
 
 fn ecosystem_lockfile_result(
@@ -930,23 +980,28 @@ fn ecosystem_lockfile_result(
     manager: &str,
     version: Option<String>,
     evidence: PackageEvidenceLine,
-) -> PackageManifest {
-    PackageManifest {
-        lockfiles: vec![LockfileMetadata {
+    tracker: &mut ExtractionTracker,
+) -> Result<PackageManifest, PackageManifestError> {
+    let mut result = PackageManifest::default();
+    push_lockfile(
+        &mut result.lockfiles,
+        LockfileMetadata {
             ecosystem,
             package_manager: manager.to_owned(),
             format_version: version,
             source_path: path.to_owned(),
             evidence,
             confidence: PRESENCE_CONFIDENCE,
-        }],
-        ..PackageManifest::default()
-    }
+        },
+        tracker,
+    )?;
+    Ok(result)
 }
 
 fn parse_cargo_lockfile(
     path: &str,
     content: &str,
+    tracker: &mut ExtractionTracker,
 ) -> Result<PackageManifest, PackageManifestError> {
     reject_nul(path, content)?;
     let first_content_line = content
@@ -976,13 +1031,14 @@ fn parse_cargo_lockfile(
         || evidence_at(content, first_content_line.0 + 1),
         |(line, _)| evidence_at(content, *line),
     );
-    Ok(ecosystem_lockfile_result(
+    ecosystem_lockfile_result(
         path,
         PackageEcosystem::Cargo,
         "cargo",
         version.map(|(_, value)| value),
         evidence,
-    ))
+        tracker,
+    )
 }
 
 #[derive(Debug)]
@@ -993,13 +1049,20 @@ struct TomlEntry {
     line: usize,
 }
 
-fn parse_toml(path: &str, content: &str) -> Result<Vec<TomlEntry>, PackageManifestError> {
+fn parse_toml(
+    path: &str,
+    content: &str,
+    tracker: &ExtractionTracker,
+) -> Result<Vec<TomlEntry>, PackageManifestError> {
     reject_nul(path, content)?;
     let lines = content.lines().collect::<Vec<_>>();
     let mut entries = Vec::new();
     let mut section = String::new();
     let mut index = 0;
     while index < lines.len() {
+        if index.is_multiple_of(1_024) {
+            tracker.check_structured_time()?;
+        }
         let first_line = index + 1;
         let stripped = strip_line_comment(lines[index], '#')?;
         let trimmed = stripped.trim();
@@ -1277,12 +1340,16 @@ fn entry<'a>(entries: &'a [TomlEntry], section: &str, key: &str) -> Option<&'a T
         .find(|item| item.section == section && item.key == key)
 }
 
-fn parse_pyproject(path: &str, content: &str) -> Result<PackageManifest, PackageManifestError> {
-    let entries = parse_toml(path, content).map_err(|error| rehome_error(path, error))?;
+fn parse_pyproject(
+    path: &str,
+    content: &str,
+    tracker: &mut ExtractionTracker,
+) -> Result<PackageManifest, PackageManifestError> {
+    let entries = parse_toml(path, content, tracker).map_err(|error| rehome_error(path, error))?;
     let mut result = PackageManifest::default();
-    extract_python_package(path, content, &entries, &mut result)?;
-    extract_pep621_dependencies(path, content, &entries, &mut result)?;
-    extract_poetry_dependencies(path, content, &entries, &mut result)?;
+    extract_python_package(path, content, &entries, &mut result, tracker)?;
+    extract_pep621_dependencies(path, content, &entries, &mut result, tracker)?;
+    extract_poetry_dependencies(path, content, &entries, &mut result, tracker)?;
     Ok(result)
 }
 
@@ -1291,6 +1358,7 @@ fn extract_python_package(
     content: &str,
     entries: &[TomlEntry],
     result: &mut PackageManifest,
+    tracker: &mut ExtractionTracker,
 ) -> Result<(), PackageManifestError> {
     let project_name = entry(entries, "project", "name")
         .map(|item| toml_string(path, item))
@@ -1309,13 +1377,17 @@ fn extract_python_package(
         let version = entry(entries, section, "version")
             .map(|item| toml_string(path, item))
             .transpose()?;
-        result.packages.push(package(
-            PackageEcosystem::Python,
-            name.clone(),
-            version,
-            path,
-            evidence_at(content, name_entry.line),
-        ));
+        push_package(
+            &mut result.packages,
+            package(
+                PackageEcosystem::Python,
+                name.clone(),
+                version,
+                path,
+                evidence_at(content, name_entry.line),
+            ),
+            tracker,
+        )?;
     }
     Ok(())
 }
@@ -1325,19 +1397,24 @@ fn extract_pep621_dependencies(
     content: &str,
     entries: &[TomlEntry],
     result: &mut PackageManifest,
+    tracker: &mut ExtractionTracker,
 ) -> Result<(), PackageManifestError> {
     if let Some(dependencies) = entry(entries, "project", "dependencies") {
         for requirement in toml_array(path, dependencies)? {
             if let Some(parsed) = parse_python_requirement(&requirement) {
-                result.dependencies.push(python_dependency(
-                    path,
-                    content,
-                    parsed,
-                    DependencyScope::Runtime,
-                    false,
-                    dependencies.line,
-                    &requirement,
-                ));
+                push_dependency(
+                    &mut result.dependencies,
+                    python_dependency(
+                        path,
+                        content,
+                        parsed,
+                        DependencyScope::Runtime,
+                        false,
+                        dependencies.line,
+                        &requirement,
+                    ),
+                    tracker,
+                )?;
             }
         }
     }
@@ -1347,15 +1424,19 @@ fn extract_pep621_dependencies(
             if extra.is_empty() {
                 for requirement in toml_array(path, item)? {
                     if let Some(parsed) = parse_python_requirement(&requirement) {
-                        result.dependencies.push(python_dependency(
-                            path,
-                            content,
-                            parsed.with_condition(format!("extra = \"{}\"", item.key)),
-                            DependencyScope::Optional,
-                            true,
-                            item.line,
-                            &requirement,
-                        ));
+                        push_dependency(
+                            &mut result.dependencies,
+                            python_dependency(
+                                path,
+                                content,
+                                parsed.with_condition(format!("extra = \"{}\"", item.key)),
+                                DependencyScope::Optional,
+                                true,
+                                item.line,
+                                &requirement,
+                            ),
+                            tracker,
+                        )?;
                     }
                 }
             }
@@ -1369,6 +1450,7 @@ fn extract_poetry_dependencies(
     content: &str,
     entries: &[TomlEntry],
     result: &mut PackageManifest,
+    tracker: &mut ExtractionTracker,
 ) -> Result<(), PackageManifestError> {
     for item in entries {
         let (scope, group_condition) = if item.section == "tool.poetry.dependencies" {
@@ -1396,21 +1478,25 @@ fn extract_poetry_dependencies(
         }
         let (version, optional, table_condition) = parse_poetry_value(path, item)?;
         let condition = join_conditions(group_condition, table_condition);
-        result.dependencies.push(dependency(DependencyInput {
-            ecosystem: PackageEcosystem::Python,
-            name: item.key.clone(),
-            version,
-            scope: if optional {
-                DependencyScope::Optional
-            } else {
-                scope
-            },
-            optional,
-            condition,
-            path,
-            evidence: evidence_at(content, item.line),
-            confidence: EXACT_CONFIDENCE,
-        }));
+        push_dependency(
+            &mut result.dependencies,
+            dependency(DependencyInput {
+                ecosystem: PackageEcosystem::Python,
+                name: item.key.clone(),
+                version,
+                scope: if optional {
+                    DependencyScope::Optional
+                } else {
+                    scope
+                },
+                optional,
+                condition,
+                path,
+                evidence: evidence_at(content, item.line),
+                confidence: EXACT_CONFIDENCE,
+            }),
+            tracker,
+        )?;
     }
     Ok(())
 }
@@ -1521,10 +1607,17 @@ fn python_dependency(
     })
 }
 
-fn parse_requirements(path: &str, content: &str) -> Result<PackageManifest, PackageManifestError> {
+fn parse_requirements(
+    path: &str,
+    content: &str,
+    tracker: &mut ExtractionTracker,
+) -> Result<PackageManifest, PackageManifestError> {
     reject_nul(path, content)?;
     let mut result = PackageManifest::default();
     for (index, line) in content.lines().enumerate() {
+        if index.is_multiple_of(1_024) {
+            tracker.check_structured_time()?;
+        }
         let declaration = strip_requirement_comment(line).trim();
         if declaration.is_empty() || declaration.starts_with('-') {
             continue;
@@ -1536,15 +1629,19 @@ fn parse_requirements(path: &str, content: &str) -> Result<PackageManifest, Pack
             ));
         }
         if let Some(parsed) = parse_python_requirement(declaration) {
-            result.dependencies.push(python_dependency(
-                path,
-                content,
-                parsed,
-                DependencyScope::Runtime,
-                false,
-                index + 1,
-                declaration,
-            ));
+            push_dependency(
+                &mut result.dependencies,
+                python_dependency(
+                    path,
+                    content,
+                    parsed,
+                    DependencyScope::Runtime,
+                    false,
+                    index + 1,
+                    declaration,
+                ),
+                tracker,
+            )?;
         }
     }
     Ok(result)
@@ -1559,43 +1656,50 @@ fn strip_requirement_comment(line: &str) -> &str {
 fn parse_cargo_manifest(
     path: &str,
     content: &str,
+    tracker: &mut ExtractionTracker,
 ) -> Result<PackageManifest, PackageManifestError> {
-    let entries = parse_toml(path, content).map_err(|error| rehome_error(path, error))?;
+    let entries = parse_toml(path, content, tracker).map_err(|error| rehome_error(path, error))?;
     let mut result = PackageManifest::default();
     if let Some(name_entry) = entry(&entries, "package", "name") {
         let name = toml_string(path, name_entry)?;
         let version = entry(&entries, "package", "version")
             .map(|item| toml_string(path, item))
             .transpose()?;
-        result.packages.push(package(
-            PackageEcosystem::Cargo,
-            name,
-            version,
-            path,
-            evidence_at(content, name_entry.line),
-        ));
+        push_package(
+            &mut result.packages,
+            package(
+                PackageEcosystem::Cargo,
+                name,
+                version,
+                path,
+                evidence_at(content, name_entry.line),
+            ),
+            tracker,
+        )?;
     }
     if let Some(members) = entry(&entries, "workspace", "members") {
         for member in toml_array(path, members)? {
-            result.workspace_members.push(value_fact(
-                path,
-                content,
-                member.clone(),
-                members.line,
-                &member,
-            ));
+            push_value(
+                &mut result.workspace_members,
+                value_fact(path, content, member.clone(), members.line, &member),
+                tracker,
+            )?;
         }
     }
 
     let mut feature_dependencies: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for feature in entries.iter().filter(|item| item.section == "features") {
-        result.features.push(value_fact(
-            path,
-            content,
-            feature.key.clone(),
-            feature.line,
-            &feature.key,
-        ));
+        push_value(
+            &mut result.features,
+            value_fact(
+                path,
+                content,
+                feature.key.clone(),
+                feature.line,
+                &feature.key,
+            ),
+            tracker,
+        )?;
         for member in toml_array(path, feature)? {
             let dependency_name = member
                 .strip_prefix("dep:")
@@ -1623,20 +1727,24 @@ fn parse_cargo_manifest(
             (optional && features.is_none()).then(|| format!("feature = \"{}\"", item.key));
         let dependency_features = (!declared_features.is_empty())
             .then(|| format!("dependency features = \"{}\"", declared_features.join("|")));
-        result.dependencies.push(dependency(DependencyInput {
-            ecosystem: PackageEcosystem::Cargo,
-            name,
-            version,
-            scope,
-            optional,
-            condition: join_conditions(
-                join_conditions(target, feature_condition.or(implicit_feature)),
-                dependency_features,
-            ),
-            path,
-            evidence: evidence_at(content, item.line),
-            confidence: EXACT_CONFIDENCE,
-        }));
+        push_dependency(
+            &mut result.dependencies,
+            dependency(DependencyInput {
+                ecosystem: PackageEcosystem::Cargo,
+                name,
+                version,
+                scope,
+                optional,
+                condition: join_conditions(
+                    join_conditions(target, feature_condition.or(implicit_feature)),
+                    dependency_features,
+                ),
+                path,
+                evidence: evidence_at(content, item.line),
+                confidence: EXACT_CONFIDENCE,
+            }),
+            tracker,
+        )?;
     }
     Ok(result)
 }
@@ -1702,12 +1810,19 @@ fn parse_cargo_dependency(
     Ok((name, version, optional, features))
 }
 
-fn parse_go_mod(path: &str, content: &str) -> Result<PackageManifest, PackageManifestError> {
+fn parse_go_mod(
+    path: &str,
+    content: &str,
+    tracker: &mut ExtractionTracker,
+) -> Result<PackageManifest, PackageManifestError> {
     reject_nul(path, content)?;
     let mut result = PackageManifest::default();
     let mut require_block = false;
     let mut saw_module = false;
     for (index, line) in content.lines().enumerate() {
+        if index.is_multiple_of(1_024) {
+            tracker.check_structured_time()?;
+        }
         let line_number = index + 1;
         let trimmed = line.trim();
         if let Some(module) = trimmed.strip_prefix("module ") {
@@ -1719,13 +1834,17 @@ fn parse_go_mod(path: &str, content: &str) -> Result<PackageManifest, PackageMan
                 ));
             }
             saw_module = true;
-            result.packages.push(package(
-                PackageEcosystem::Go,
-                module.to_owned(),
-                None,
-                path,
-                evidence_at(content, line_number),
-            ));
+            push_package(
+                &mut result.packages,
+                package(
+                    PackageEcosystem::Go,
+                    module.to_owned(),
+                    None,
+                    path,
+                    evidence_at(content, line_number),
+                ),
+                tracker,
+            )?;
             continue;
         }
         if trimmed == "require (" {
@@ -1768,17 +1887,21 @@ fn parse_go_mod(path: &str, content: &str) -> Result<PackageManifest, PackageMan
                 format!("invalid requirement at line {line_number}"),
             ));
         }
-        result.dependencies.push(dependency(DependencyInput {
-            ecosystem: PackageEcosystem::Go,
-            name: name.to_owned(),
-            version: Some(version.to_owned()),
-            scope: DependencyScope::Runtime,
-            optional: indirect,
-            condition: indirect.then(|| "indirect".to_owned()),
-            path,
-            evidence: evidence_at(content, line_number),
-            confidence: EXACT_CONFIDENCE,
-        }));
+        push_dependency(
+            &mut result.dependencies,
+            dependency(DependencyInput {
+                ecosystem: PackageEcosystem::Go,
+                name: name.to_owned(),
+                version: Some(version.to_owned()),
+                scope: DependencyScope::Runtime,
+                optional: indirect,
+                condition: indirect.then(|| "indirect".to_owned()),
+                path,
+                evidence: evidence_at(content, line_number),
+                confidence: EXACT_CONFIDENCE,
+            }),
+            tracker,
+        )?;
     }
     if require_block {
         return Err(malformed(path, "unterminated require block"));
@@ -1789,11 +1912,18 @@ fn parse_go_mod(path: &str, content: &str) -> Result<PackageManifest, PackageMan
     Ok(result)
 }
 
-fn parse_go_work(path: &str, content: &str) -> Result<PackageManifest, PackageManifestError> {
+fn parse_go_work(
+    path: &str,
+    content: &str,
+    tracker: &mut ExtractionTracker,
+) -> Result<PackageManifest, PackageManifestError> {
     reject_nul(path, content)?;
     let mut result = PackageManifest::default();
     let mut use_block = false;
     for (index, line) in content.lines().enumerate() {
+        if index.is_multiple_of(1_024) {
+            tracker.check_structured_time()?;
+        }
         let line_number = index + 1;
         let trimmed = line.split("//").next().unwrap_or_default().trim();
         if trimmed == "use (" {
@@ -1824,13 +1954,11 @@ fn parse_go_work(path: &str, content: &str) -> Result<PackageManifest, PackageMa
                 format!("invalid use declaration at line {line_number}"),
             ));
         }
-        result.workspace_members.push(value_fact(
-            path,
-            content,
-            member.to_owned(),
-            line_number,
-            member,
-        ));
+        push_value(
+            &mut result.workspace_members,
+            value_fact(path, content, member.to_owned(), line_number, member),
+            tracker,
+        )?;
     }
     if use_block {
         return Err(malformed(path, "unterminated use block"));
@@ -1875,6 +2003,7 @@ fn parse_xml(
     }];
     let mut stack = vec![0_usize];
     let mut cursor = 0;
+    let mut line = 1_usize;
     while cursor < content.len() {
         tracker.charge_work(1)?;
         let Some(relative_open) = content[cursor..].find('<') else {
@@ -1882,13 +2011,14 @@ fn parse_xml(
             break;
         };
         let open = cursor + relative_open;
+        let open_line = line.saturating_add(count_newlines(&content[cursor..open]));
         append_xml_text(&mut nodes, &stack, &content[cursor..open], tracker)?;
         if content[open..].starts_with("<!--") {
             let end = content[open + 4..]
                 .find("-->")
                 .map(|index| open + 4 + index + 3)
                 .ok_or_else(|| malformed(path, "unterminated XML comment"))?;
-            cursor = end;
+            advance_xml_cursor(content, &mut cursor, &mut line, end);
             continue;
         }
         if content[open..].starts_with("<![CDATA[") {
@@ -1898,13 +2028,13 @@ fn parse_xml(
                 .map(|index| start + index)
                 .ok_or_else(|| malformed(path, "unterminated CDATA section"))?;
             append_xml_text(&mut nodes, &stack, &content[start..end], tracker)?;
-            cursor = end + 3;
+            advance_xml_cursor(content, &mut cursor, &mut line, end + 3);
             continue;
         }
         let close = find_xml_tag_end(content, open + 1)
             .ok_or_else(|| malformed(path, "unterminated XML tag"))?;
         let raw = content[open + 1..close].trim();
-        cursor = close + 1;
+        advance_xml_cursor(content, &mut cursor, &mut line, close + 1);
         if raw.starts_with('?') || raw.starts_with('!') {
             continue;
         }
@@ -1931,17 +2061,12 @@ fn parse_xml(
         let depth = u64::try_from(stack.len()).unwrap_or(u64::MAX);
         tracker.check_structural_depth(depth)?;
         tracker.charge_identifier(&name)?;
-        tracker.charge_observation(1)?;
         let node_index = nodes.len();
         nodes.push(XmlNode {
             name,
             attributes,
             text: String::new(),
-            line: content[..open]
-                .bytes()
-                .filter(|byte| *byte == b'\n')
-                .count()
-                + 1,
+            line: open_line,
             children: Vec::new(),
         });
         let parent = *stack
@@ -1957,6 +2082,15 @@ fn parse_xml(
         return Err(malformed(path, format!("unclosed XML tag `{name}`")));
     }
     Ok(XmlDocument { nodes })
+}
+
+fn count_newlines(value: &str) -> usize {
+    value.bytes().filter(|byte| *byte == b'\n').count()
+}
+
+fn advance_xml_cursor(content: &str, cursor: &mut usize, line: &mut usize, next: usize) {
+    *line = line.saturating_add(count_newlines(&content[*cursor..next]));
+    *cursor = next;
 }
 
 fn append_xml_text(
@@ -2075,16 +2209,28 @@ fn parse_maven(
             || evidence_at(content, project.line),
             |node| evidence_at(content, node.line),
         );
-        result.packages.push(package(
-            PackageEcosystem::Maven,
-            format!("{group}:{artifact}"),
-            version.filter(|value| !contains_dynamic(value)),
-            path,
-            evidence,
-        ));
+        push_package(
+            &mut result.packages,
+            package(
+                PackageEcosystem::Maven,
+                format!("{group}:{artifact}"),
+                version.filter(|value| !contains_dynamic(value)),
+                path,
+                evidence,
+            ),
+            tracker,
+        )?;
     }
     if let Some(dependencies) = child(&document, project, "dependencies") {
-        collect_maven_dependencies(path, content, &document, dependencies, None, &mut result);
+        collect_maven_dependencies(
+            path,
+            content,
+            &document,
+            dependencies,
+            None,
+            &mut result,
+            tracker,
+        )?;
     }
     if let Some(profiles) = child(&document, project, "profiles") {
         for profile in document
@@ -2103,7 +2249,8 @@ fn parse_maven(
                         .map(|id| format!("profile = \"{id}\""))
                         .as_deref(),
                     &mut result,
-                );
+                    tracker,
+                )?;
             }
         }
     }
@@ -2117,7 +2264,8 @@ fn collect_maven_dependencies(
     dependencies: &XmlNode,
     profile: Option<&str>,
     output: &mut PackageManifest,
-) {
+    tracker: &mut ExtractionTracker,
+) -> Result<(), PackageManifestError> {
     for item in document
         .children(dependencies)
         .filter(|node| node.name == "dependency")
@@ -2144,29 +2292,41 @@ fn collect_maven_dependencies(
         let type_condition = child_text(document, item, "type")
             .filter(|value| value != "jar")
             .map(|value| format!("type = \"{value}\""));
-        output.dependencies.push(dependency(DependencyInput {
-            ecosystem: PackageEcosystem::Maven,
-            name: format!("{group}:{artifact}"),
-            version,
-            scope: if optional {
-                DependencyScope::Optional
-            } else {
-                scope
-            },
-            optional,
-            condition: join_conditions(profile.map(str::to_owned), type_condition),
-            path,
-            evidence: evidence_at(content, item.line),
-            confidence: EXACT_CONFIDENCE,
-        }));
+        push_dependency(
+            &mut output.dependencies,
+            dependency(DependencyInput {
+                ecosystem: PackageEcosystem::Maven,
+                name: format!("{group}:{artifact}"),
+                version,
+                scope: if optional {
+                    DependencyScope::Optional
+                } else {
+                    scope
+                },
+                optional,
+                condition: join_conditions(profile.map(str::to_owned), type_condition),
+                path,
+                evidence: evidence_at(content, item.line),
+                confidence: EXACT_CONFIDENCE,
+            }),
+            tracker,
+        )?;
     }
+    Ok(())
 }
 
-fn parse_gradle(path: &str, content: &str) -> Result<PackageManifest, PackageManifestError> {
+fn parse_gradle(
+    path: &str,
+    content: &str,
+    tracker: &mut ExtractionTracker,
+) -> Result<PackageManifest, PackageManifestError> {
     reject_nul(path, content)?;
-    validate_gradle_balance(path, content)?;
+    validate_gradle_balance(path, content, tracker)?;
     let mut result = PackageManifest::default();
     for (index, line) in content.lines().enumerate() {
+        if index.is_multiple_of(1_024) {
+            tracker.check_structured_time()?;
+        }
         let line_number = index + 1;
         let trimmed = line.trim();
         if trimmed.starts_with("//") || trimmed.is_empty() {
@@ -2179,27 +2339,38 @@ fn parse_gradle(path: &str, content: &str) -> Result<PackageManifest, PackageMan
             continue;
         };
         let (scope, optional) = gradle_scope(configuration);
-        result.dependencies.push(dependency(DependencyInput {
-            ecosystem: PackageEcosystem::Gradle,
-            name: format!("{group}:{artifact}"),
-            version,
-            scope,
-            optional,
-            condition: Some(format!("configuration = \"{configuration}\"")),
-            path,
-            evidence: evidence_at(content, line_number),
-            confidence: STATIC_TEXT_CONFIDENCE,
-        }));
+        push_dependency(
+            &mut result.dependencies,
+            dependency(DependencyInput {
+                ecosystem: PackageEcosystem::Gradle,
+                name: format!("{group}:{artifact}"),
+                version,
+                scope,
+                optional,
+                condition: Some(format!("configuration = \"{configuration}\"")),
+                path,
+                evidence: evidence_at(content, line_number),
+                confidence: STATIC_TEXT_CONFIDENCE,
+            }),
+            tracker,
+        )?;
     }
     Ok(result)
 }
 
-fn validate_gradle_balance(path: &str, content: &str) -> Result<(), PackageManifestError> {
+fn validate_gradle_balance(
+    path: &str,
+    content: &str,
+    tracker: &ExtractionTracker,
+) -> Result<(), PackageManifestError> {
     let mut curly = 0_i32;
     let mut round = 0_i32;
     let mut quote = None;
     let mut escaped = false;
-    for character in content.chars() {
+    for (index, character) in content.chars().enumerate() {
+        if index.is_multiple_of(1_024) {
+            tracker.check_structured_time()?;
+        }
         if escaped {
             escaped = false;
             continue;
@@ -2326,24 +2497,28 @@ fn parse_packages_config(
             .attributes
             .get("developmentDependency")
             .is_some_and(|value| value.eq_ignore_ascii_case("true"));
-        result.dependencies.push(dependency(DependencyInput {
-            ecosystem: PackageEcosystem::NuGet,
-            name: name.clone(),
-            version,
-            scope: if development {
-                DependencyScope::Dev
-            } else {
-                DependencyScope::Runtime
-            },
-            optional: false,
-            condition: item
-                .attributes
-                .get("targetFramework")
-                .map(|value| format!("targetFramework = \"{value}\"")),
-            path,
-            evidence: evidence_at(content, item.line),
-            confidence: EXACT_CONFIDENCE,
-        }));
+        push_dependency(
+            &mut result.dependencies,
+            dependency(DependencyInput {
+                ecosystem: PackageEcosystem::NuGet,
+                name: name.clone(),
+                version,
+                scope: if development {
+                    DependencyScope::Dev
+                } else {
+                    DependencyScope::Runtime
+                },
+                optional: false,
+                condition: item
+                    .attributes
+                    .get("targetFramework")
+                    .map(|value| format!("targetFramework = \"{value}\"")),
+                path,
+                evidence: evidence_at(content, item.line),
+                confidence: EXACT_CONFIDENCE,
+            }),
+            tracker,
+        )?;
     }
     Ok(result)
 }
@@ -2360,13 +2535,17 @@ fn parse_csproj(
         .ok_or_else(|| malformed(path, "missing `Project` root element"))?;
     let mut result = PackageManifest::default();
     if let Some(identity) = csproj_package_identity(path, &document, project)? {
-        result.packages.push(package(
-            PackageEcosystem::NuGet,
-            identity.name,
-            identity.version,
-            path,
-            evidence_at(content, identity.name_node.line),
-        ));
+        push_package(
+            &mut result.packages,
+            package(
+                PackageEcosystem::NuGet,
+                identity.name,
+                identity.version,
+                path,
+                evidence_at(content, identity.name_node.line),
+            ),
+            tracker,
+        )?;
     }
     for group in document
         .children(project)
@@ -2402,21 +2581,25 @@ fn parse_csproj(
                 .cloned()
                 .or_else(|| child_text(&document, reference, "PrivateAssets"));
             let reference_condition = reference.attributes.get("Condition").cloned();
-            result.dependencies.push(dependency(DependencyInput {
-                ecosystem: PackageEcosystem::NuGet,
-                name: name.clone(),
-                version,
-                scope: DependencyScope::Runtime,
-                optional: false,
-                condition: join_conditions(group_condition.clone(), reference_condition),
-                path,
-                evidence: evidence_at(content, reference.line),
-                confidence: if private_assets.as_deref() == Some("all") {
-                    STATIC_TEXT_CONFIDENCE
-                } else {
-                    EXACT_CONFIDENCE
-                },
-            }));
+            push_dependency(
+                &mut result.dependencies,
+                dependency(DependencyInput {
+                    ecosystem: PackageEcosystem::NuGet,
+                    name: name.clone(),
+                    version,
+                    scope: DependencyScope::Runtime,
+                    optional: false,
+                    condition: join_conditions(group_condition.clone(), reference_condition),
+                    path,
+                    evidence: evidence_at(content, reference.line),
+                    confidence: if private_assets.as_deref() == Some("all") {
+                        STATIC_TEXT_CONFIDENCE
+                    } else {
+                        EXACT_CONFIDENCE
+                    },
+                }),
+                tracker,
+            )?;
         }
     }
     Ok(result)
@@ -2491,6 +2674,8 @@ fn reject_nul(path: &str, content: &str) -> Result<(), PackageManifestError> {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Duration;
 
     use super::*;
@@ -2502,6 +2687,15 @@ mod tests {
     impl ExtractionClock for FixedClock {
         fn elapsed(&self) -> Duration {
             self.0
+        }
+    }
+
+    #[derive(Debug)]
+    struct AdvancingClock(AtomicU64);
+
+    impl ExtractionClock for AdvancingClock {
+        fn elapsed(&self) -> Duration {
+            Duration::from_millis(self.0.fetch_add(2, Ordering::Relaxed))
         }
     }
 
@@ -2549,6 +2743,21 @@ mod tests {
                     && error.observed == 2
                     && error.maximum == 1
         ));
+
+        let exact_observation_budgets = ExtractionBudgets {
+            max_observations_per_artifact: 2,
+            ..ExtractionBudgets::default()
+        };
+        let mut exact_observations =
+            ExtractionTracker::new("package.json", "packages", &exact_observation_budgets);
+        assert!(
+            extract_package_manifest_with_tracker(
+                "package.json",
+                r#"{"name":"service","dependencies":{"serde":"1"}}"#,
+                &mut exact_observations,
+            )
+            .is_ok()
+        );
 
         let identifier_budgets = ExtractionBudgets {
             max_identifier_bytes_per_value: 4,
@@ -2632,6 +2841,48 @@ mod tests {
             Err(PackageManifestError::LimitExceeded(error))
                 if error.resource == ExtractionResource::StructuredWallTimeMs
         ));
+    }
+
+    #[test]
+    fn line_parser_should_check_deadline_during_materialization() {
+        let budgets = ExtractionBudgets {
+            max_structured_wall_time_ms_per_artifact: 1,
+            ..ExtractionBudgets::default()
+        };
+        let mut tracker = ExtractionTracker::with_clock(
+            "requirements.txt",
+            "packages",
+            &budgets,
+            Box::new(AdvancingClock(AtomicU64::new(0))),
+        );
+        let source = "dep==1\n".repeat(1_025);
+
+        assert!(matches!(
+            parse_requirements("requirements.txt", &source, &mut tracker),
+            Err(PackageManifestError::LimitExceeded(error))
+                if error.resource == ExtractionResource::StructuredWallTimeMs
+        ));
+    }
+
+    #[test]
+    fn xml_parser_should_track_lines_without_prefix_rescans() {
+        let mut source = String::from("<packages>\n");
+        for index in 0..5_000 {
+            writeln!(source, "<package id=\"p{index}\" version=\"1\"/>")
+                .expect("String writes are infallible");
+        }
+        source.push_str("</packages>\n");
+        let budgets = ExtractionBudgets::default();
+        let mut tracker = ExtractionTracker::new("packages.config", "packages", &budgets);
+        let document = parse_xml("packages.config", &source, &mut tracker).expect("bounded XML");
+        let last_package = document
+            .nodes
+            .iter()
+            .rev()
+            .find(|node| node.name == "package")
+            .expect("last package");
+
+        assert_eq!(last_package.line, 5_001);
     }
 
     #[test]

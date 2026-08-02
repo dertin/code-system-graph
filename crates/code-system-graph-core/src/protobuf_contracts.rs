@@ -1185,6 +1185,8 @@ fn precheck_protobuf_depth(
     let mut block_comment = false;
     let mut string_start = None;
     let mut accumulated_string_bytes = 0_u64;
+    let mut literal_context = false;
+    let mut consecutive_literal_comments = 0_u64;
     while cursor < bytes.len() {
         if cursor.is_multiple_of(1_024) {
             tracker.check_structured_time()?;
@@ -1212,51 +1214,97 @@ fn precheck_protobuf_depth(
                 quote = None;
             }
         } else if byte == b'/' && next == Some(b'/') {
+            charge_protobuf_comment_recursion(
+                literal_context,
+                &mut consecutive_literal_comments,
+                tracker,
+            )?;
             line_comment = true;
             cursor = cursor.saturating_add(1);
         } else if byte == b'/' && next == Some(b'*') {
+            charge_protobuf_comment_recursion(
+                literal_context,
+                &mut consecutive_literal_comments,
+                tracker,
+            )?;
             block_comment = true;
             cursor = cursor.saturating_add(1);
         } else if matches!(byte, b'"' | b'\'') {
+            consecutive_literal_comments = 0;
             tracker.charge_work(1)?;
             quote = Some(byte);
             string_start = Some(cursor.saturating_add(1));
         } else if matches!(byte, b'{' | b'[' | b'(') {
+            consecutive_literal_comments = 0;
             tracker.charge_work(1)?;
             depth = depth.saturating_add(1);
             tracker.check_structural_depth(depth)?;
         } else if matches!(byte, b'}' | b']' | b')') {
+            consecutive_literal_comments = 0;
             tracker.charge_work(1)?;
             depth = depth.saturating_sub(1);
         } else if byte == b';' {
+            literal_context = false;
+            consecutive_literal_comments = 0;
             tracker.charge_work(1)?;
             tracker.charge_observation(1)?;
-        } else if byte == b'_' || byte.is_ascii_alphabetic() {
-            let start = cursor;
-            cursor = cursor.saturating_add(1);
-            while cursor < bytes.len()
-                && (bytes[cursor] == b'_'
-                    || bytes[cursor] == b'.'
-                    || bytes[cursor].is_ascii_alphanumeric())
-            {
-                cursor = cursor.saturating_add(1);
-            }
-            let observed = u64::try_from(cursor.saturating_sub(start)).unwrap_or(u64::MAX);
+        } else if byte == b'=' || (literal_context && byte == b':') {
+            literal_context = true;
+            consecutive_literal_comments = 0;
             tracker.charge_work(1)?;
-            tracker.check_identifier_bytes(observed)?;
-            accumulated_string_bytes = accumulated_string_bytes.saturating_add(observed);
-            tracker.check_accumulated_string_bytes(accumulated_string_bytes)?;
-            if matches!(
-                &input[start..cursor],
-                "message" | "enum" | "service" | "rpc"
-            ) {
-                tracker.charge_observation(1)?;
-            }
+        } else if byte == b'_' || byte.is_ascii_alphabetic() {
+            consecutive_literal_comments = 0;
+            cursor = precheck_protobuf_identifier(
+                input,
+                cursor,
+                &mut accumulated_string_bytes,
+                tracker,
+            )?;
             continue;
         } else if !byte.is_ascii_whitespace() {
+            consecutive_literal_comments = 0;
             tracker.charge_work(1)?;
         }
         cursor = cursor.saturating_add(1);
+    }
+    Ok(())
+}
+
+fn precheck_protobuf_identifier(
+    input: &str,
+    start: usize,
+    accumulated_string_bytes: &mut u64,
+    tracker: &mut ExtractionTracker,
+) -> Result<usize, ExtractionLimitExceeded> {
+    let bytes = input.as_bytes();
+    let mut cursor = start.saturating_add(1);
+    while cursor < bytes.len()
+        && (bytes[cursor] == b'_' || bytes[cursor] == b'.' || bytes[cursor].is_ascii_alphanumeric())
+    {
+        cursor = cursor.saturating_add(1);
+    }
+    let observed = u64::try_from(cursor.saturating_sub(start)).unwrap_or(u64::MAX);
+    tracker.charge_work(1)?;
+    tracker.check_identifier_bytes(observed)?;
+    *accumulated_string_bytes = accumulated_string_bytes.saturating_add(observed);
+    tracker.check_accumulated_string_bytes(*accumulated_string_bytes)?;
+    if matches!(
+        &input[start..cursor],
+        "message" | "enum" | "service" | "rpc"
+    ) {
+        tracker.charge_observation(1)?;
+    }
+    Ok(cursor)
+}
+
+fn charge_protobuf_comment_recursion(
+    literal_context: bool,
+    consecutive_comments: &mut u64,
+    tracker: &ExtractionTracker,
+) -> Result<(), ExtractionLimitExceeded> {
+    if literal_context {
+        *consecutive_comments = consecutive_comments.saturating_add(1);
+        tracker.check_structural_depth(*consecutive_comments)?;
     }
     Ok(())
 }
@@ -1612,6 +1660,42 @@ service Greeter {
         assert!(
             output.status.success(),
             "child failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn recursive_literal_comments_should_fail_cleanly_before_the_parser() {
+        const CHILD_ENV: &str = "CSGRAPH_PROTO_COMMENT_CHILD";
+        if std::env::var_os(CHILD_ENV).is_some() {
+            let budgets = ExtractionBudgets {
+                max_structural_depth_per_artifact: 64,
+                ..ExtractionBudgets::default()
+            };
+            let comments = "// comment\n".repeat(20_000);
+            let source = format!("syntax = \"proto3\"; option optimize_for = {comments}SPEED;");
+            let mut tracker = ExtractionTracker::new("comments.proto", "protobuf", &budgets);
+            assert!(matches!(
+                extract_protobuf_with_tracker("comments.proto", &source, &mut tracker),
+                Err(ProtobufExtractionError::LimitExceeded(error))
+                    if error.resource == ExtractionResource::StructuralDepth
+                        && error.observed == 65
+                        && error.maximum == 64
+            ));
+            return;
+        }
+
+        let output = Command::new(std::env::current_exe().expect("test executable should exist"))
+            .args([
+                "--exact",
+                "protobuf_contracts::tests::recursive_literal_comments_should_fail_cleanly_before_the_parser",
+            ])
+            .env(CHILD_ENV, "1")
+            .output()
+            .expect("child test should launch");
+        assert!(
+            output.status.success(),
+            "child failed without a typed limit: {}",
             String::from_utf8_lossy(&output.stderr)
         );
     }

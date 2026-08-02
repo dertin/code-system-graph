@@ -46,7 +46,7 @@ tower = { version = "0.5.3", features = ["util", "limit"] }
 tower-http = { version = "0.7.0", features = ["catch-panic", "limit", "sensitive-headers", "set-header", "timeout"] }
 
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.31.3", features = ["signal"] }
+nix = { version = "0.31.3", features = ["fs", "signal"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = [
