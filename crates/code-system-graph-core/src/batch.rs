@@ -8,7 +8,7 @@ use serde::de::DeserializeOwned;
 use thiserror::Error;
 
 use crate::{
-    EXTRACTION_CONTRACT_VERSION, ExtractionLimitExceeded, ExtractionTracker, IncrementalPlan
+    EXTRACTION_CONTRACT_VERSION, ExtractionBudgets, ExtractionLimitExceeded, ExtractionResource, ExtractionTracker, IncrementalPlan
 };
 
 /// Stable identity of one extractor input within a concrete checkout.
@@ -199,6 +199,36 @@ pub fn store_extractor_batch<T: Serialize>(
 pub fn load_extractor_batch<T: DeserializeOwned>(
     stored: &code_system_graph_model::StoredExtractorBatch,
 ) -> Result<ExtractorBatch<T>, BatchPlanError> {
+    load_extractor_batch_with_limit(
+        stored,
+        ExtractionBudgets::default().max_serialized_output_bytes_per_artifact,
+    )
+}
+
+/// Decodes one persisted source-owned output batch after enforcing an effective byte maximum.
+///
+/// The byte check deliberately precedes deserialization so a corrupt or untrusted persisted batch
+/// cannot force an allocation larger than the active extraction policy.
+///
+/// # Errors
+///
+/// Returns [`BatchPlanError`] when the payload exceeds `maximum_bytes`, its schema is invalid, or
+/// its count is inconsistent.
+pub fn load_extractor_batch_with_limit<T: DeserializeOwned>(
+    stored: &code_system_graph_model::StoredExtractorBatch,
+    maximum_bytes: u64,
+) -> Result<ExtractorBatch<T>, BatchPlanError> {
+    let observed = u64::try_from(stored.payload.len()).unwrap_or(u64::MAX);
+    if observed > maximum_bytes {
+        return Err(ExtractionLimitExceeded {
+            artifact: stored.source.path.display.clone(),
+            extractor: stored.source.extractor.clone(),
+            resource: ExtractionResource::SerializedOutputBytes,
+            observed,
+            maximum: maximum_bytes,
+        }
+        .into());
+    }
     let outputs: Vec<T> = serde_json::from_slice(&stored.payload)
         .map_err(|error| BatchPlanError::InvalidPayload(error.to_string()))?;
     if usize::try_from(stored.output_count).ok() != Some(outputs.len()) {
@@ -315,9 +345,9 @@ mod tests {
     };
 
     use super::{
-        BatchAction, BatchPlanError, ExtractorBatch, affected_link_keys, load_extractor_batch, plan_extractor_batches, store_extractor_batch
+        BatchAction, BatchPlanError, ExtractorBatch, affected_link_keys, load_extractor_batch, load_extractor_batch_with_limit, plan_extractor_batches, store_extractor_batch
     };
-    use crate::{ExtractionBudgets, ExtractionTracker, IncrementalPlan};
+    use crate::{ExtractionBudgets, ExtractionLimitExceeded, ExtractionTracker, IncrementalPlan};
 
     fn tracker() -> ExtractionTracker {
         ExtractionTracker::new("src/routes.rs", "test", &ExtractionBudgets::default())
@@ -436,6 +466,27 @@ mod tests {
                 stored: 2,
                 decoded: 1
             })
+        ));
+    }
+
+    #[test]
+    fn stored_batch_should_check_payload_limit_before_decoding() {
+        let original = batch("src/routes.rs", "hash", &["GET:/orders"]);
+        let stored = store_extractor_batch(&original, &mut tracker(), false).expect("stored batch");
+        let exact = u64::try_from(stored.payload.len()).expect("payload length");
+
+        assert_eq!(
+            load_extractor_batch_with_limit::<String>(&stored, exact),
+            Ok(original)
+        );
+        assert!(matches!(
+            load_extractor_batch_with_limit::<String>(&stored, exact - 1),
+            Err(BatchPlanError::ExtractionLimit(ExtractionLimitExceeded {
+                resource: crate::ExtractionResource::SerializedOutputBytes,
+                observed,
+                maximum,
+                ..
+            })) if observed == exact && maximum == exact - 1
         ));
     }
 }

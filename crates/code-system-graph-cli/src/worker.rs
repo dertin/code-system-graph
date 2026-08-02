@@ -219,10 +219,13 @@ fn failure_message(error: ApplicationError) -> WorkerMessage {
         error if retryable => WorkerFailure::Transient {
             message: error.to_string(),
         },
-        error => WorkerFailure::Other {
-            exit_code: application_exit_code(&error),
-            message: error.to_string(),
-        },
+        error => {
+            let exit_code = application_exit_code(&error);
+            WorkerFailure::Other {
+                exit_code,
+                message: format!("supervised worker failed with {exit_code:?}"),
+            }
+        }
     };
     WorkerMessage::Failure {
         schema_version: PROTOCOL_VERSION,
@@ -499,11 +502,11 @@ fn supervise(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
-    configure_process_group(&mut command);
+    configure_supervised_process_group(&mut command);
     let mut child = command.spawn().map_err(|error| {
         ApplicationError::Initialization(format!("failed to start scan worker: {error}"))
     })?;
-    let group = ProcessGroup::attach(&child).map_err(ApplicationError::Initialization)?;
+    let group = SupervisedProcessGroup::attach(&child).map_err(ApplicationError::Initialization)?;
     let mut stdin = child.stdin.take().ok_or_else(|| {
         ApplicationError::Initialization("scan worker stdin was unavailable".to_owned())
     })?;
@@ -516,7 +519,7 @@ fn supervise(
     })?;
     let reader = ProtocolReader::spawn(stdout);
     let cancellation = SignalCancellation::register().map_err(|error| {
-        terminate_group(
+        terminate_supervised_process(
             &mut child,
             &group,
             supervisory_policy.graceful_termination_ms,
@@ -542,7 +545,7 @@ fn supervise(
 )]
 fn monitor_worker(
     child: &mut Child,
-    group: &ProcessGroup,
+    group: &SupervisedProcessGroup,
     reader: &ProtocolReader,
     run_id: &str,
     policy: &mut ExecutionPolicy,
@@ -563,7 +566,7 @@ fn monitor_worker(
 
     loop {
         if cancellation.load(Ordering::Acquire) {
-            terminate_group(child, group, policy.graceful_termination_ms);
+            terminate_supervised_process(child, group, policy.graceful_termination_ms);
             return Err(limit_error(
                 run_id,
                 phase,
@@ -627,15 +630,16 @@ fn monitor_worker(
                     let error = application_failure(failure);
                     for _ in 0..25 {
                         if child.try_wait().ok().flatten().is_some() {
+                            group.force_termination();
                             return Err(error);
                         }
                         std::thread::sleep(Duration::from_millis(10));
                     }
-                    terminate_group(child, group, policy.graceful_termination_ms);
+                    terminate_supervised_process(child, group, policy.graceful_termination_ms);
                     return Err(error);
                 }
                 Ok(_) => {
-                    terminate_group(child, group, policy.graceful_termination_ms);
+                    terminate_supervised_process(child, group, policy.graceful_termination_ms);
                     return Err(limit_error(
                         run_id,
                         phase,
@@ -646,7 +650,7 @@ fn monitor_worker(
                     ));
                 }
                 Err(error) => {
-                    terminate_group(child, group, policy.graceful_termination_ms);
+                    terminate_supervised_process(child, group, policy.graceful_termination_ms);
                     let observed = match error {
                         ProtocolReadError::LineTooLong(bytes) => bytes as u64,
                         ProtocolReadError::Io(message) | ProtocolReadError::Invalid(message) => {
@@ -683,7 +687,7 @@ fn monitor_worker(
             None
         };
         if let Some((resource, observed, maximum)) = exceeded {
-            terminate_group(child, group, policy.graceful_termination_ms);
+            terminate_supervised_process(child, group, policy.graceful_termination_ms);
             return Err(limit_error(
                 run_id,
                 phase,
@@ -698,7 +702,7 @@ fn monitor_worker(
         let memory = process_tree_memory(&system, root_pid);
         peak_memory = peak_memory.max(memory);
         if memory > policy.max_worker_memory_bytes {
-            terminate_group(child, group, policy.graceful_termination_ms);
+            terminate_supervised_process(child, group, policy.graceful_termination_ms);
             return Err(limit_error(
                 run_id,
                 phase,
@@ -709,9 +713,17 @@ fn monitor_worker(
             ));
         }
 
-        if let Some(status) = child.try_wait().map_err(|error| {
-            ApplicationError::Initialization(format!("failed to wait for scan worker: {error}"))
-        })? {
+        let status = match child.try_wait() {
+            Ok(status) => status,
+            Err(error) => {
+                terminate_supervised_process(child, group, policy.graceful_termination_ms);
+                return Err(ApplicationError::Initialization(format!(
+                    "failed to wait for scan worker: {error}"
+                )));
+            }
+        };
+        if let Some(status) = status {
+            group.force_termination();
             if status.success() {
                 if let Some(mut result) = final_result {
                     let execution = ExecutionSummary {
@@ -924,15 +936,14 @@ impl ProtocolReader {
 impl SignalCancellation {
     fn register() -> std::io::Result<Self> {
         let requested = Arc::new(AtomicBool::new(false));
-        let mut registrations = vec![signal_hook::flag::register(
-            signal_hook::consts::SIGINT,
-            Arc::clone(&requested),
-        )?];
         #[cfg(unix)]
-        registrations.push(signal_hook::flag::register(
-            signal_hook::consts::SIGTERM,
-            Arc::clone(&requested),
-        )?);
+        let signals = [signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM];
+        #[cfg(not(unix))]
+        let signals = [signal_hook::consts::SIGINT];
+        let registrations = signals
+            .into_iter()
+            .map(|signal| signal_hook::flag::register(signal, Arc::clone(&requested)))
+            .collect::<std::io::Result<Vec<_>>>()?;
         Ok(Self {
             requested,
             registrations,
@@ -1004,7 +1015,8 @@ fn is_descendant(system: &System, mut candidate: Pid, root: Pid) -> bool {
     false
 }
 
-pub(crate) fn terminate_process_tree(root_process_id: u32) {
+#[doc(hidden)]
+pub fn terminate_process_tree(root_process_id: u32) {
     let root = Pid::from_u32(root_process_id);
     let mut system = System::new();
     for _ in 0..3 {
@@ -1035,40 +1047,54 @@ pub(crate) fn process_identity(process_id: u32) -> Option<String> {
 }
 
 #[cfg(unix)]
-fn configure_process_group(command: &mut Command) {
+#[doc(hidden)]
+pub fn configure_supervised_process_group(command: &mut Command) {
     use std::os::unix::process::CommandExt;
     command.process_group(0);
 }
 
 #[cfg(windows)]
-fn configure_process_group(command: &mut Command) {
+#[doc(hidden)]
+pub fn configure_supervised_process_group(command: &mut Command) {
     use std::os::windows::process::CommandExt;
     const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
     command.creation_flags(CREATE_NEW_PROCESS_GROUP);
 }
 
-struct ProcessGroup {
+#[doc(hidden)]
+/// Isolated operating-system process group owned by one supervisor.
+pub struct SupervisedProcessGroup {
     #[cfg(unix)]
     process_group_id: i32,
     #[cfg(windows)]
     job: windows_sys::Win32::Foundation::HANDLE,
 }
 
-impl ProcessGroup {
+impl SupervisedProcessGroup {
+    /// Attaches a newly spawned child to an isolated process group or Windows Job Object.
+    ///
+    /// # Errors
+    ///
+    /// Returns a source-free diagnostic when the platform isolation primitive cannot be created.
     #[cfg(unix)]
-    fn attach(child: &Child) -> Result<Self, String> {
+    pub fn attach(child: &Child) -> Result<Self, String> {
         Ok(Self {
             process_group_id: i32::try_from(child.id())
                 .map_err(|_| "worker PID was not representable".to_owned())?,
         })
     }
 
+    /// Attaches a newly spawned child to an isolated process group or Windows Job Object.
+    ///
+    /// # Errors
+    ///
+    /// Returns a source-free diagnostic when the platform isolation primitive cannot be created.
     #[cfg(windows)]
     #[allow(
         unsafe_code,
         reason = "Windows Job Objects require FFI to bind the worker process tree"
     )]
-    fn attach(child: &Child) -> Result<Self, String> {
+    pub fn attach(child: &Child) -> Result<Self, String> {
         use std::os::windows::io::AsRawHandle;
 
         use windows_sys::Win32::System::JobObjects::{
@@ -1129,8 +1155,15 @@ impl ProcessGroup {
     }
 }
 
+#[cfg(unix)]
+impl Drop for SupervisedProcessGroup {
+    fn drop(&mut self) {
+        self.force_termination();
+    }
+}
+
 #[cfg(windows)]
-impl Drop for ProcessGroup {
+impl Drop for SupervisedProcessGroup {
     #[allow(
         unsafe_code,
         reason = "Windows Job Object handles must be closed through FFI"
@@ -1142,7 +1175,12 @@ impl Drop for ProcessGroup {
     }
 }
 
-fn terminate_group(child: &mut Child, group: &ProcessGroup, grace_ms: u64) {
+#[doc(hidden)]
+pub fn terminate_supervised_process(
+    child: &mut Child,
+    group: &SupervisedProcessGroup,
+    grace_ms: u64,
+) {
     terminate_process_tree(child.id());
     group.request_termination();
     let deadline = Instant::now() + Duration::from_millis(grace_ms);
@@ -1217,8 +1255,44 @@ mod tests {
         }
     }
 
+    #[test]
+    fn worker_failure_protocol_should_not_include_parser_input() {
+        let secret = "private-parser-token-cf0391";
+        let message = failure_message(ApplicationError::Graphql(
+            GraphqlExtractionError::InvalidGraphql {
+                source_path: "schema.graphql".to_owned(),
+                message: format!("unexpected token `{secret}`"),
+            },
+        ));
+        let encoded = serde_json::to_vec(&message).expect("worker failure protocol");
+
+        assert!(
+            !encoded
+                .windows(secret.len())
+                .any(|bytes| bytes == secret.as_bytes())
+        );
+        assert!(matches!(
+            message,
+            WorkerMessage::Failure {
+                failure: WorkerFailure::Other {
+                    exit_code: code_system_graph_core::ExitCode::InvalidInput,
+                    ..
+                },
+                ..
+            }
+        ));
+    }
+
     #[cfg(unix)]
     fn supervise_script(script: &str, policy: &ExecutionPolicy) -> ApplicationError {
+        monitor_script(script, policy).expect_err("script must exceed a limit")
+    }
+
+    #[cfg(unix)]
+    fn monitor_script(
+        script: &str,
+        policy: &ExecutionPolicy,
+    ) -> Result<SupervisedResult, ApplicationError> {
         let mut policy = policy.clone();
         let mut command = Command::new("sh");
         command
@@ -1226,9 +1300,9 @@ mod tests {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
-        configure_process_group(&mut command);
+        configure_supervised_process_group(&mut command);
         let mut child = command.spawn().expect("test worker");
-        let group = ProcessGroup::attach(&child).expect("test process group");
+        let group = SupervisedProcessGroup::attach(&child).expect("test process group");
         let stdout = child.stdout.take().expect("test stdout");
         monitor_worker(
             &mut child,
@@ -1240,7 +1314,6 @@ mod tests {
             ExpectedResult::Scan,
             &AtomicBool::new(false),
         )
-        .expect_err("script must exceed a limit")
     }
 
     #[cfg(unix)]
@@ -1373,5 +1446,57 @@ mod tests {
             .expect("numeric PID");
         std::thread::sleep(Duration::from_millis(50));
         assert!(process_identity(pid).is_none(), "grandchild survived limit");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn supervisor_should_terminate_descendants_after_successful_worker_exit() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let pid_file = temporary.path().join("grandchild.pid");
+        let policy = ExecutionPolicy::default();
+        let policy_message = serde_json::to_string(&WorkerMessage::Policy {
+            schema_version: PROTOCOL_VERSION,
+            policy: policy.clone(),
+        })
+        .expect("policy message");
+        let result_message = serde_json::to_string(&WorkerMessage::ScanResult {
+            schema_version: PROTOCOL_VERSION,
+            summary: ScanSummary {
+                execution: ExecutionSummary::default(),
+                workspace: "test".to_owned(),
+                snapshot_id: "snapshot".to_owned(),
+                node_count: 0,
+                edge_count: 0,
+                evidence_count: 0,
+                community_count: 0,
+                community_delta_count: 0,
+                discovered_input_count: 0,
+                changed_input_count: 0,
+                reused_snapshot: false,
+                corroborated_symbol_count: 0,
+                affected_test_count: 0,
+                degradation_count: 0,
+                degradations: Vec::new(),
+            },
+        })
+        .expect("result message");
+        let script = format!(
+            "sh -c 'trap \"\" TERM; sleep 30' & child=$!; printf '%s' \"$child\" > '{}'; printf '%s\\n' '{policy_message}'; printf '%s\\n' '{result_message}'",
+            pid_file.display()
+        );
+
+        assert!(matches!(
+            monitor_script(&script, &policy),
+            Ok(SupervisedResult::Scan(_))
+        ));
+        let pid = std::fs::read_to_string(pid_file)
+            .expect("grandchild PID")
+            .parse::<u32>()
+            .expect("numeric PID");
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(
+            process_identity(pid).is_none(),
+            "grandchild survived successful worker exit"
+        );
     }
 }

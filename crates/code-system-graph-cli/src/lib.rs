@@ -16,7 +16,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use atomic_write_file::AtomicWriteFile;
 use code_system_graph_core::{
-    AffectedTestsRequest, AnalyzerVersions, ArtifactKey, BatchAction, BatchPlanError, BitbucketProvider, ChangeAnalysisError, ChangeAnalysisOptions, ChangeError, ChangeImpactReport, ChangeProvider, ChangeRequest, ChangeScope, ChangeSet, CodeGraphConfig, CodeGraphProvider, CommunityError, ConfigDoctorInput, ConfigError, ConfigExtractionError, ContractReport, ContractRequest, CorroborationReport, DataDocument, DataExtractionError, DeclaredImplementation, DeclaredTestCase, DoctorReport, DoctorRequest, DocumentationDocument, DocumentationExtractionError, EXTRACTION_CONTRACT_VERSION, EffectiveRepositoryConfig, EventDocument, EventExtractionError, EventGraphFacts, ExecutionPolicy, ExitCode, ExportReport, ExportRequest, ExtractionBudgets, ExtractionGraphFacts, ExtractionLimitExceeded, ExtractionTracker, ExtractorBatch, ExtractorBatchPlan, FederatedGraph, FreshnessDoctorInput, GeneratedClientError, GeneratedClientMetadata, GitCliChangeProvider, GitHubProvider, GraphqlDocument, GraphqlExtractionError, GraphqlGraphFacts, HttpBoundary, HttpExtractionError, ImpactContext, ImpactError, ImpactReport, ImpactRequest, ImpactTarget, IncrementalPlan, InfrastructureDocument, InfrastructureExtractionError, IntegrityDoctorInput, InterfaceError, LinkError, LocalCodeIntelligenceProvider, LocalContextRequest, LocalContextResult, LocalEnrichmentInput, LocalEnrichmentStatus, LocalImpactItem, LocalImpactRequest, ManifestEdit, ManifestEditError, ManifestError, ManualLinkConfig, ManualLinkError, PackageGraphFacts, PackageManifest, PackageManifestError, PrAuthToken, ProtobufDocument, ProtobufExtractionError, ProtobufGraphFacts, ProviderBudget, ProviderCapability, ProviderDoctorInput, ProviderDoctorStatus, ProviderError, ProviderRequest, ProviderStatus, PullRequestCoordinates, PullRequestError, PullRequestInspectRequest, PullRequestInspection, PullRequestListPage, PullRequestListRequest, PullRequestListState, PullRequestProvider, PullRequestProviderConfig, PullRequestProviderKind, QueryError, RecommendedCommand, RegisteredWorkspace, RegistryError, ReqwestPrHttpTransport, SafeConfigDocument, SchemaDoctorInput, SearchFilters, SearchReport, SearchRequest, SourceEpistemicStatus, SourceGraphFacts, SourceLanguage, SourceObservation, SourceRole, SourceSyntaxError, SourceSyntaxLanguage, SourceWarning, SymbolAnchor, SymbolCorroboration, TraceError, TraversalReport, TraversalRequest, WorkspaceManifest, affected_link_keys, analyze_changes, analyze_communities_with_progress, analyze_impact, apply_openapi_override, classify_interface_error, commit_manifest_edit, compare_community_snapshots, corroborate_repository, declared_implementation, declared_test_case, doctor, documents_to_graph, encode_native_path, event_documents_to_graph, export_graph, extract_asyncapi, extract_codeowners, extract_data_artifact, extract_docker_compose, extract_generated_client_metadata, extract_graphql_document_with_tracker, extract_graphql_persisted_operations_with_tracker, extract_helm, extract_kubernetes, extract_markdown, extract_openapi_with_tracker, extract_package_manifest_with_tracker, extract_protobuf_with_tracker, extract_safe_config, extract_service_catalog, extract_terraform, graphql_documents_to_graph, inspect_contracts, inspect_source_syntax, link_declared_implementations, link_declared_tests, link_http_boundaries, link_registered_package_owners, load_extractor_batch, merge_affected_link_neighborhoods, package_manifest_to_graph, parse_event_source, parse_go_source, parse_graphql_source_with_tracker, parse_java_source, parse_javascript_source_at_path, parse_literal_sql_source_at_root, parse_manifest, parse_protobuf_generated_source, parse_python_source, parse_rust_source, parse_typescript_source_at_path, plan_extractor_batches, plan_incremental_scan, preview_add_manual_link, preview_add_repository, preview_remove_repository, protobuf_documents_to_graph, register_workspace, resolve_manual_links, resolve_repository_config, search, source_observations_to_graph, store_extractor_batch, traverse
+    AffectedTestsRequest, AnalyzerVersions, ArtifactKey, BatchAction, BatchPlanError, BitbucketProvider, ChangeAnalysisError, ChangeAnalysisOptions, ChangeError, ChangeImpactReport, ChangeProvider, ChangeRequest, ChangeScope, ChangeSet, CodeGraphConfig, CodeGraphProvider, CommunityError, ConfigDoctorInput, ConfigError, ConfigExtractionError, ContractReport, ContractRequest, CorroborationReport, DataDocument, DataExtractionError, DeclaredImplementation, DeclaredTestCase, DoctorReport, DoctorRequest, DocumentationDocument, DocumentationExtractionError, EXTRACTION_CONTRACT_VERSION, EffectiveRepositoryConfig, EventDocument, EventExtractionError, EventGraphFacts, ExecutionPolicy, ExitCode, ExportReport, ExportRequest, ExtractionBudgets, ExtractionGraphFacts, ExtractionLimitExceeded, ExtractionTracker, ExtractorBatch, ExtractorBatchPlan, FederatedGraph, FreshnessDoctorInput, GeneratedClientError, GeneratedClientMetadata, GitCliChangeProvider, GitHubProvider, GraphqlDocument, GraphqlExtractionError, GraphqlGraphFacts, HttpBoundary, HttpExtractionError, ImpactContext, ImpactError, ImpactReport, ImpactRequest, ImpactTarget, IncrementalPlan, InfrastructureDocument, InfrastructureExtractionError, IntegrityDoctorInput, InterfaceError, LinkError, LocalCodeIntelligenceProvider, LocalContextRequest, LocalContextResult, LocalEnrichmentInput, LocalEnrichmentStatus, LocalImpactItem, LocalImpactRequest, ManifestEdit, ManifestEditError, ManifestError, ManualLinkConfig, ManualLinkError, PackageGraphFacts, PackageManifest, PackageManifestError, PrAuthToken, ProtobufDocument, ProtobufExtractionError, ProtobufGraphFacts, ProviderBudget, ProviderCapability, ProviderDoctorInput, ProviderDoctorStatus, ProviderError, ProviderRequest, ProviderStatus, PullRequestCoordinates, PullRequestError, PullRequestInspectRequest, PullRequestInspection, PullRequestListPage, PullRequestListRequest, PullRequestListState, PullRequestProvider, PullRequestProviderConfig, PullRequestProviderKind, QueryError, RecommendedCommand, RegisteredWorkspace, RegistryError, ReqwestPrHttpTransport, SafeConfigDocument, SchemaDoctorInput, SearchFilters, SearchReport, SearchRequest, SourceEpistemicStatus, SourceGraphFacts, SourceLanguage, SourceObservation, SourceRole, SourceSyntaxError, SourceSyntaxLanguage, SourceWarning, SymbolAnchor, SymbolCorroboration, TraceError, TraversalReport, TraversalRequest, WorkspaceManifest, affected_link_keys, analyze_changes, analyze_communities_with_progress, analyze_impact, apply_openapi_override, classify_interface_error, commit_manifest_edit, compare_community_snapshots, corroborate_repository, declared_implementation, declared_test_case, doctor, documents_to_graph, encode_native_path, event_documents_to_graph, export_graph, extract_asyncapi, extract_codeowners, extract_data_artifact, extract_docker_compose, extract_generated_client_metadata, extract_graphql_document_with_tracker, extract_graphql_persisted_operations_with_tracker, extract_helm, extract_kubernetes, extract_markdown, extract_openapi_with_tracker, extract_package_manifest_with_tracker, extract_protobuf_with_tracker, extract_safe_config, extract_service_catalog, extract_terraform, graphql_documents_to_graph, inspect_contracts, inspect_source_syntax, link_declared_implementations, link_declared_tests, link_http_boundaries, link_registered_package_owners, load_extractor_batch_with_limit, merge_affected_link_neighborhoods, package_manifest_to_graph, parse_event_source, parse_go_source, parse_graphql_source_with_tracker, parse_java_source, parse_javascript_source_at_path, parse_literal_sql_source_at_root, parse_manifest, parse_protobuf_generated_source, parse_python_source, parse_rust_source, parse_typescript_source_at_path, plan_extractor_batches, plan_incremental_scan, preview_add_manual_link, preview_add_repository, preview_remove_repository, protobuf_documents_to_graph, register_workspace, resolve_manual_links, resolve_repository_config, search, source_observations_to_graph, store_extractor_batch, traverse
 };
 pub use code_system_graph_core::{
     ConfigSource, DEFAULT_EXCLUDES, IgnorePolicy, PROTECTED_EXCLUDES
@@ -30,12 +30,14 @@ use code_system_graph_store_sqlite::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 pub use sync::{
-    CodeGraphRepositorySync, CodeGraphSyncState, CodeGraphSyncSummary, SyncSummary, SyncTarget, sync_workspace_with_overrides, sync_workspace_with_wall_time_cap, sync_workspace_with_worker_executable, workspace_sync_targets
+    CodeGraphRepositorySync, CodeGraphSyncState, CodeGraphSyncSummary, SyncSummary, SyncTarget, load_persisted_watch_targets, sync_workspace_with_overrides, sync_workspace_with_wall_time_cap, sync_workspace_with_worker_executable, workspace_sync_targets
 };
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 #[doc(hidden)]
-pub use worker::run_worker_from_stdio;
+pub use worker::{
+    SupervisedProcessGroup, configure_supervised_process_group, run_worker_from_stdio, terminate_process_tree, terminate_supervised_process
+};
 
 const MAX_TRACE_DEPTH: usize = 32;
 const MAX_SCAN_DEGRADATIONS: usize = 25;
@@ -1208,12 +1210,16 @@ pub(crate) fn scan_workspace_direct(
             context.registry.record.manifest_hash
         ),
     );
-    let mut previous_extractor_batches =
-        match store.load_current_extractor_batches(&context.manifest.name) {
-            Ok(previous) => previous,
-            Err(StoreError::CurrentSnapshotMissing(_)) => Vec::new(),
-            Err(error) => return Err(error.into()),
-        };
+    let mut previous_extractor_batches = match store.load_current_extractor_batches_with_limit(
+        &context.manifest.name,
+        context
+            .extraction_budgets
+            .max_serialized_output_bytes_per_artifact,
+    ) {
+        Ok(previous) => previous,
+        Err(StoreError::CurrentSnapshotMissing(_)) => Vec::new(),
+        Err(error) => return Err(error.into()),
+    };
     let budget_fingerprint = context.extraction_budgets.fingerprint();
     let candidate_material = serde_json::to_vec(&(
         &context.registry.record.manifest_hash,
@@ -1238,6 +1244,9 @@ pub(crate) fn scan_workspace_direct(
                 &fingerprints,
                 &budget_fingerprint,
                 EXTRACTION_CONTRACT_VERSION,
+                context
+                    .extraction_budgets
+                    .max_serialized_output_bytes_per_artifact,
                 current_unix_millis(),
             )
             .map_err(ApplicationError::Initialization)?
@@ -1352,7 +1361,12 @@ pub(crate) fn scan_workspace_direct(
             .map_err(ApplicationError::Initialization)?;
         let current = store.current_snapshot_summary(&context.manifest.name)?;
         let (degradation_count, degradations) =
-            finalize_scan_degradations(stored_batch_degradations(&previous_extractor_batches)?);
+            finalize_scan_degradations(stored_batch_degradations(
+                &previous_extractor_batches,
+                context
+                    .extraction_budgets
+                    .max_serialized_output_bytes_per_artifact,
+            )?);
         return Ok(ScanSummary {
             execution: code_system_graph_core::ExecutionSummary {
                 checkpoint_hits,
@@ -1475,7 +1489,12 @@ pub(crate) fn scan_workspace_direct(
     let manual_link_records = persisted_manual_link_records(&snapshot_id, &link_decisions)?;
     let mut staged_degradations = focused_batches.degradations.clone();
     staged_degradations.extend(corroboration.degradations.clone());
-    staged_degradations.extend(stored_batch_degradations(&focused_batches.stored_batches)?);
+    staged_degradations.extend(stored_batch_degradations(
+        &focused_batches.stored_batches,
+        context
+            .extraction_budgets
+            .max_serialized_output_bytes_per_artifact,
+    )?);
     let (_, staged_degradations) = finalize_scan_degradations(staged_degradations);
     let mut artifact_execution = artifact_execution_summary(&focused_batches.artifact_durations_ms);
     artifact_execution.checkpoint_hits = checkpoint_hits;
@@ -3649,6 +3668,7 @@ fn focused_batch_cache_complete(
 
 fn stored_batch_degradations(
     stored: &[StoredExtractorBatch],
+    maximum_payload_bytes: u64,
 ) -> Result<Vec<String>, ApplicationError> {
     let mut degradations = Vec::new();
     for batch in stored {
@@ -3656,7 +3676,8 @@ fn stored_batch_degradations(
             degradations.push(format!("{} contains invalid UTF-8 and was decoded lossily; extracted evidence is incomplete", batch.source.path.display));
         }
         if batch.source.extractor == "code-system-graph.data.artifact" {
-            let decoded: ExtractorBatch<DataDocument> = load_extractor_batch(batch)?;
+            let decoded: ExtractorBatch<DataDocument> =
+                load_extractor_batch_with_limit(batch, maximum_payload_bytes)?;
             for document in decoded.outputs {
                 if document.incomplete {
                     degradations.push(format!(
@@ -3696,6 +3717,9 @@ fn assemble_focused_batches(
     cached_keys: &BTreeSet<ArtifactKey>,
     work_state: &mut work_state::WorkState,
 ) -> Result<FocusedBatchState, ApplicationError> {
+    let maximum_payload_bytes = context
+        .extraction_budgets
+        .max_serialized_output_bytes_per_artifact;
     let previous_by_key = previous
         .iter()
         .map(|batch| (ArtifactKey::from(&batch.source), batch))
@@ -3708,7 +3732,7 @@ fn assemble_focused_batches(
     let mut previous_source_batches = previous
         .iter()
         .filter(|batch| source_extractor(&batch.source.extractor))
-        .map(load_extractor_batch)
+        .map(|batch| load_extractor_batch_with_limit(batch, maximum_payload_bytes))
         .collect::<Result<Vec<ExtractorBatch<SourceObservation>>, _>>()?;
     previous_source_batches.sort_by_key(ExtractorBatch::key);
 
@@ -3754,25 +3778,55 @@ fn assemble_focused_batches(
         if let Some(stored) = reusable {
             stored_batches.push(stored.clone());
             if source_extractor(&fingerprint.extractor) {
-                source_batches.push(load_extractor_batch(stored)?);
+                source_batches.push(load_extractor_batch_with_limit(
+                    stored,
+                    maximum_payload_bytes,
+                )?);
             } else if fingerprint.extractor == "code-system-graph.packages" {
-                package_batches.push(load_extractor_batch(stored)?);
+                package_batches.push(load_extractor_batch_with_limit(
+                    stored,
+                    maximum_payload_bytes,
+                )?);
             } else if graphql_extractor(&fingerprint.extractor) {
-                graphql_batches.push(load_extractor_batch(stored)?);
+                graphql_batches.push(load_extractor_batch_with_limit(
+                    stored,
+                    maximum_payload_bytes,
+                )?);
             } else if event_extractor(&fingerprint.extractor) {
-                event_batches.push(load_extractor_batch(stored)?);
+                event_batches.push(load_extractor_batch_with_limit(
+                    stored,
+                    maximum_payload_bytes,
+                )?);
             } else if protobuf_extractor(&fingerprint.extractor) {
-                protobuf_batches.push(load_extractor_batch(stored)?);
+                protobuf_batches.push(load_extractor_batch_with_limit(
+                    stored,
+                    maximum_payload_bytes,
+                )?);
             } else if data_extractor(&fingerprint.extractor) {
-                data_batches.push(load_extractor_batch(stored)?);
+                data_batches.push(load_extractor_batch_with_limit(
+                    stored,
+                    maximum_payload_bytes,
+                )?);
             } else if infrastructure_extractor(&fingerprint.extractor) {
-                infrastructure_batches.push(load_extractor_batch(stored)?);
+                infrastructure_batches.push(load_extractor_batch_with_limit(
+                    stored,
+                    maximum_payload_bytes,
+                )?);
             } else if documentation_extractor(&fingerprint.extractor) {
-                documentation_batches.push(load_extractor_batch(stored)?);
+                documentation_batches.push(load_extractor_batch_with_limit(
+                    stored,
+                    maximum_payload_bytes,
+                )?);
             } else if fingerprint.extractor == "code-system-graph.config.safe" {
-                config_batches.push(load_extractor_batch(stored)?);
+                config_batches.push(load_extractor_batch_with_limit(
+                    stored,
+                    maximum_payload_bytes,
+                )?);
             } else {
-                generated_client_batches.push(load_extractor_batch(stored)?);
+                generated_client_batches.push(load_extractor_batch_with_limit(
+                    stored,
+                    maximum_payload_bytes,
+                )?);
             }
             worker::report_progress(code_system_graph_core::JobPhase::Extraction, 1);
             artifact_durations_ms.push(duration_millis(artifact_started.elapsed()));

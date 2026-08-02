@@ -1,6 +1,6 @@
 //! End-to-end acceptance tests for one-shot and watched incremental synchronization.
 
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::Duration;
@@ -114,10 +114,17 @@ fn assert_watch_sync(extra_arguments: &[&str]) -> anyhow::Result<()> {
             temporary.path().join("api/openapi.yaml"),
             "openapi: 3.1.0\ninfo: { title: API, version: 1 }\npaths:\n  /after:\n    get: {}\n",
         )?;
-        let updated = receiver
-            .recv_timeout(Duration::from_secs(15))
-            .context("watch did not publish after the source change")??;
-        let updated = watch_sync_summary(&updated)?;
+        let updated = loop {
+            let candidate = receiver
+                .recv_timeout(Duration::from_secs(15))
+                .context("watch did not publish after the source change")??;
+            let candidate = watch_sync_summary(&candidate)?;
+            if candidate.scan.changed_input_count > 0
+                && candidate.scan.snapshot_id != initial.scan.snapshot_id
+            {
+                break candidate;
+            }
+        };
         assert!(updated.scan.changed_input_count > 0);
         assert_ne!(updated.scan.snapshot_id, initial.scan.snapshot_id);
         Ok(())
@@ -129,6 +136,103 @@ fn assert_watch_sync(extra_arguments: &[&str]) -> anyhow::Result<()> {
         .join()
         .map_err(|_| anyhow::anyhow!("watch stdout reader panicked"))?;
     result
+}
+
+#[test]
+fn watch_failure_should_not_persist_or_emit_parser_literals() -> anyhow::Result<()> {
+    let temporary = tempfile::tempdir()?;
+    let repository = temporary.path().join("api");
+    std::fs::create_dir(&repository)?;
+    let graphql = repository.join("schema.graphql");
+    std::fs::write(&graphql, "type Query { viewer: String }\n")?;
+    let manifest = temporary.path().join("code-system-graph.yaml");
+    let database = temporary.path().join("graph.db");
+    std::fs::write(
+        &manifest,
+        "version: 1\nname: watch-secret-e2e\nrepos:\n  api:\n    path: api\n",
+    )?;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_csgraph"))
+        .arg("sync")
+        .arg("--watch")
+        .arg("--no-codegraph")
+        .arg("--debounce-ms")
+        .arg("50")
+        .arg("--config")
+        .arg(&manifest)
+        .arg("--database")
+        .arg(&database)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("watch stdout was not piped"))?;
+    let (sender, receiver) = mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            if sender.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let secret = "private-graphql-literal-6e21c8";
+    let result = (|| -> anyhow::Result<String> {
+        let initial = receiver
+            .recv_timeout(Duration::from_secs(15))
+            .context("watch did not publish its initial pass")??;
+        let _summary = watch_sync_summary(&initial)?;
+        std::fs::write(&graphql, format!("\"{secret}\"\n"))?;
+        loop {
+            let line = receiver
+                .recv_timeout(Duration::from_secs(15))
+                .context("watch did not terminate after malformed GraphQL")??;
+            let value: serde_json::Value = serde_json::from_str(&line)?;
+            if value.get("type").and_then(serde_json::Value::as_str) == Some("termination") {
+                break Ok(line);
+            }
+        }
+    })();
+    if result.is_err() {
+        let _ = child.kill();
+    }
+    let termination = result?;
+    let status = child.wait()?;
+    let mut stderr = Vec::new();
+    child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("watch stderr was not piped"))?
+        .read_to_end(&mut stderr)?;
+    reader
+        .join()
+        .map_err(|_| anyhow::anyhow!("watch stdout reader panicked"))?;
+    assert!(!status.success());
+
+    let status_output = Command::new(env!("CARGO_BIN_EXE_csgraph"))
+        .arg("status")
+        .arg("--config")
+        .arg(&manifest)
+        .arg("--database")
+        .arg(&database)
+        .output()?;
+    anyhow::ensure!(status_output.status.success(), "status command failed");
+    let sidecar = std::path::PathBuf::from(format!("{}.work-v1.db", database.display()));
+    let persisted = std::fs::read(sidecar)?;
+    for (surface, bytes) in [
+        ("termination JSONL", termination.as_bytes()),
+        ("watch stderr", stderr.as_slice()),
+        ("status output", status_output.stdout.as_slice()),
+        ("work sidecar", persisted.as_slice()),
+    ] {
+        assert!(
+            !bytes
+                .windows(secret.len())
+                .any(|window| window == secret.as_bytes()),
+            "{surface} exposed parser input"
+        );
+    }
+    Ok(())
 }
 
 fn watch_sync_summary(line: &str) -> anyhow::Result<SyncSummary> {

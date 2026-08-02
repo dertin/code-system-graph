@@ -819,18 +819,48 @@ impl SqliteStore {
         &self,
         workspace: &str,
     ) -> Result<Vec<StoredExtractorBatch>, StoreError> {
+        self.load_current_extractor_batches_with_limit(workspace, i64::MAX as u64)
+    }
+
+    /// Loads current extractor batches whose payload fits within `maximum_payload_bytes`.
+    ///
+    /// Oversized rows are omitted before SQLite copies their BLOB into the process. Callers can
+    /// consequently treat them as cache misses and recompute them under the active policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when no current snapshot exists or stored values are invalid.
+    pub fn load_current_extractor_batches_with_limit(
+        &self,
+        workspace: &str,
+        maximum_payload_bytes: u64,
+    ) -> Result<Vec<StoredExtractorBatch>, StoreError> {
         let snapshot_id = self.current_snapshot_id(workspace)?;
+        let maximum_payload_bytes = i64::try_from(maximum_payload_bytes).unwrap_or(i64::MAX);
+        let has_obsolete_contract = self.connection.query_row(
+            "SELECT EXISTS(
+                SELECT 1
+                FROM extractor_batches
+                WHERE snapshot_id = ?1
+                  AND (extractor_version <> '1.0.0' OR budget_fingerprint = '')
+             )",
+            [&snapshot_id],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if has_obsolete_contract {
+            return Err(StoreError::ObsoleteDevelopmentDatabase);
+        }
         let mut statement = self.connection.prepare(
             "SELECT
                 repo_id, checkout_id, path_encoding, relative_path, path_display,
                 extractor, content_hash, size_bytes, extractor_version, budget_fingerprint,
                 source_was_lossy, output_count, payload
              FROM extractor_batches
-             WHERE snapshot_id = ?1
+             WHERE snapshot_id = ?1 AND length(payload) <= ?2
              ORDER BY repo_id, checkout_id, path_encoding, relative_path, extractor",
         )?;
         let rows = statement
-            .query_map([snapshot_id], |row| {
+            .query_map(params![snapshot_id, maximum_payload_bytes], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
@@ -848,9 +878,6 @@ impl SqliteStore {
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
-        if rows.iter().any(|row| row.8 != "1.0.0" || row.9.is_empty()) {
-            return Err(StoreError::ObsoleteDevelopmentDatabase);
-        }
         rows.into_iter()
             .map(
                 |(
@@ -4678,6 +4705,13 @@ mod tests {
                     && batches == vec![extractor_batch]
                     && runs == vec![run]
         ));
+        assert!(
+            store
+                .load_current_extractor_batches_with_limit("commerce", 1)
+                .expect("bounded batch read")
+                .is_empty(),
+            "SQLite must omit an oversized payload before copying its BLOB"
+        );
     }
 
     #[test]
@@ -4717,7 +4751,7 @@ mod tests {
             .expect("fixture contract should be replaced");
 
         assert!(matches!(
-            store.load_current_extractor_batches("commerce"),
+            store.load_current_extractor_batches_with_limit("commerce", 1),
             Err(StoreError::ObsoleteDevelopmentDatabase)
         ));
     }

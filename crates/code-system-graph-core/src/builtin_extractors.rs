@@ -3,9 +3,10 @@ use std::time::Instant;
 use async_trait::async_trait;
 use code_system_graph_model::ArtifactFingerprint;
 use semver::Version;
+use serde::Serialize;
 
 use crate::{
-    BoundaryExtractor, DiscoverContext, DiscoveredInput, ExtractInput, ExtractionBatch, ExtractionCompleteness, ExtractionReport, ExtractorError, FileDescriptor, SourceEpistemicStatus, SourceSyntaxLanguage, extract_generated_client_metadata, extract_package_manifest_with_tracker, fingerprint_content, inspect_source_syntax, parse_go_source, parse_java_source, parse_javascript_source_at_path, parse_python_source, parse_rust_source, parse_typescript_source_at_path
+    BoundaryExtractor, ContentFingerprint, DiscoverContext, DiscoveredInput, ExtractInput, ExtractionBatch, ExtractionBudgets, ExtractionCompleteness, ExtractionReport, ExtractionTracker, ExtractorError, FileDescriptor, SourceEpistemicStatus, SourceObservation, SourceSyntaxLanguage, extract_generated_client_metadata, extract_package_manifest_with_tracker, inspect_source_syntax, parse_go_source, parse_java_source, parse_javascript_source_at_path, parse_python_source, parse_rust_source, parse_typescript_source_at_path
 };
 
 /// Focused source language selected for HTTP and test extraction.
@@ -28,13 +29,20 @@ pub enum FocusedSourceLanguage {
 /// Built-in focused source HTTP and test extractor.
 pub struct FocusedSourceExtractor {
     language: FocusedSourceLanguage,
+    budgets: ExtractionBudgets,
 }
 
 impl FocusedSourceExtractor {
     /// Creates an extractor for one mandatory source-language matrix.
     #[must_use]
     pub fn new(language: FocusedSourceLanguage) -> Self {
-        Self { language }
+        Self::with_budgets(language, ExtractionBudgets::default())
+    }
+
+    /// Creates an extractor with explicit effective per-invocation budgets.
+    #[must_use]
+    pub fn with_budgets(language: FocusedSourceLanguage, budgets: ExtractionBudgets) -> Self {
+        Self { language, budgets }
     }
 }
 
@@ -94,19 +102,22 @@ impl BoundaryExtractor for FocusedSourceExtractor {
             )));
         }
         let started = Instant::now();
-        let fingerprint = fingerprint_content(input.content)?;
+        let mut tracker =
+            crate::ExtractionTracker::new(&input.file.path.display, self.id(), &self.budgets);
+        tracker.check_input_bytes(u64::try_from(input.content.len()).unwrap_or(u64::MAX))?;
+        let fingerprint = fingerprint_with_budgets(input, self.id(), &self.budgets)?;
         let source = std::str::from_utf8(input.content)?;
         let syntax = inspect_source_syntax(
             syntax_language(self.language),
             &input.file.path.display,
             source,
-            &mut crate::ExtractionTracker::new(
-                &input.file.path.display,
-                self.id(),
-                &crate::ExtractionBudgets::default(),
-            ),
+            &mut tracker,
         )
-        .map_err(|error| ExtractorError::InvalidInput(error.to_string()))?;
+        .map_err(extractor_source_syntax_error)?;
+        let reserved_observations = u64::try_from(syntax.boundary_candidate_count)
+            .map_err(|_| ExtractorError::InvalidInput("too many syntax candidates".to_owned()))?;
+        tracker.check_observations(reserved_observations)?;
+        precheck_focused_source_values(source, &tracker)?;
         let observations = match self.language {
             FocusedSourceLanguage::JavaScript => {
                 parse_javascript_source_at_path(&input.file.path.display, source)
@@ -143,6 +154,17 @@ impl BoundaryExtractor for FocusedSourceExtractor {
         }
         let output_count = u64::try_from(observations.len())
             .map_err(|_| ExtractorError::InvalidInput("too many observations".to_owned()))?;
+        if output_count > reserved_observations {
+            return Err(ExtractorError::InvalidInput(
+                "focused parser exceeded its Tree-sitter candidate reservation".to_owned(),
+            ));
+        }
+        tracker.charge_observation(output_count)?;
+        for observation in &observations {
+            charge_source_observation(observation, &mut tracker)?;
+        }
+        let payload = serialize_bounded(&observations, &tracker)?;
+        tracker.check_structured_time()?;
         Ok(ExtractionBatch {
             source: ArtifactFingerprint {
                 repo_id: input.file.repo_id.clone(),
@@ -152,7 +174,7 @@ impl BoundaryExtractor for FocusedSourceExtractor {
                 content_hash: fingerprint.content_hash,
                 size_bytes: fingerprint.size_bytes,
             },
-            payload: serde_json::to_vec(&observations)?,
+            payload,
             output_count,
             report: ExtractionReport {
                 discovered_files: 1,
@@ -171,7 +193,7 @@ impl BoundaryExtractor for FocusedSourceExtractor {
         &self,
         input: &ExtractInput<'_>,
     ) -> Result<crate::ContentFingerprint, ExtractorError> {
-        fingerprint_content(input.content)
+        fingerprint_with_budgets(input, self.id(), &self.budgets)
     }
 }
 
@@ -186,8 +208,84 @@ fn syntax_language(language: FocusedSourceLanguage) -> SourceSyntaxLanguage {
     }
 }
 
+fn precheck_focused_source_values(
+    source: &str,
+    tracker: &ExtractionTracker,
+) -> Result<(), crate::ExtractionLimitExceeded> {
+    let bytes = source.as_bytes();
+    let mut cursor = 0_usize;
+    let mut accumulated = 0_u64;
+    while cursor < bytes.len() {
+        if cursor.is_multiple_of(1_024) {
+            tracker.check_structured_time()?;
+        }
+        let byte = bytes[cursor];
+        if matches!(byte, b'"' | b'\'' | b'`') {
+            let delimiter = byte;
+            cursor = cursor.saturating_add(1);
+            let start = cursor;
+            let mut escaped = false;
+            while cursor < bytes.len() {
+                let byte = bytes[cursor];
+                if escaped {
+                    escaped = false;
+                } else if byte == b'\\' {
+                    escaped = true;
+                } else if byte == delimiter {
+                    break;
+                }
+                cursor = cursor.saturating_add(1);
+                if cursor.is_multiple_of(1_024) {
+                    tracker.check_structured_time()?;
+                }
+            }
+            let observed = u64::try_from(cursor.saturating_sub(start)).unwrap_or(u64::MAX);
+            tracker.check_string_bytes(observed)?;
+            accumulated = accumulated.saturating_add(observed);
+            tracker.check_accumulated_string_bytes(accumulated)?;
+        } else if byte == b'_' || byte.is_ascii_alphabetic() {
+            let start = cursor;
+            cursor = cursor.saturating_add(1);
+            while cursor < bytes.len()
+                && (bytes[cursor] == b'_' || bytes[cursor].is_ascii_alphanumeric())
+            {
+                cursor = cursor.saturating_add(1);
+            }
+            let observed = u64::try_from(cursor.saturating_sub(start)).unwrap_or(u64::MAX);
+            tracker.check_identifier_bytes(observed)?;
+            accumulated = accumulated.saturating_add(observed);
+            tracker.check_accumulated_string_bytes(accumulated)?;
+            continue;
+        }
+        cursor = cursor.saturating_add(1);
+    }
+    Ok(())
+}
+
 /// Built-in `OpenAPI` Generator metadata extractor.
-pub struct GeneratedClientMetadataExtractor;
+pub struct GeneratedClientMetadataExtractor {
+    budgets: ExtractionBudgets,
+}
+
+impl GeneratedClientMetadataExtractor {
+    /// Creates an extractor with safe default budgets.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::with_budgets(ExtractionBudgets::default())
+    }
+
+    /// Creates an extractor with explicit effective per-invocation budgets.
+    #[must_use]
+    pub const fn with_budgets(budgets: ExtractionBudgets) -> Self {
+        Self { budgets }
+    }
+}
+
+impl Default for GeneratedClientMetadataExtractor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 #[async_trait]
 impl BoundaryExtractor for GeneratedClientMetadataExtractor {
@@ -225,20 +323,23 @@ impl BoundaryExtractor for GeneratedClientMetadataExtractor {
             )));
         }
         let started = Instant::now();
-        let fingerprint = fingerprint_content(input.content)?;
+        let mut tracker =
+            crate::ExtractionTracker::new(&input.file.path.display, self.id(), &self.budgets);
+        tracker.check_input_bytes(u64::try_from(input.content.len()).unwrap_or(u64::MAX))?;
+        let fingerprint = fingerprint_with_budgets(input, self.id(), &self.budgets)?;
         let source = std::str::from_utf8(input.content)?;
-        let metadata = extract_generated_client_metadata(
-            &input.file.path.display,
-            source,
-            &mut crate::ExtractionTracker::new(
-                &input.file.path.display,
-                self.id(),
-                &crate::ExtractionBudgets::default(),
-            ),
-        )
-        .map_err(|error| ExtractorError::InvalidInput(error.to_string()))?;
+        let metadata =
+            extract_generated_client_metadata(&input.file.path.display, source, &mut tracker)
+                .map_err(|error| match error {
+                    crate::GeneratedClientError::LimitExceeded(limit) => {
+                        ExtractorError::LimitExceeded(limit)
+                    }
+                    error => ExtractorError::InvalidInput(error.to_string()),
+                })?;
         let output_count = u64::try_from(metadata.len())
             .map_err(|_| ExtractorError::InvalidInput("too many metadata facts".to_owned()))?;
+        let payload = serialize_bounded(&metadata, &tracker)?;
+        tracker.check_structured_time()?;
         Ok(ExtractionBatch {
             source: ArtifactFingerprint {
                 repo_id: input.file.repo_id.clone(),
@@ -248,7 +349,7 @@ impl BoundaryExtractor for GeneratedClientMetadataExtractor {
                 content_hash: fingerprint.content_hash,
                 size_bytes: fingerprint.size_bytes,
             },
-            payload: serde_json::to_vec(&metadata)?,
+            payload,
             output_count,
             report: ExtractionReport {
                 discovered_files: 1,
@@ -267,12 +368,34 @@ impl BoundaryExtractor for GeneratedClientMetadataExtractor {
         &self,
         input: &ExtractInput<'_>,
     ) -> Result<crate::ContentFingerprint, ExtractorError> {
-        fingerprint_content(input.content)
+        fingerprint_with_budgets(input, self.id(), &self.budgets)
     }
 }
 
 /// Built-in package-manifest extractor for the mandatory package ecosystems.
-pub struct PackageManifestExtractor;
+pub struct PackageManifestExtractor {
+    budgets: ExtractionBudgets,
+}
+
+impl PackageManifestExtractor {
+    /// Creates an extractor with safe default budgets.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::with_budgets(ExtractionBudgets::default())
+    }
+
+    /// Creates an extractor with explicit effective per-invocation budgets.
+    #[must_use]
+    pub const fn with_budgets(budgets: ExtractionBudgets) -> Self {
+        Self { budgets }
+    }
+}
+
+impl Default for PackageManifestExtractor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 #[async_trait]
 impl BoundaryExtractor for PackageManifestExtractor {
@@ -310,18 +433,19 @@ impl BoundaryExtractor for PackageManifestExtractor {
             )));
         }
         let started = Instant::now();
-        let fingerprint = fingerprint_content(input.content)?;
+        let mut tracker =
+            crate::ExtractionTracker::new(&input.file.path.display, self.id(), &self.budgets);
+        tracker.check_input_bytes(u64::try_from(input.content.len()).unwrap_or(u64::MAX))?;
+        let fingerprint = fingerprint_with_budgets(input, self.id(), &self.budgets)?;
         let source = std::str::from_utf8(input.content)?;
-        let manifest = extract_package_manifest_with_tracker(
-            &input.file.path.display,
-            source,
-            &mut crate::ExtractionTracker::new(
-                &input.file.path.display,
-                self.id(),
-                &crate::ExtractionBudgets::default(),
-            ),
-        )
-        .map_err(|error| ExtractorError::InvalidInput(error.to_string()))?;
+        let manifest =
+            extract_package_manifest_with_tracker(&input.file.path.display, source, &mut tracker)
+                .map_err(|error| match error {
+                crate::PackageManifestError::LimitExceeded(limit) => {
+                    ExtractorError::LimitExceeded(limit)
+                }
+                error => ExtractorError::InvalidInput(error.to_string()),
+            })?;
         let output_count = [
             manifest.packages.len(),
             manifest.dependencies.len(),
@@ -337,6 +461,8 @@ impl BoundaryExtractor for PackageManifestExtractor {
                 .and_then(|count| total.checked_add(count))
         })
         .ok_or_else(|| ExtractorError::InvalidInput("too many package facts".to_owned()))?;
+        let payload = serialize_bounded(&manifest, &tracker)?;
+        tracker.check_structured_time()?;
         Ok(ExtractionBatch {
             source: ArtifactFingerprint {
                 repo_id: input.file.repo_id.clone(),
@@ -346,7 +472,7 @@ impl BoundaryExtractor for PackageManifestExtractor {
                 content_hash: fingerprint.content_hash,
                 size_bytes: fingerprint.size_bytes,
             },
-            payload: serde_json::to_vec(&manifest)?,
+            payload,
             output_count,
             report: ExtractionReport {
                 discovered_files: 1,
@@ -365,8 +491,68 @@ impl BoundaryExtractor for PackageManifestExtractor {
         &self,
         input: &ExtractInput<'_>,
     ) -> Result<crate::ContentFingerprint, ExtractorError> {
-        fingerprint_content(input.content)
+        fingerprint_with_budgets(input, self.id(), &self.budgets)
     }
+}
+
+fn extractor_source_syntax_error(error: crate::SourceSyntaxError) -> ExtractorError {
+    match error {
+        crate::SourceSyntaxError::LimitExceeded(limit) => ExtractorError::LimitExceeded(limit),
+        error => ExtractorError::InvalidInput(error.to_string()),
+    }
+}
+
+fn fingerprint_with_budgets(
+    input: &ExtractInput<'_>,
+    extractor: &str,
+    budgets: &ExtractionBudgets,
+) -> Result<ContentFingerprint, ExtractorError> {
+    let observed = u64::try_from(input.content.len()).unwrap_or(u64::MAX);
+    ExtractionTracker::new(&input.file.path.display, extractor, budgets)
+        .check_input_bytes(observed)?;
+    Ok(ContentFingerprint {
+        content_hash: blake3::hash(input.content).to_hex().to_string(),
+        size_bytes: observed,
+    })
+}
+
+fn charge_source_observation(
+    observation: &SourceObservation,
+    tracker: &mut ExtractionTracker,
+) -> Result<(), ExtractorError> {
+    if let Some(method) = &observation.method {
+        tracker.charge_identifier(method)?;
+    }
+    if let Some(path) = &observation.path {
+        tracker.charge_portable_path(path)?;
+    }
+    for symbol in [
+        observation.symbol_name.as_deref(),
+        observation.related_symbol.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        tracker.charge_identifier(symbol)?;
+    }
+    if let Some(path) = &observation.related_path {
+        tracker.charge_portable_path(path)?;
+    }
+    Ok(())
+}
+
+fn serialize_bounded<T: Serialize>(
+    value: &T,
+    tracker: &ExtractionTracker,
+) -> Result<Vec<u8>, ExtractorError> {
+    let mut writer = tracker.bounded_json_writer();
+    if let Err(error) = serde_json::to_writer(&mut writer, value) {
+        if let Some(limit) = tracker.output_limit_error(&writer) {
+            return Err(ExtractorError::LimitExceeded(limit));
+        }
+        return Err(ExtractorError::InvalidOutput(error));
+    }
+    Ok(writer.into_inner())
 }
 
 fn package_path_supported(path: &str) -> bool {
@@ -415,7 +601,7 @@ mod tests {
     use code_system_graph_model::{CheckoutId, NativePath, NativePathEncoding, RepoId};
 
     use super::{
-        BoundaryExtractor, ExtractInput, FileDescriptor, FocusedSourceExtractor, FocusedSourceLanguage, GeneratedClientMetadataExtractor, PackageManifestExtractor
+        BoundaryExtractor, ExtractInput, ExtractionBudgets, ExtractorError, FileDescriptor, FocusedSourceExtractor, FocusedSourceLanguage, GeneratedClientMetadataExtractor, PackageManifestExtractor
     };
 
     fn file(path: &str) -> FileDescriptor {
@@ -476,7 +662,7 @@ mod tests {
 
     #[tokio::test]
     async fn generated_client_extractor_should_emit_explicit_config_facts() {
-        let extractor = GeneratedClientMetadataExtractor;
+        let extractor = GeneratedClientMetadataExtractor::default();
         let file = file("openapitools.json");
         let result = extractor
             .extract(&ExtractInput {
@@ -490,7 +676,7 @@ mod tests {
 
     #[tokio::test]
     async fn package_extractor_should_omit_evidence_source_lines_from_payload() {
-        let extractor = PackageManifestExtractor;
+        let extractor = PackageManifestExtractor::default();
         let file = file("Cargo.toml");
         let source = b"[package]\nname = \"api\"\nversion = \"1.0.0\"\n";
         let result = extractor
@@ -505,6 +691,30 @@ mod tests {
             Ok(batch)
                 if batch.output_count == 1
                     && !String::from_utf8_lossy(&batch.payload).contains("name =")
+        ));
+    }
+
+    #[tokio::test]
+    async fn built_in_extractors_should_honor_explicit_effective_budgets() {
+        let budgets = ExtractionBudgets {
+            max_serialized_output_bytes_per_artifact: 1,
+            ..ExtractionBudgets::default()
+        };
+        let extractor = GeneratedClientMetadataExtractor::with_budgets(budgets);
+        let file = file("openapitools.json");
+        let result = extractor
+            .extract(&ExtractInput {
+                file: &file,
+                content: br#"{"generator-cli":{"generators":{"client":{"generatorName":"rust"}}}}"#,
+            })
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(ExtractorError::LimitExceeded(error))
+                if error.resource
+                    == crate::ExtractionResource::SerializedOutputBytes
+                    && error.maximum == 1
         ));
     }
 }

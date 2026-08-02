@@ -60,6 +60,24 @@ enum Command {
     /// Internal supervised worker protocol.
     #[command(name = "__worker-v1", hide = true)]
     WorkerV1,
+    /// Internal isolated filesystem-event worker protocol.
+    #[command(name = "__watch-events-v1", hide = true)]
+    WatchEventsV1 {
+        #[arg(long)]
+        config: PathBuf,
+        #[arg(long)]
+        database: PathBuf,
+        #[arg(long)]
+        workspace: String,
+        #[arg(long)]
+        poll_interval_ms: Option<u64>,
+        #[arg(long)]
+        max_wall_time_ms: u64,
+        #[arg(long)]
+        max_no_progress_time_ms: u64,
+        #[arg(long)]
+        max_memory_bytes: u64,
+    },
     /// Create a strict minimal `code-system-graph.yaml` without overwriting.
     Init {
         /// Directory in which to create the manifest.
@@ -510,6 +528,7 @@ enum Command {
 const fn command_name(command: &Command) -> &'static str {
     match command {
         Command::WorkerV1 => "__worker-v1",
+        Command::WatchEventsV1 { .. } => "__watch-events-v1",
         Command::Init { .. } => "init",
         Command::Scan { .. } => "scan",
         Command::Sync { .. } => "sync",
@@ -1485,6 +1504,26 @@ fn log_command_event(
 async fn dispatch(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
         Command::WorkerV1 => run_worker_from_stdio().map_err(anyhow::Error::msg)?,
+        Command::WatchEventsV1 {
+            config,
+            database,
+            workspace,
+            poll_interval_ms,
+            max_wall_time_ms,
+            max_no_progress_time_ms,
+            max_memory_bytes,
+        } => {
+            sync_watch::run_watch_event_worker(
+                config,
+                database,
+                workspace,
+                poll_interval_ms,
+                max_wall_time_ms,
+                max_no_progress_time_ms,
+                max_memory_bytes,
+            )
+            .await?;
+        }
         Command::Init { path, name } => {
             let report = initialize_workspace(&path, name.as_deref())?;
             println!("{}", serde_json::to_string(&report)?);

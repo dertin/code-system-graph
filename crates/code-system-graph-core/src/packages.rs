@@ -62,7 +62,7 @@ pub enum DependencyScope {
 pub struct PackageEvidenceLine {
     /// One-based line number in [`Self::text`]'s source file.
     pub line: u32,
-    /// Complete source line without its line terminator.
+    /// Transient source line when the parser supplies it without rescanning the document.
     #[serde(skip)]
     pub text: String,
 }
@@ -238,8 +238,17 @@ pub fn extract_package_manifest_with_tracker(
 ) -> Result<PackageManifest, PackageManifestError> {
     tracker.check_input_bytes(u64::try_from(content.len()).unwrap_or(u64::MAX))?;
     validate_relative_path(relative_path)?;
+    tracker.charge_portable_path(&relative_path.replace('\\', "/"))?;
     let file_name = relative_path.rsplit('/').next().unwrap_or(relative_path);
     let lower_name = file_name.to_ascii_lowercase();
+    if std::path::Path::new(&lower_name)
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
+    {
+        crate::graphql_contracts::precheck_json_structure(content, tracker)?;
+    } else {
+        precheck_package_text(content, tracker)?;
+    }
 
     let result = match lower_name.as_str() {
         "package.json" => parse_package_json(relative_path, content),
@@ -271,10 +280,131 @@ pub fn extract_package_manifest_with_tracker(
     }
     tracker.check_structured_time()?;
     let result = result?;
+    charge_package_manifest(&result, tracker)?;
 
     let result = finalize(result);
     tracker.check_structured_time()?;
     Ok(result)
+}
+
+fn precheck_package_text(
+    content: &str,
+    tracker: &mut ExtractionTracker,
+) -> Result<(), ExtractionLimitExceeded> {
+    let bytes = content.as_bytes();
+    let mut cursor = 0_usize;
+    let mut accumulated = 0_u64;
+    while cursor < bytes.len() {
+        if cursor.is_multiple_of(1_024) {
+            tracker.check_structured_time()?;
+        }
+        let byte = bytes[cursor];
+        if matches!(byte, b'"' | b'\'') {
+            tracker.charge_work(1)?;
+            let delimiter = byte;
+            cursor = cursor.saturating_add(1);
+            let start = cursor;
+            let mut escaped = false;
+            while cursor < bytes.len() {
+                let byte = bytes[cursor];
+                if escaped {
+                    escaped = false;
+                } else if byte == b'\\' {
+                    escaped = true;
+                } else if byte == delimiter {
+                    break;
+                }
+                cursor = cursor.saturating_add(1);
+                if cursor.is_multiple_of(1_024) {
+                    tracker.check_structured_time()?;
+                }
+            }
+            let observed = u64::try_from(cursor.saturating_sub(start)).unwrap_or(u64::MAX);
+            tracker.check_string_bytes(observed)?;
+            accumulated = accumulated.saturating_add(observed);
+            tracker.check_accumulated_string_bytes(accumulated)?;
+            cursor = cursor.saturating_add(1);
+            continue;
+        }
+        if byte == b'_' || byte.is_ascii_alphanumeric() || matches!(byte, b'@' | b'.' | b'-') {
+            let start = cursor;
+            cursor = cursor.saturating_add(1);
+            while cursor < bytes.len()
+                && (bytes[cursor].is_ascii_alphanumeric()
+                    || matches!(bytes[cursor], b'_' | b'@' | b'.' | b'-' | b'/' | b':'))
+            {
+                cursor = cursor.saturating_add(1);
+            }
+            let observed = u64::try_from(cursor.saturating_sub(start)).unwrap_or(u64::MAX);
+            tracker.charge_work(1)?;
+            tracker.check_identifier_bytes(observed)?;
+            accumulated = accumulated.saturating_add(observed);
+            tracker.check_accumulated_string_bytes(accumulated)?;
+            continue;
+        }
+        if matches!(
+            byte,
+            b'{' | b'}' | b'[' | b']' | b'(' | b')' | b':' | b'=' | b'<'
+        ) {
+            tracker.charge_work(1)?;
+        }
+        cursor = cursor.saturating_add(1);
+    }
+    Ok(())
+}
+
+fn charge_package_manifest(
+    manifest: &PackageManifest,
+    tracker: &mut ExtractionTracker,
+) -> Result<(), ExtractionLimitExceeded> {
+    let observations = [
+        manifest.packages.len(),
+        manifest.dependencies.len(),
+        manifest.workspace_members.len(),
+        manifest.exports.len(),
+        manifest.features.len(),
+        manifest.lockfiles.len(),
+    ]
+    .into_iter()
+    .fold(0_u64, |total, count| {
+        total.saturating_add(u64::try_from(count).unwrap_or(u64::MAX))
+    });
+    tracker.charge_observation(observations)?;
+
+    for package in &manifest.packages {
+        tracker.charge_identifier(&package.name)?;
+        if let Some(version) = &package.version {
+            tracker.charge_string(version)?;
+        }
+        tracker.charge_portable_path(&package.source_path)?;
+    }
+    for dependency in &manifest.dependencies {
+        tracker.charge_identifier(&dependency.name)?;
+        if let Some(version) = &dependency.version_or_range {
+            tracker.charge_string(version)?;
+        }
+        if let Some(condition) = &dependency.condition {
+            tracker.charge_string(condition)?;
+        }
+        tracker.charge_portable_path(&dependency.source_path)?;
+    }
+    for value in manifest
+        .workspace_members
+        .iter()
+        .chain(&manifest.exports)
+        .chain(&manifest.features)
+    {
+        tracker.charge_string(&value.value)?;
+        tracker.charge_portable_path(&value.source_path)?;
+    }
+    for lockfile in &manifest.lockfiles {
+        tracker.charge_identifier(&lockfile.package_manager)?;
+        if let Some(version) = &lockfile.format_version {
+            tracker.charge_string(version)?;
+        }
+        tracker.charge_portable_path(&lockfile.source_path)?;
+    }
+    Ok(())
 }
 
 fn validate_relative_path(path: &str) -> Result<(), PackageManifestError> {
@@ -354,12 +484,10 @@ fn sort_values(values: &mut [PackageManifestValue]) {
     });
 }
 
-fn evidence_at(content: &str, line: usize) -> PackageEvidenceLine {
-    let lines = content.lines().collect::<Vec<_>>();
-    let index = line.saturating_sub(1).min(lines.len().saturating_sub(1));
+fn evidence_at(_content: &str, line: usize) -> PackageEvidenceLine {
     PackageEvidenceLine {
-        line: u32::try_from(index.saturating_add(1)).unwrap_or(u32::MAX),
-        text: lines.get(index).copied().unwrap_or_default().to_owned(),
+        line: u32::try_from(line.max(1)).unwrap_or(u32::MAX),
+        text: String::new(),
     }
 }
 
@@ -385,6 +513,15 @@ fn value_fact(
         value,
         source_path: path.to_owned(),
         evidence: evidence_for(content, start_line, token),
+        confidence: EXACT_CONFIDENCE,
+    }
+}
+
+fn value_fact_at(path: &str, value: String, line: usize) -> PackageManifestValue {
+    PackageManifestValue {
+        value,
+        source_path: path.to_owned(),
+        evidence: evidence_at("", line),
         confidence: EXACT_CONFIDENCE,
     }
 }
@@ -432,9 +569,58 @@ fn dependency(input: DependencyInput<'_>) -> PackageDependency {
     }
 }
 
+fn json_string_lines(content: &str) -> BTreeMap<String, Vec<usize>> {
+    let bytes = content.as_bytes();
+    let mut lines = BTreeMap::<String, Vec<usize>>::new();
+    let mut cursor = 0_usize;
+    let mut line = 1_usize;
+    while cursor < bytes.len() {
+        if bytes[cursor] == b'\n' {
+            line = line.saturating_add(1);
+            cursor = cursor.saturating_add(1);
+            continue;
+        }
+        if bytes[cursor] != b'"' {
+            cursor = cursor.saturating_add(1);
+            continue;
+        }
+        let start = cursor;
+        let source_line = line;
+        cursor = cursor.saturating_add(1);
+        let mut escaped = false;
+        while cursor < bytes.len() {
+            let byte = bytes[cursor];
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                break;
+            }
+            cursor = cursor.saturating_add(1);
+        }
+        if cursor < bytes.len()
+            && let Some(raw) = content.get(start..=cursor)
+            && let Ok(value) = serde_json::from_str::<String>(raw)
+        {
+            lines.entry(value).or_default().push(source_line);
+        }
+        cursor = cursor.saturating_add(1);
+    }
+    lines
+}
+
+fn json_string_line(lines: &BTreeMap<String, Vec<usize>>, value: &str, minimum: usize) -> usize {
+    lines
+        .get(value)
+        .and_then(|values| values.iter().copied().find(|line| *line >= minimum))
+        .unwrap_or(minimum)
+}
+
 fn parse_package_json(path: &str, content: &str) -> Result<PackageManifest, PackageManifestError> {
     let root: Value =
         serde_json::from_str(content).map_err(|error| malformed(path, error.to_string()))?;
+    let string_lines = json_string_lines(content);
     let object = root
         .as_object()
         .ok_or_else(|| malformed(path, "top-level JSON value must be an object"))?;
@@ -451,7 +637,7 @@ fn parse_package_json(path: &str, content: &str) -> Result<PackageManifest, Pack
             name.to_owned(),
             version.map(str::to_owned),
             path,
-            evidence_for(content, 1, "\"name\""),
+            evidence_at(content, json_string_line(&string_lines, "name", 1)),
         ));
     } else if object.contains_key("version") {
         return Err(malformed(path, "`version` requires a static `name`"));
@@ -470,7 +656,7 @@ fn parse_package_json(path: &str, content: &str) -> Result<PackageManifest, Pack
         let entries = value
             .as_object()
             .ok_or_else(|| malformed(path, format!("`{section}` must be an object")))?;
-        let section_line = evidence_for(content, 1, &format!("\"{section}\"")).line as usize;
+        let section_line = json_string_line(&string_lines, section, 1);
         for (name, version) in entries {
             let version = required_json_string(path, section, version)?;
             let optional = section_optional
@@ -483,7 +669,7 @@ fn parse_package_json(path: &str, content: &str) -> Result<PackageManifest, Pack
                 optional,
                 condition: None,
                 path,
-                evidence: evidence_for(content, section_line, &format!("\"{name}\"")),
+                evidence: evidence_at(content, json_string_line(&string_lines, name, section_line)),
                 confidence: EXACT_CONFIDENCE,
             }));
         }
@@ -506,14 +692,16 @@ fn parse_package_json(path: &str, content: &str) -> Result<PackageManifest, Pack
         };
         for value in values {
             let member = required_json_string(path, "workspaces", value)?;
-            result
-                .workspace_members
-                .push(value_fact(path, content, member.to_owned(), 1, member));
+            result.workspace_members.push(value_fact_at(
+                path,
+                member.to_owned(),
+                json_string_line(&string_lines, member, 1),
+            ));
         }
     }
 
     if let Some(exports) = object.get("exports") {
-        collect_json_export_keys(path, content, exports, &mut result.exports)?;
+        collect_json_export_keys(path, exports, &string_lines, &mut result.exports)?;
     }
     Ok(result)
 }
@@ -564,23 +752,25 @@ fn required_json_string<'a>(
 
 fn collect_json_export_keys(
     path: &str,
-    content: &str,
     exports: &Value,
+    string_lines: &BTreeMap<String, Vec<usize>>,
     output: &mut Vec<PackageManifestValue>,
 ) -> Result<(), PackageManifestError> {
     match exports {
         Value::String(target) if !target.is_empty() => {
-            output.push(value_fact(path, content, ".".to_owned(), 1, "\"exports\""));
+            output.push(value_fact_at(
+                path,
+                ".".to_owned(),
+                json_string_line(string_lines, "exports", 1),
+            ));
         }
         Value::Object(map) => {
             for (key, value) in map {
                 if key.starts_with('.') {
-                    output.push(value_fact(
+                    output.push(value_fact_at(
                         path,
-                        content,
                         key.clone(),
-                        1,
-                        &format!("\"{key}\""),
+                        json_string_line(string_lines, key, 1),
                     ));
                 }
                 validate_json_export_target(path, value)?;
@@ -2325,6 +2515,82 @@ mod tests {
         source.push_str(&"</level>".repeat(depth.saturating_sub(1)));
         source.push_str("</project>");
         source
+    }
+
+    #[test]
+    fn package_facts_should_honor_work_observation_and_identifier_budgets() {
+        let work_budgets = ExtractionBudgets {
+            max_work_units_per_artifact: 1,
+            ..ExtractionBudgets::default()
+        };
+        let mut work = ExtractionTracker::new("package.json", "packages", &work_budgets);
+        assert!(matches!(
+            extract_package_manifest_with_tracker("package.json", "{}", &mut work),
+            Err(PackageManifestError::LimitExceeded(error))
+                if error.resource == ExtractionResource::WorkUnits
+                    && error.observed == 2
+                    && error.maximum == 1
+        ));
+
+        let observation_budgets = ExtractionBudgets {
+            max_observations_per_artifact: 1,
+            ..ExtractionBudgets::default()
+        };
+        let mut observations =
+            ExtractionTracker::new("package.json", "packages", &observation_budgets);
+        assert!(matches!(
+            extract_package_manifest_with_tracker(
+                "package.json",
+                r#"{"name":"service","dependencies":{"serde":"1"}}"#,
+                &mut observations,
+            ),
+            Err(PackageManifestError::LimitExceeded(error))
+                if error.resource == ExtractionResource::Observations
+                    && error.observed == 2
+                    && error.maximum == 1
+        ));
+
+        let identifier_budgets = ExtractionBudgets {
+            max_identifier_bytes_per_value: 4,
+            ..ExtractionBudgets::default()
+        };
+        let mut identifier =
+            ExtractionTracker::new("package.json", "packages", &identifier_budgets);
+        assert!(matches!(
+            extract_package_manifest_with_tracker(
+                "package.json",
+                r#"{"name":"service"}"#,
+                &mut identifier,
+            ),
+            Err(PackageManifestError::LimitExceeded(error))
+                if error.resource == ExtractionResource::IdentifierBytesPerValue
+                    && error.maximum == 4
+        ));
+    }
+
+    #[test]
+    fn package_json_should_reject_depth_65_before_dom_materialization() {
+        let budgets = ExtractionBudgets {
+            max_structural_depth_per_artifact: 64,
+            ..ExtractionBudgets::default()
+        };
+        let exact_source = format!("{}0{}", "[".repeat(64), "]".repeat(64));
+        let mut exact = ExtractionTracker::new("package.json", "packages", &budgets);
+        assert!(!matches!(
+            extract_package_manifest_with_tracker("package.json", &exact_source, &mut exact),
+            Err(PackageManifestError::LimitExceeded(error))
+                if error.resource == ExtractionResource::StructuralDepth
+        ));
+
+        let above_source = format!("{}0{}", "[".repeat(65), "]".repeat(65));
+        let mut above = ExtractionTracker::new("package.json", "packages", &budgets);
+        assert!(matches!(
+            extract_package_manifest_with_tracker("package.json", &above_source, &mut above),
+            Err(PackageManifestError::LimitExceeded(error))
+                if error.resource == ExtractionResource::StructuralDepth
+                    && error.observed == 65
+                    && error.maximum == 64
+        ));
     }
 
     #[test]

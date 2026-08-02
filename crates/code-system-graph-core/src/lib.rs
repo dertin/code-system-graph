@@ -47,7 +47,7 @@ mod trace;
 mod yaml;
 
 pub use batch::{
-    ArtifactKey, BatchAction, BatchPlanError, ExtractorBatch, ExtractorBatchPlan, PlannedBatch, affected_link_keys, load_extractor_batch, plan_extractor_batches, store_extractor_batch
+    ArtifactKey, BatchAction, BatchPlanError, ExtractorBatch, ExtractorBatchPlan, PlannedBatch, affected_link_keys, load_extractor_batch, load_extractor_batch_with_limit, plan_extractor_batches, store_extractor_batch
 };
 pub use builtin_extractors::{
     FocusedSourceExtractor, FocusedSourceLanguage, GeneratedClientMetadataExtractor, PackageManifestExtractor

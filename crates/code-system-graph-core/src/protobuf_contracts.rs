@@ -342,6 +342,7 @@ pub fn extract_protobuf_with_tracker(
     tracker: &mut ExtractionTracker,
 ) -> Result<ProtoFile, ProtobufExtractionError> {
     tracker.check_input_bytes(u64::try_from(input.len()).unwrap_or(u64::MAX))?;
+    tracker.charge_portable_path(source_path)?;
     precheck_protobuf_depth(input, tracker)?;
     let mut parser = Parser::with_filename(input, source_path);
     let parsed = parser.parse();
@@ -1120,8 +1121,25 @@ fn is_relevant_option(name: &str) -> bool {
             | "py_generic_services"
             | "ruby_package"
             | "swift_prefix"
-    ) || name.contains("google.api.http")
-        || name.contains("grpc.gateway")
+    ) || option_name_matches_root(name, "google.api.http")
+        || [
+            "grpc.gateway.protoc_gen_openapiv2.options.openapiv2_swagger",
+            "grpc.gateway.protoc_gen_openapiv2.options.openapiv2_operation",
+            "grpc.gateway.protoc_gen_openapiv2.options.openapiv2_schema",
+            "grpc.gateway.protoc_gen_openapiv2.options.openapiv2_field",
+            "grpc.gateway.protoc_gen_openapiv2.options.openapiv2_tag",
+        ]
+        .iter()
+        .any(|root| option_name_matches_root(name, root))
+}
+
+fn option_name_matches_root(name: &str, root: &str) -> bool {
+    if name == root {
+        return true;
+    }
+    name.strip_prefix('(')
+        .and_then(|value| value.strip_prefix(root))
+        .is_some_and(|suffix| suffix == ")" || suffix.starts_with(")."))
 }
 
 fn literal_value(
@@ -1156,7 +1174,7 @@ fn literal_value(
 
 fn precheck_protobuf_depth(
     input: &str,
-    tracker: &ExtractionTracker,
+    tracker: &mut ExtractionTracker,
 ) -> Result<(), ExtractionLimitExceeded> {
     let bytes = input.as_bytes();
     let mut cursor = 0;
@@ -1165,7 +1183,12 @@ fn precheck_protobuf_depth(
     let mut escaped = false;
     let mut line_comment = false;
     let mut block_comment = false;
+    let mut string_start = None;
+    let mut accumulated_string_bytes = 0_u64;
     while cursor < bytes.len() {
+        if cursor.is_multiple_of(1_024) {
+            tracker.check_structured_time()?;
+        }
         let byte = bytes[cursor];
         let next = bytes.get(cursor.saturating_add(1)).copied();
         if line_comment {
@@ -1181,6 +1204,11 @@ fn precheck_protobuf_depth(
             } else if byte == b'\\' {
                 escaped = true;
             } else if byte == delimiter {
+                let start = string_start.take().unwrap_or(cursor);
+                let observed = u64::try_from(cursor.saturating_sub(start)).unwrap_or(u64::MAX);
+                tracker.check_string_bytes(observed)?;
+                accumulated_string_bytes = accumulated_string_bytes.saturating_add(observed);
+                tracker.check_accumulated_string_bytes(accumulated_string_bytes)?;
                 quote = None;
             }
         } else if byte == b'/' && next == Some(b'/') {
@@ -1190,12 +1218,43 @@ fn precheck_protobuf_depth(
             block_comment = true;
             cursor = cursor.saturating_add(1);
         } else if matches!(byte, b'"' | b'\'') {
+            tracker.charge_work(1)?;
             quote = Some(byte);
+            string_start = Some(cursor.saturating_add(1));
         } else if matches!(byte, b'{' | b'[' | b'(') {
+            tracker.charge_work(1)?;
             depth = depth.saturating_add(1);
             tracker.check_structural_depth(depth)?;
         } else if matches!(byte, b'}' | b']' | b')') {
+            tracker.charge_work(1)?;
             depth = depth.saturating_sub(1);
+        } else if byte == b';' {
+            tracker.charge_work(1)?;
+            tracker.charge_observation(1)?;
+        } else if byte == b'_' || byte.is_ascii_alphabetic() {
+            let start = cursor;
+            cursor = cursor.saturating_add(1);
+            while cursor < bytes.len()
+                && (bytes[cursor] == b'_'
+                    || bytes[cursor] == b'.'
+                    || bytes[cursor].is_ascii_alphanumeric())
+            {
+                cursor = cursor.saturating_add(1);
+            }
+            let observed = u64::try_from(cursor.saturating_sub(start)).unwrap_or(u64::MAX);
+            tracker.charge_work(1)?;
+            tracker.check_identifier_bytes(observed)?;
+            accumulated_string_bytes = accumulated_string_bytes.saturating_add(observed);
+            tracker.check_accumulated_string_bytes(accumulated_string_bytes)?;
+            if matches!(
+                &input[start..cursor],
+                "message" | "enum" | "service" | "rpc"
+            ) {
+                tracker.charge_observation(1)?;
+            }
+            continue;
+        } else if !byte.is_ascii_whitespace() {
+            tracker.charge_work(1)?;
         }
         cursor = cursor.saturating_add(1);
     }
@@ -1490,6 +1549,40 @@ service Greeter {
                     && error.observed == 65
                     && error.maximum == 64
         ));
+    }
+
+    #[test]
+    fn protobuf_preflight_should_charge_observations_before_parsing() {
+        let budgets = ExtractionBudgets {
+            max_observations_per_artifact: 1,
+            ..ExtractionBudgets::default()
+        };
+        let mut tracker = ExtractionTracker::new("facts.proto", "protobuf", &budgets);
+        let result = extract_protobuf_with_tracker(
+            "facts.proto",
+            "syntax = \"proto3\"; message Item { string value = 1; }",
+            &mut tracker,
+        );
+
+        assert!(matches!(
+            result,
+            Err(ProtobufExtractionError::LimitExceeded(error))
+                if error.resource == ExtractionResource::Observations
+                    && error.observed == 2
+                    && error.maximum == 1
+        ));
+    }
+
+    #[test]
+    fn protobuf_should_not_persist_substring_matched_custom_option_literals() {
+        let secret = "top-secret-value-51f2";
+        let source =
+            format!("syntax = \"proto3\"; option (evil.google.api.http_secret) = \"{secret}\";");
+        let file = extract_protobuf("api/options.proto", &source).expect("valid protobuf");
+        let payload = serde_json::to_string(&file).expect("protobuf contract should serialize");
+
+        assert!(file.options.is_empty());
+        assert!(!payload.contains(secret));
     }
 
     #[test]

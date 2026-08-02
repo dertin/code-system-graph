@@ -400,31 +400,32 @@ pub fn extract_graphql_document_with_tracker(
     tracker.check_input_bytes(u64::try_from(input.len()).unwrap_or(u64::MAX))?;
     precheck_graphql_depth(input, tracker)?;
     let schema_result = schema::parse_schema::<String>(input);
-    let query_result = query::parse_query::<String>(input);
     tracker.check_structured_time()?;
 
-    match (schema_result, query_result) {
-        (Ok(document), _) => {
+    match schema_result {
+        Ok(document) => {
             charge_schema_work(&document, tracker)?;
             let mut output = GraphqlDocument::empty(source_path);
             append_schema_document(document, &mut output);
             finish_document(&mut output);
-            charge_graphql_document(&output, tracker)?;
+            charge_graphql_document(&output, tracker, true)?;
             tracker.check_structured_time()?;
             Ok(output)
         }
-        (Err(_), Ok(document)) => {
-            let mut output = GraphqlDocument::empty(source_path);
-            append_query_document(document, &mut output, tracker)?;
-            finish_document(&mut output);
-            charge_graphql_document(&output, tracker)?;
-            tracker.check_structured_time()?;
-            Ok(output)
-        }
-        (Err(schema_error), Err(query_error)) => Err(GraphqlExtractionError::InvalidGraphql {
-            source_path: source_path.to_owned(),
-            message: format!("{schema_error}; {query_error}"),
-        }),
+        Err(schema_error) => match query::parse_query::<String>(input) {
+            Ok(document) => {
+                let mut output = GraphqlDocument::empty(source_path);
+                append_query_document(document, &mut output, tracker)?;
+                finish_document(&mut output);
+                charge_graphql_document(&output, tracker, true)?;
+                tracker.check_structured_time()?;
+                Ok(output)
+            }
+            Err(query_error) => Err(GraphqlExtractionError::InvalidGraphql {
+                source_path: source_path.to_owned(),
+                message: format!("{schema_error}; {query_error}"),
+            }),
+        },
     }
 }
 
@@ -462,6 +463,7 @@ pub fn extract_graphql_persisted_operations_with_tracker(
     tracker: &mut ExtractionTracker,
 ) -> Result<Vec<GraphqlPersistedOperation>, GraphqlExtractionError> {
     tracker.check_input_bytes(u64::try_from(input.len()).unwrap_or(u64::MAX))?;
+    precheck_json_structure(input, tracker)?;
     let parsed = serde_json::from_str(input);
     tracker.check_structured_time()?;
     let value: serde_json::Value = parsed.map_err(|error| GraphqlExtractionError::InvalidJson {
@@ -522,6 +524,10 @@ pub fn parse_graphql_source_with_tracker(
     tracker: &mut ExtractionTracker,
 ) -> Result<GraphqlDocument, GraphqlExtractionError> {
     tracker.check_input_bytes(u64::try_from(input.len()).unwrap_or(u64::MAX))?;
+    for _ in input.lines() {
+        tracker.charge_work(1)?;
+    }
+    precheck_embedded_source_strings(input, tracker)?;
     let mut output = GraphqlDocument::empty("");
     let literals = embedded_graphql_literals(language, input);
     for literal in literals {
@@ -551,11 +557,53 @@ pub fn parse_graphql_source_with_tracker(
             }
         }
     }
-    output.resolvers = extract_resolvers(language, input);
-    tracker.charge_observation(u64::try_from(output.resolvers.len()).unwrap_or(u64::MAX))?;
+    output.resolvers = extract_resolvers(language, input, tracker)?;
     finish_document(&mut output);
+    charge_graphql_document(&output, tracker, false)?;
     tracker.check_structured_time()?;
     Ok(output)
+}
+
+fn precheck_embedded_source_strings(
+    input: &str,
+    tracker: &ExtractionTracker,
+) -> Result<(), ExtractionLimitExceeded> {
+    let bytes = input.as_bytes();
+    let mut cursor = 0_usize;
+    let mut accumulated = 0_u64;
+    while cursor < bytes.len() {
+        if cursor.is_multiple_of(1_024) {
+            tracker.check_structured_time()?;
+        }
+        let delimiter = bytes[cursor];
+        if !matches!(delimiter, b'"' | b'\'' | b'`') {
+            cursor = cursor.saturating_add(1);
+            continue;
+        }
+        cursor = cursor.saturating_add(1);
+        let start = cursor;
+        let mut escaped = false;
+        while cursor < bytes.len() {
+            let byte = bytes[cursor];
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == delimiter {
+                break;
+            }
+            cursor = cursor.saturating_add(1);
+            if cursor.is_multiple_of(1_024) {
+                tracker.check_structured_time()?;
+            }
+        }
+        let observed = u64::try_from(cursor.saturating_sub(start)).unwrap_or(u64::MAX);
+        tracker.check_string_bytes(observed)?;
+        accumulated = accumulated.saturating_add(observed);
+        tracker.check_accumulated_string_bytes(accumulated)?;
+        cursor = cursor.saturating_add(1);
+    }
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -1475,6 +1523,7 @@ fn expand_fragment(
                 .saturating_add(expansion.spreads.len())
                 .saturating_add(expansion.missing.len());
             tracker.charge_work(u64::try_from(materializations).unwrap_or(u64::MAX))?;
+            charge_fragment_expansion(expansion, tracker)?;
             return Ok(expansion.clone());
         }
         Some(FragmentMemoState::InProgress) => {
@@ -1500,11 +1549,29 @@ fn expand_fragment(
         depth.saturating_add(1),
         tracker,
     )?;
+    tracker.charge_identifier(name)?;
+    charge_fragment_expansion(&expansion, tracker)?;
     memo.insert(
         name.to_owned(),
         FragmentMemoState::Completed(expansion.clone()),
     );
     Ok(expansion)
+}
+
+fn charge_fragment_expansion(
+    expansion: &FragmentExpansion,
+    tracker: &mut ExtractionTracker,
+) -> Result<(), ExtractionLimitExceeded> {
+    for path in &expansion.paths {
+        tracker.charge_string(path)?;
+    }
+    for name in &expansion.spreads {
+        tracker.charge_identifier(name)?;
+    }
+    for warning in &expansion.missing {
+        tracker.charge_string(warning)?;
+    }
+    Ok(())
 }
 
 fn expand_selection_set(
@@ -1753,9 +1820,13 @@ fn looks_like_graphql(value: &str) -> bool {
     .any(|prefix| trimmed.starts_with(prefix))
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one lexical pass keeps depth, values, work, time, and observation reservation aligned"
+)]
 fn precheck_graphql_depth(
     input: &str,
-    tracker: &ExtractionTracker,
+    tracker: &mut ExtractionTracker,
 ) -> Result<(), ExtractionLimitExceeded> {
     let bytes = input.as_bytes();
     let mut cursor = 0;
@@ -1764,8 +1835,12 @@ fn precheck_graphql_depth(
     let mut block_quoted = false;
     let mut escaped = false;
     let mut comment = false;
+    let mut string_start = None;
+    let mut accumulated_string_bytes = 0_u64;
+    let mut prospective_observations = 0_u64;
+    let mut pending_top_level_definition = false;
     while cursor < bytes.len() {
-        if cursor % 1_024 == 0 {
+        if cursor.is_multiple_of(1_024) {
             tracker.check_structured_time()?;
         }
         let byte = bytes[cursor];
@@ -1776,7 +1851,15 @@ fn precheck_graphql_depth(
         }
         if block_quoted {
             if bytes.get(cursor..cursor.saturating_add(3)) == Some(b"\"\"\"") {
+                let observed = cursor.saturating_sub(string_start.unwrap_or(cursor));
+                check_graphql_lexical_value(
+                    observed,
+                    &mut accumulated_string_bytes,
+                    tracker,
+                    false,
+                )?;
                 block_quoted = false;
+                string_start = None;
                 cursor += 3;
             } else {
                 cursor += 1;
@@ -1789,7 +1872,15 @@ fn precheck_graphql_depth(
             } else if byte == b'\\' {
                 escaped = true;
             } else if byte == b'"' {
+                let observed = cursor.saturating_sub(string_start.unwrap_or(cursor));
+                check_graphql_lexical_value(
+                    observed,
+                    &mut accumulated_string_bytes,
+                    tracker,
+                    false,
+                )?;
                 quoted = false;
+                string_start = None;
             }
             cursor += 1;
             continue;
@@ -1797,20 +1888,216 @@ fn precheck_graphql_depth(
         if byte == b'#' {
             comment = true;
         } else if bytes.get(cursor..cursor.saturating_add(3)) == Some(b"\"\"\"") {
+            tracker.charge_work(1)?;
             block_quoted = true;
+            string_start = Some(cursor.saturating_add(3));
             cursor += 3;
             continue;
         } else if byte == b'"' {
+            tracker.charge_work(1)?;
             quoted = true;
+            string_start = Some(cursor.saturating_add(1));
         } else if matches!(byte, b'{' | b'[' | b'(') {
+            tracker.charge_work(1)?;
+            if byte == b'{' && depth == 0 {
+                if !pending_top_level_definition {
+                    prospective_observations = prospective_observations.saturating_add(1);
+                    tracker.check_observations(prospective_observations)?;
+                }
+                pending_top_level_definition = false;
+            }
             depth = depth.saturating_add(1);
             tracker.check_structural_depth(depth)?;
         } else if matches!(byte, b'}' | b']' | b')') {
+            tracker.charge_work(1)?;
             depth = depth.saturating_sub(1);
+        } else if byte.is_ascii_alphabetic() || byte == b'_' {
+            let start = cursor;
+            cursor += 1;
+            while bytes
+                .get(cursor)
+                .is_some_and(|value| value.is_ascii_alphanumeric() || *value == b'_')
+            {
+                cursor += 1;
+            }
+            check_graphql_lexical_value(
+                cursor.saturating_sub(start),
+                &mut accumulated_string_bytes,
+                tracker,
+                true,
+            )?;
+            tracker.charge_work(1)?;
+            if depth == 0
+                && matches!(
+                    &input[start..cursor],
+                    "type"
+                        | "interface"
+                        | "input"
+                        | "enum"
+                        | "union"
+                        | "scalar"
+                        | "schema"
+                        | "directive"
+                        | "query"
+                        | "mutation"
+                        | "subscription"
+                        | "fragment"
+                )
+            {
+                prospective_observations = prospective_observations.saturating_add(1);
+                tracker.check_observations(prospective_observations)?;
+                pending_top_level_definition = true;
+            }
+            continue;
+        } else if byte == b'@' {
+            tracker.charge_work(1)?;
+            prospective_observations = prospective_observations.saturating_add(1);
+            tracker.check_observations(prospective_observations)?;
+        } else if !byte.is_ascii_whitespace() {
+            tracker.charge_work(1)?;
         }
         cursor += 1;
     }
     Ok(())
+}
+
+fn check_graphql_lexical_value(
+    observed: usize,
+    accumulated: &mut u64,
+    tracker: &ExtractionTracker,
+    identifier: bool,
+) -> Result<(), ExtractionLimitExceeded> {
+    let observed = u64::try_from(observed).unwrap_or(u64::MAX);
+    if identifier {
+        tracker.check_identifier_bytes(observed)?;
+    } else {
+        tracker.check_string_bytes(observed)?;
+    }
+    *accumulated = accumulated.saturating_add(observed);
+    tracker.check_accumulated_string_bytes(*accumulated)
+}
+
+pub(crate) fn precheck_json_structure(
+    input: &str,
+    tracker: &mut ExtractionTracker,
+) -> Result<(), ExtractionLimitExceeded> {
+    let bytes = input.as_bytes();
+    let mut cursor = 0_usize;
+    let mut depth = 0_u64;
+    let mut accumulated = 0_u64;
+    while cursor < bytes.len() {
+        if cursor.is_multiple_of(1_024) {
+            tracker.check_structured_time()?;
+        }
+        match bytes[cursor] {
+            b'{' | b'[' => {
+                tracker.charge_work(1)?;
+                depth = depth.saturating_add(1);
+                tracker.check_structural_depth(depth)?;
+                cursor += 1;
+            }
+            b'}' | b']' => {
+                tracker.charge_work(1)?;
+                depth = depth.saturating_sub(1);
+                cursor += 1;
+            }
+            b'"' => {
+                tracker.charge_work(1)?;
+                cursor += 1;
+                let start = cursor;
+                let mut escaped = false;
+                while cursor < bytes.len() {
+                    let byte = bytes[cursor];
+                    if escaped {
+                        escaped = false;
+                    } else if byte == b'\\' {
+                        escaped = true;
+                    } else if byte == b'"' {
+                        break;
+                    }
+                    cursor += 1;
+                    if cursor.is_multiple_of(1_024) {
+                        tracker.check_structured_time()?;
+                    }
+                }
+                let observed = json_decoded_string_bytes(&bytes[start..cursor]);
+                tracker.check_string_bytes(observed)?;
+                accumulated = accumulated.saturating_add(observed);
+                tracker.check_accumulated_string_bytes(accumulated)?;
+                cursor = cursor.saturating_add(1);
+            }
+            byte if byte.is_ascii_whitespace() || matches!(byte, b',' | b':') => cursor += 1,
+            _ => {
+                tracker.charge_work(1)?;
+                cursor += 1;
+                while cursor < bytes.len()
+                    && !bytes[cursor].is_ascii_whitespace()
+                    && !matches!(bytes[cursor], b',' | b':' | b'}' | b']')
+                {
+                    cursor += 1;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn json_decoded_string_bytes(bytes: &[u8]) -> u64 {
+    let mut cursor = 0_usize;
+    let mut decoded = 0_u64;
+    while cursor < bytes.len() {
+        if bytes[cursor] != b'\\' {
+            decoded = decoded.saturating_add(1);
+            cursor += 1;
+            continue;
+        }
+        let Some(escape) = bytes.get(cursor.saturating_add(1)).copied() else {
+            return u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        };
+        if escape != b'u' {
+            decoded = decoded.saturating_add(1);
+            cursor = cursor.saturating_add(2);
+            continue;
+        }
+        let Some(first) = parse_json_hex_quad(bytes.get(cursor.saturating_add(2)..)) else {
+            return u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        };
+        cursor = cursor.saturating_add(6);
+        let scalar = if (0xD800..=0xDBFF).contains(&first)
+            && bytes.get(cursor..cursor.saturating_add(2)) == Some(b"\\u")
+        {
+            let Some(second) = parse_json_hex_quad(bytes.get(cursor.saturating_add(2)..)) else {
+                return u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+            };
+            if !(0xDC00..=0xDFFF).contains(&second) {
+                return u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+            }
+            cursor = cursor.saturating_add(6);
+            0x1_0000 + ((u32::from(first) - 0xD800) << 10) + (u32::from(second) - 0xDC00)
+        } else {
+            u32::from(first)
+        };
+        let Some(character) = char::from_u32(scalar) else {
+            return u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        };
+        decoded = decoded.saturating_add(u64::try_from(character.len_utf8()).unwrap_or(u64::MAX));
+    }
+    decoded
+}
+
+fn parse_json_hex_quad(bytes: Option<&[u8]>) -> Option<u16> {
+    let bytes = bytes?.get(..4)?;
+    let mut value = 0_u16;
+    for byte in bytes {
+        value = value.checked_mul(16)?;
+        value = value.checked_add(u16::from(match byte {
+            b'0'..=b'9' => byte - b'0',
+            b'a'..=b'f' => byte - b'a' + 10,
+            b'A'..=b'F' => byte - b'A' + 10,
+            _ => return None,
+        }))?;
+    }
+    Some(value)
 }
 
 fn charge_schema_work(
@@ -1970,6 +2257,7 @@ fn usize_to_u64(value: usize) -> u64 {
 fn charge_graphql_document(
     document: &GraphqlDocument,
     tracker: &mut ExtractionTracker,
+    include_resolvers: bool,
 ) -> Result<(), ExtractionLimitExceeded> {
     tracker.charge_portable_path(&document.source_path)?;
     let observations = document
@@ -1978,55 +2266,179 @@ fn charge_graphql_document(
         .saturating_add(document.operations.len())
         .saturating_add(document.fragments.len())
         .saturating_add(document.persisted_operations.len())
-        .saturating_add(document.resolvers.len())
+        .saturating_add(if include_resolvers {
+            document.resolvers.len()
+        } else {
+            0
+        })
         .saturating_add(document.federation.len());
     tracker.charge_observation(u64::try_from(observations).unwrap_or(u64::MAX))?;
-    for value in document
-        .types
-        .iter()
-        .map(|item| item.name.as_str())
-        .chain(document.fragments.iter().map(|item| item.name.as_str()))
-        .chain(
-            document
-                .resolvers
-                .iter()
-                .map(|item| item.coordinate.as_str()),
-        )
-    {
-        tracker.charge_identifier(value)?;
+    for definition in &document.types {
+        tracker.charge_identifier(&definition.name)?;
+        charge_identifiers(&definition.implements, tracker)?;
+        charge_identifiers(&definition.enum_values, tracker)?;
+        charge_identifiers(&definition.union_members, tracker)?;
+        charge_identifiers(&definition.directives, tracker)?;
+        for field in &definition.fields {
+            tracker.charge_identifier(&field.coordinate)?;
+            tracker.charge_identifier(&field.name)?;
+            charge_type_ref(&field.type_ref, tracker)?;
+            charge_identifiers(&field.directives, tracker)?;
+            for argument in &field.arguments {
+                charge_argument(argument, tracker)?;
+            }
+        }
     }
-    for path in document
-        .operations
-        .iter()
-        .flat_map(|operation| &operation.consumed_field_paths)
-        .chain(
-            document
-                .fragments
-                .iter()
-                .flat_map(|fragment| &fragment.consumed_field_paths),
-        )
-    {
-        tracker.charge_string(path)?;
+    for operation in &document.operations {
+        if let Some(name) = &operation.name {
+            tracker.charge_identifier(name)?;
+        }
+        for variable in &operation.variables {
+            charge_argument(variable, tracker)?;
+        }
+        charge_selections(&operation.selections, tracker)?;
+        charge_strings(&operation.consumed_field_paths, tracker)?;
+        charge_identifiers(&operation.fragment_spreads, tracker)?;
+        charge_strings(&operation.warnings, tracker)?;
+    }
+    for fragment in &document.fragments {
+        tracker.charge_identifier(&fragment.name)?;
+        tracker.charge_identifier(&fragment.type_condition)?;
+        charge_selections(&fragment.selections, tracker)?;
+        charge_strings(&fragment.consumed_field_paths, tracker)?;
+        charge_identifiers(&fragment.fragment_spreads, tracker)?;
+    }
+    for persisted in &document.persisted_operations {
+        tracker.charge_identifier(&persisted.id)?;
+        if let Some(name) = &persisted.operation_name {
+            tracker.charge_identifier(name)?;
+        }
+        charge_strings(&persisted.consumed_field_paths, tracker)?;
+        charge_strings(&persisted.warnings, tracker)?;
+        tracker.charge_portable_path(&persisted.source_path)?;
+    }
+    if include_resolvers {
+        for resolver in &document.resolvers {
+            tracker.charge_identifier(&resolver.type_name)?;
+            tracker.charge_identifier(&resolver.field_name)?;
+            tracker.charge_identifier(&resolver.coordinate)?;
+            tracker.charge_identifier(&resolver.symbol)?;
+        }
+    }
+    for metadata in &document.federation {
+        tracker.charge_identifier(&metadata.directive)?;
+        tracker.charge_identifier(&metadata.target)?;
+        for name in metadata.arguments.keys() {
+            tracker.charge_identifier(name)?;
+        }
+    }
+    charge_strings(&document.warnings, tracker)?;
+    Ok(())
+}
+
+fn charge_argument(
+    argument: &GraphqlArgumentDefinition,
+    tracker: &mut ExtractionTracker,
+) -> Result<(), ExtractionLimitExceeded> {
+    tracker.charge_identifier(&argument.name)?;
+    charge_type_ref(&argument.type_ref, tracker)?;
+    charge_identifiers(&argument.directives, tracker)
+}
+
+fn charge_type_ref(
+    type_ref: &GraphqlTypeRef,
+    tracker: &mut ExtractionTracker,
+) -> Result<(), ExtractionLimitExceeded> {
+    match type_ref {
+        GraphqlTypeRef::Named { name, .. } => tracker.charge_identifier(name),
+        GraphqlTypeRef::List { element, .. } => charge_type_ref(element, tracker),
+    }
+}
+
+fn charge_selections(
+    selections: &[GraphqlSelection],
+    tracker: &mut ExtractionTracker,
+) -> Result<(), ExtractionLimitExceeded> {
+    for selection in selections {
+        match selection {
+            GraphqlSelection::Field {
+                path, name, alias, ..
+            } => {
+                tracker.charge_string(path)?;
+                tracker.charge_identifier(name)?;
+                if let Some(alias) = alias {
+                    tracker.charge_identifier(alias)?;
+                }
+            }
+            GraphqlSelection::FragmentSpread {
+                name, parent_path, ..
+            } => {
+                tracker.charge_identifier(name)?;
+                if let Some(path) = parent_path {
+                    tracker.charge_string(path)?;
+                }
+            }
+            GraphqlSelection::InlineFragment {
+                type_condition,
+                parent_path,
+                ..
+            } => {
+                if let Some(name) = type_condition {
+                    tracker.charge_identifier(name)?;
+                }
+                if let Some(path) = parent_path {
+                    tracker.charge_string(path)?;
+                }
+            }
+        }
     }
     Ok(())
 }
 
-fn extract_resolvers(language: SourceLanguage, input: &str) -> Vec<GraphqlResolver> {
-    let mut output = match language {
-        SourceLanguage::JavaScript | SourceLanguage::TypeScript => {
-            extract_ecmascript_resolvers(language, input)
-        }
-        SourceLanguage::Python => extract_python_resolvers(input),
-        SourceLanguage::Go => extract_go_resolvers(input),
-        SourceLanguage::Java => extract_java_resolvers(input),
-        SourceLanguage::Rust => extract_rust_resolvers(input),
-    };
-    output.sort();
-    output.dedup();
-    output
+fn charge_identifiers(
+    values: &[String],
+    tracker: &mut ExtractionTracker,
+) -> Result<(), ExtractionLimitExceeded> {
+    for value in values {
+        tracker.charge_identifier(value)?;
+    }
+    Ok(())
 }
 
-fn extract_ecmascript_resolvers(language: SourceLanguage, input: &str) -> Vec<GraphqlResolver> {
+fn charge_strings(
+    values: &[String],
+    tracker: &mut ExtractionTracker,
+) -> Result<(), ExtractionLimitExceeded> {
+    for value in values {
+        tracker.charge_string(value)?;
+    }
+    Ok(())
+}
+
+fn extract_resolvers(
+    language: SourceLanguage,
+    input: &str,
+    tracker: &mut ExtractionTracker,
+) -> Result<Vec<GraphqlResolver>, ExtractionLimitExceeded> {
+    let mut output = match language {
+        SourceLanguage::JavaScript | SourceLanguage::TypeScript => {
+            extract_ecmascript_resolvers(language, input, tracker)
+        }
+        SourceLanguage::Python => extract_python_resolvers(input, tracker),
+        SourceLanguage::Go => extract_go_resolvers(input, tracker),
+        SourceLanguage::Java => extract_java_resolvers(input, tracker),
+        SourceLanguage::Rust => extract_rust_resolvers(input, tracker),
+    }?;
+    output.sort();
+    output.dedup();
+    Ok(output)
+}
+
+fn extract_ecmascript_resolvers(
+    language: SourceLanguage,
+    input: &str,
+    tracker: &mut ExtractionTracker,
+) -> Result<Vec<GraphqlResolver>, ExtractionLimitExceeded> {
     let mut output = Vec::new();
     let mut in_resolvers = false;
     let mut current_type: Option<(String, i32)> = None;
@@ -2045,13 +2457,15 @@ fn extract_ecmascript_resolvers(language: SourceLanguage, input: &str) -> Vec<Gr
         depth += brace_delta(trimmed);
         if let Some((name, _)) = &current_type {
             if let Some((field, symbol)) = object_symbol_mapping(trimmed) {
-                output.push(resolver(
+                push_resolver(
+                    &mut output,
                     name,
                     &field,
                     &symbol,
                     language,
                     index.saturating_add(1),
-                ));
+                    tracker,
+                )?;
             }
         } else if let Some(type_name) = object_type_header(trimmed) {
             current_type = Some((type_name, previous_depth));
@@ -2067,7 +2481,7 @@ fn extract_ecmascript_resolvers(language: SourceLanguage, input: &str) -> Vec<Gr
             current_type = None;
         }
     }
-    output
+    Ok(output)
 }
 
 fn resolver_object_start(line: &str) -> bool {
@@ -2110,7 +2524,10 @@ fn object_symbol_mapping(line: &str) -> Option<(String, String)> {
     .then(|| (field.to_owned(), symbol.to_owned()))
 }
 
-fn extract_python_resolvers(input: &str) -> Vec<GraphqlResolver> {
+fn extract_python_resolvers(
+    input: &str,
+    tracker: &mut ExtractionTracker,
+) -> Result<Vec<GraphqlResolver>, ExtractionLimitExceeded> {
     let mut output = Vec::new();
     let mut pending_ariadne: Option<(String, String, usize)> = None;
     let mut pending_strawberry = false;
@@ -2143,40 +2560,46 @@ fn extract_python_resolvers(input: &str) -> Vec<GraphqlResolver> {
                 class_type = None;
             } else if let Some(symbol) = python_function_name(trimmed) {
                 if pending_strawberry {
-                    output.push(resolver(
+                    push_resolver(
+                        &mut output,
                         name,
                         &symbol,
                         &format!("{name}.{symbol}"),
                         SourceLanguage::Python,
                         index.saturating_add(1),
-                    ));
+                        tracker,
+                    )?;
                     pending_strawberry = false;
                 } else if let Some(field) = symbol.strip_prefix("resolve_") {
-                    output.push(resolver(
+                    push_resolver(
+                        &mut output,
                         name,
                         field,
                         &format!("{name}.{symbol}"),
                         SourceLanguage::Python,
                         index.saturating_add(1),
-                    ));
+                        tracker,
+                    )?;
                 }
             }
         }
         if let Some(symbol) = python_function_name(trimmed) {
             if let Some((type_name, field, line_number)) = pending_ariadne.take() {
-                output.push(resolver(
+                push_resolver(
+                    &mut output,
                     &type_name,
                     &field,
                     &symbol,
                     SourceLanguage::Python,
                     line_number,
-                ));
+                    tracker,
+                )?;
             }
         } else if !trimmed.starts_with('@') && !trimmed.is_empty() {
             pending_ariadne = None;
         }
     }
-    output
+    Ok(output)
 }
 
 fn python_field_decorator(line: &str) -> Option<(String, String)> {
@@ -2204,7 +2627,10 @@ fn python_function_name(line: &str) -> Option<String> {
     valid_graphql_name(name).then(|| name.to_owned())
 }
 
-fn extract_go_resolvers(input: &str) -> Vec<GraphqlResolver> {
+fn extract_go_resolvers(
+    input: &str,
+    tracker: &mut ExtractionTracker,
+) -> Result<Vec<GraphqlResolver>, ExtractionLimitExceeded> {
     let mut output = Vec::new();
     for (index, line) in input.lines().enumerate() {
         let trimmed = line.trim();
@@ -2228,18 +2654,23 @@ fn extract_go_resolvers(input: &str) -> Vec<GraphqlResolver> {
             continue;
         }
         let type_name = upper_first(base);
-        output.push(resolver(
+        push_resolver(
+            &mut output,
             &type_name,
             &lower_first(method),
             &format!("{receiver_type}.{method}"),
             SourceLanguage::Go,
             index.saturating_add(1),
-        ));
+            tracker,
+        )?;
     }
-    output
+    Ok(output)
 }
 
-fn extract_java_resolvers(input: &str) -> Vec<GraphqlResolver> {
+fn extract_java_resolvers(
+    input: &str,
+    tracker: &mut ExtractionTracker,
+) -> Result<Vec<GraphqlResolver>, ExtractionLimitExceeded> {
     let mut output = Vec::new();
     let mut pending: Option<(String, Option<String>, usize)> = None;
     let mut class_name = String::new();
@@ -2318,15 +2749,17 @@ fn extract_java_resolvers(input: &str) -> Vec<GraphqlResolver> {
         } else {
             format!("{class_name}.{method}")
         };
-        output.push(resolver(
+        push_resolver(
+            &mut output,
             &type_name,
             &field,
             &symbol,
             SourceLanguage::Java,
             evidence_line,
-        ));
+            tracker,
+        )?;
     }
-    output
+    Ok(output)
 }
 
 fn java_class_name(line: &str) -> Option<String> {
@@ -2367,7 +2800,10 @@ fn named_annotation_value(line: &str, name: &str) -> Option<String> {
     first_quoted_value(value)
 }
 
-fn extract_rust_resolvers(input: &str) -> Vec<GraphqlResolver> {
+fn extract_rust_resolvers(
+    input: &str,
+    tracker: &mut ExtractionTracker,
+) -> Result<Vec<GraphqlResolver>, ExtractionLimitExceeded> {
     let mut output = Vec::new();
     let mut graphql_attribute = false;
     let mut active_impl: Option<(String, i32)> = None;
@@ -2399,20 +2835,22 @@ fn extract_rust_resolvers(input: &str) -> Vec<GraphqlResolver> {
         }
         if let Some((type_name, impl_depth)) = &active_impl {
             if let Some(method) = rust_function_name(trimmed) {
-                output.push(resolver(
+                push_resolver(
+                    &mut output,
                     type_name,
                     &method,
                     &format!("{type_name}::{method}"),
                     SourceLanguage::Rust,
                     index.saturating_add(1),
-                ));
+                    tracker,
+                )?;
             }
             if depth <= *impl_depth {
                 active_impl = None;
             }
         }
     }
-    output
+    Ok(output)
 }
 
 fn rust_impl_type(line: &str) -> Option<String> {
@@ -2432,6 +2870,28 @@ fn rust_function_name(line: &str) -> Option<String> {
     let rest = line.get(position.saturating_add(3)..)?;
     let name = rest.split('(').next()?.trim();
     valid_graphql_name(name).then(|| name.to_owned())
+}
+
+fn push_resolver(
+    output: &mut Vec<GraphqlResolver>,
+    type_name: &str,
+    field_name: &str,
+    symbol: &str,
+    language: SourceLanguage,
+    line: usize,
+    tracker: &mut ExtractionTracker,
+) -> Result<(), ExtractionLimitExceeded> {
+    tracker.charge_observation(1)?;
+    tracker.charge_identifier(type_name)?;
+    tracker.charge_identifier(field_name)?;
+    let coordinate_bytes = u64::try_from(type_name.len())
+        .unwrap_or(u64::MAX)
+        .saturating_add(1)
+        .saturating_add(u64::try_from(field_name.len()).unwrap_or(u64::MAX));
+    tracker.charge_identifier_bytes(coordinate_bytes)?;
+    tracker.charge_identifier(symbol)?;
+    output.push(resolver(type_name, field_name, symbol, language, line));
+    Ok(())
 }
 
 fn resolver(
@@ -2945,6 +3405,82 @@ mod tests {
                     ..
                 }
             ))
+        ));
+    }
+
+    #[test]
+    fn schema_fields_should_enforce_identifier_bytes() {
+        let budgets = ExtractionBudgets {
+            max_identifier_bytes_per_value: 5,
+            ..ExtractionBudgets::default()
+        };
+        let mut tracker = ExtractionTracker::new("schema.graphql", "graphql", &budgets);
+        let result = extract_graphql_document_with_tracker(
+            "schema.graphql",
+            "type Query { identifierFarAboveConfiguredMaximum: String }",
+            &mut tracker,
+        );
+
+        assert!(matches!(
+            result,
+            Err(GraphqlExtractionError::LimitExceeded(error))
+                if error.resource == ExtractionResource::IdentifierBytesPerValue
+                    && error.maximum == 5
+        ));
+    }
+
+    #[test]
+    fn graphql_preflight_should_reject_observation_above_maximum_before_ast() {
+        let budgets = ExtractionBudgets {
+            max_observations_per_artifact: 1,
+            ..ExtractionBudgets::default()
+        };
+        let mut exact = ExtractionTracker::new("schema.graphql", "graphql", &budgets);
+        assert!(
+            extract_graphql_document_with_tracker(
+                "schema.graphql",
+                "type Query { value: String }",
+                &mut exact,
+            )
+            .is_ok()
+        );
+
+        let mut above = ExtractionTracker::new("schema.graphql", "graphql", &budgets);
+        assert!(matches!(
+            extract_graphql_document_with_tracker(
+                "schema.graphql",
+                "type Query { value: String } type Mutation { update: Boolean }",
+                &mut above,
+            ),
+            Err(GraphqlExtractionError::LimitExceeded(error))
+                if error.resource == ExtractionResource::Observations
+                    && error.observed == 2
+                    && error.maximum == 1
+        ));
+    }
+
+    #[test]
+    fn persisted_json_precheck_should_measure_decoded_strings_before_dom_parse() {
+        let budgets = ExtractionBudgets {
+            max_string_bytes_per_value: 2,
+            ..ExtractionBudgets::default()
+        };
+        let mut tracker = ExtractionTracker::new("operations.json", "graphql", &budgets);
+        assert_eq!(
+            precheck_json_structure(r#"{"k":"a\n"}"#, &mut tracker),
+            Ok(())
+        );
+
+        let budgets = ExtractionBudgets {
+            max_string_bytes_per_value: 1,
+            ..ExtractionBudgets::default()
+        };
+        let mut tracker = ExtractionTracker::new("operations.json", "graphql", &budgets);
+        assert!(matches!(
+            precheck_json_structure(r#"{"k":"a\n"}"#, &mut tracker),
+            Err(error) if error.resource == ExtractionResource::StringBytesPerValue
+                && error.observed == 2
+                && error.maximum == 1
         ));
     }
 

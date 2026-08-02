@@ -122,6 +122,7 @@ fn extract_openapitools(
     content: &str,
     tracker: &mut ExtractionTracker,
 ) -> Result<Vec<GeneratedClientMetadata>, GeneratedClientError> {
+    crate::graphql_contracts::precheck_json_structure(content, tracker)?;
     let root: serde_json::Value = serde_json::from_str(content)?;
     let generators = root
         .get("generator-cli")
@@ -181,7 +182,9 @@ fn extract_openapitools(
             output: generated_output,
             version,
             generated_file: None,
-            line: find_line(content, name),
+            // `serde_json` does not expose member spans. Keep a stable file-level anchor instead
+            // of rescanning the complete attacker-controlled document for every generator.
+            line: 1,
         });
     }
     output.sort_by(|left, right| left.name.cmp(&right.name));
@@ -236,14 +239,6 @@ fn portable_absolute(value: &str) -> bool {
             .as_bytes()
             .get(1)
             .is_some_and(|separator| *separator == b':')
-}
-
-fn find_line(content: &str, token: &str) -> u32 {
-    content
-        .lines()
-        .position(|line| line.contains(token))
-        .and_then(|index| u32::try_from(index + 1).ok())
-        .unwrap_or(1)
 }
 
 #[cfg(test)]
@@ -355,6 +350,55 @@ mod tests {
                 if error.resource == ExtractionResource::Observations
                     && error.observed == 3
                     && error.maximum == 2
+        ));
+    }
+
+    #[test]
+    fn openapitools_should_preflight_depth_and_work_before_json_dom() {
+        let input_at_depth = format!("{}0{}", "[".repeat(64), "]".repeat(64));
+        let depth_budgets = ExtractionBudgets {
+            max_structural_depth_per_artifact: 64,
+            ..ExtractionBudgets::default()
+        };
+        let mut at_depth =
+            ExtractionTracker::new("openapitools.json", "generated-client", &depth_budgets);
+        assert!(!matches!(
+            extract_generated_client_metadata(
+                "openapitools.json",
+                &input_at_depth,
+                &mut at_depth,
+            ),
+            Err(GeneratedClientError::LimitExceeded(error))
+                if error.resource == ExtractionResource::StructuralDepth
+        ));
+
+        let input_over_depth = format!("{}0{}", "[".repeat(65), "]".repeat(65));
+        let mut over_depth =
+            ExtractionTracker::new("openapitools.json", "generated-client", &depth_budgets);
+        assert!(matches!(
+            extract_generated_client_metadata(
+                "openapitools.json",
+                &input_over_depth,
+                &mut over_depth,
+            ),
+            Err(GeneratedClientError::LimitExceeded(error))
+                if error.resource == ExtractionResource::StructuralDepth
+                    && error.observed == 65
+                    && error.maximum == 64
+        ));
+
+        let work_budgets = ExtractionBudgets {
+            max_work_units_per_artifact: 1,
+            ..ExtractionBudgets::default()
+        };
+        let mut work =
+            ExtractionTracker::new("openapitools.json", "generated-client", &work_budgets);
+        assert!(matches!(
+            extract_generated_client_metadata("openapitools.json", "{}", &mut work),
+            Err(GeneratedClientError::LimitExceeded(error))
+                if error.resource == ExtractionResource::WorkUnits
+                    && error.observed == 2
+                    && error.maximum == 1
         ));
     }
 }

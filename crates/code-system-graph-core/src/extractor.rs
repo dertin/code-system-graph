@@ -120,6 +120,9 @@ impl ExtractionBatch {
 /// Failure returned by focused boundary extractors.
 #[derive(Debug, Error)]
 pub enum ExtractorError {
+    /// Extraction exceeded one configured invocation resource.
+    #[error(transparent)]
+    LimitExceeded(#[from] crate::ExtractionLimitExceeded),
     /// Input exceeds the documented extraction budget.
     #[error("extractor input is {actual} bytes; maximum is {maximum}")]
     InputTooLarge {

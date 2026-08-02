@@ -1,6 +1,6 @@
-#![cfg(unix)]
-
 //! End-to-end acceptance tests for ephemeral repository exploration.
+
+#![cfg(unix)]
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};

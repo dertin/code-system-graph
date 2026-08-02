@@ -400,6 +400,64 @@ impl ExtractionTracker {
         Ok(())
     }
 
+    /// Checks one string token before a structured parser allocates it.
+    ///
+    /// This does not charge the accumulated output counter; callers must still charge retained
+    /// values immediately before materializing extraction output.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ExtractionLimitExceeded`] when `observed` exceeds the per-string maximum.
+    pub fn check_string_bytes(&self, observed: u64) -> Result<(), ExtractionLimitExceeded> {
+        self.check_value_bytes(
+            observed,
+            self.budgets.max_string_bytes_per_value,
+            ExtractionResource::StringBytesPerValue,
+        )
+    }
+
+    /// Checks one identifier token before a structured parser allocates it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ExtractionLimitExceeded`] when `observed` exceeds the per-identifier maximum.
+    pub fn check_identifier_bytes(&self, observed: u64) -> Result<(), ExtractionLimitExceeded> {
+        self.check_value_bytes(
+            observed,
+            self.budgets.max_identifier_bytes_per_value,
+            ExtractionResource::IdentifierBytesPerValue,
+        )
+    }
+
+    /// Checks lexical string accumulation before structured parsing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ExtractionLimitExceeded`] when the observed lexical bytes exceed the accumulated
+    /// output-string maximum.
+    pub fn check_accumulated_string_bytes(
+        &self,
+        observed: u64,
+    ) -> Result<(), ExtractionLimitExceeded> {
+        self.check_value_bytes(
+            observed,
+            self.budgets.max_accumulated_string_bytes_per_artifact,
+            ExtractionResource::AccumulatedStringBytes,
+        )
+    }
+
+    fn check_value_bytes(
+        &self,
+        observed: u64,
+        maximum: u64,
+        resource: ExtractionResource,
+    ) -> Result<(), ExtractionLimitExceeded> {
+        if observed > maximum {
+            return Err(self.exceeded(resource, observed, maximum));
+        }
+        Ok(())
+    }
+
     fn exceeded(
         &self,
         resource: ExtractionResource,
@@ -479,6 +537,22 @@ impl ExtractionTracker {
         Ok(())
     }
 
+    /// Checks a conservative prospective observation count without accepting materialization.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ExtractionLimitExceeded`] when `observed` exceeds the observation maximum.
+    pub fn check_observations(&self, observed: u64) -> Result<(), ExtractionLimitExceeded> {
+        if observed > self.budgets.max_observations_per_artifact {
+            return Err(self.exceeded(
+                ExtractionResource::Observations,
+                observed,
+                self.budgets.max_observations_per_artifact,
+            ));
+        }
+        Ok(())
+    }
+
     /// Ensures at least the supplied number of output observations has been charged.
     ///
     /// # Errors
@@ -529,6 +603,29 @@ impl ExtractionTracker {
             self.budgets.max_identifier_bytes_per_value,
             ExtractionResource::IdentifierBytesPerValue,
         )
+    }
+
+    /// Charges a prospective identifier byte length before allocating its owned value.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ExtractionLimitExceeded`] before the identifier or accumulated string maximum
+    /// is exceeded.
+    pub fn charge_identifier_bytes(&mut self, bytes: u64) -> Result<(), ExtractionLimitExceeded> {
+        if bytes > self.budgets.max_identifier_bytes_per_value {
+            return Err(self.exceeded(
+                ExtractionResource::IdentifierBytesPerValue,
+                bytes,
+                self.budgets.max_identifier_bytes_per_value,
+            ));
+        }
+        self.accumulated_string_bytes = self.charge_counter(
+            self.accumulated_string_bytes,
+            bytes,
+            self.budgets.max_accumulated_string_bytes_per_artifact,
+            ExtractionResource::AccumulatedStringBytes,
+        )?;
+        Ok(())
     }
 
     fn charge_value(

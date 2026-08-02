@@ -1,6 +1,6 @@
-#![cfg(unix)]
-
 //! End-to-end public-process contract tests for the production `CodeGraph` adapter.
+
+#![cfg(unix)]
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
