@@ -497,17 +497,20 @@ impl SqliteStore {
     ) -> Result<RestoreReport, StoreError> {
         ensure_distinct_paths(database_path, backup_path)?;
         let _lock = StoreLock::acquire(database_path, Duration::from_mins(5))?;
+        validate_pinned_backup_source(backup_path)?;
         let database_existed = database_path.exists();
         let safety_backup_path = if database_existed {
             let existing = Connection::open(database_path)?;
-            let safety_path = next_backup_path(database_path, "pre-restore")?;
+            let safety_path = next_backup_path(database_path, "pre-restore", Some(backup_path))?;
             backup_connection(&existing, &safety_path)?;
             restrict_store_permissions(&safety_path)?;
             Some(safety_path)
         } else {
             None
         };
-        validate_pinned_backup_source(backup_path)?;
+        if database_existed {
+            ensure_restorable_permissions(database_path)?;
+        }
         prepare_database_file(database_path)?;
         let mut destination = Connection::open(database_path)?;
         let restore_result = (|| {
@@ -525,7 +528,11 @@ impl SqliteStore {
                 schema_version,
             }),
             Err(error) => {
-                if !database_existed {
+                if database_existed {
+                    if let Some(ref safety_path) = safety_backup_path {
+                        let _ = rollback_restore_from_safety_backup(database_path, safety_path);
+                    }
+                } else {
                     remove_database_artifacts(database_path);
                 }
                 Err(error)
@@ -2269,7 +2276,11 @@ fn backup_connection_to(
     Ok(())
 }
 
-fn next_backup_path(database: &Path, label: &str) -> Result<PathBuf, StoreError> {
+fn next_backup_path(
+    database: &Path,
+    label: &str,
+    exclude: Option<&Path>,
+) -> Result<PathBuf, StoreError> {
     let original_extension = database
         .extension()
         .map(|extension| extension.to_string_lossy().into_owned());
@@ -2284,9 +2295,13 @@ fn next_backup_path(database: &Path, label: &str) -> Result<PathBuf, StoreError>
             .map_or_else(|| suffix.clone(), |original| format!("{original}.{suffix}"));
         let mut candidate = database.to_path_buf();
         candidate.set_extension(extension);
-        if !candidate.exists() {
-            return Ok(candidate);
+        if candidate.exists() {
+            continue;
         }
+        if exclude.is_some_and(|excluded| paths_refer_to_same_file(&candidate, excluded)) {
+            continue;
+        }
+        return Ok(candidate);
     }
     Err(StoreError::Io {
         path: database.to_path_buf(),
@@ -2295,6 +2310,31 @@ fn next_backup_path(database: &Path, label: &str) -> Result<PathBuf, StoreError>
             "no available backup filename",
         ),
     })
+}
+
+fn paths_refer_to_same_file(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    match (fs::canonicalize(left), fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
+}
+
+fn ensure_restorable_permissions(database_path: &Path) -> Result<(), StoreError> {
+    restrict_store_permissions(database_path)
+}
+
+fn rollback_restore_from_safety_backup(
+    database_path: &Path,
+    safety_backup_path: &Path,
+) -> Result<(), StoreError> {
+    let source = Connection::open(safety_backup_path)?;
+    let mut destination = Connection::open(database_path)?;
+    backup_connection_to(&source, &mut destination)?;
+    configure_connection(&destination)?;
+    restrict_store_permissions(database_path)
 }
 
 fn ensure_distinct_paths(database: &Path, backup: &Path) -> Result<(), StoreError> {
@@ -4940,6 +4980,89 @@ mod tests {
             ),
             ("snapshot:before".to_owned(), "snapshot:after".to_owned(), 1)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn restore_should_reject_missing_backup_that_collides_with_default_safety_path()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temporary = tempfile::tempdir()?;
+        let database = temporary.path().join("store.db");
+        let backup = temporary.path().join("store.db.pre-restore.backup");
+        let workspace = workspace();
+        let (nodes, edges, evidence) = fixture();
+        {
+            let mut store = SqliteStore::open(&database)?;
+            store.publish_snapshot(SnapshotBatch {
+                workspace: &workspace,
+                snapshot_id: "snapshot:before",
+                nodes: &nodes,
+                edges: &edges,
+                evidence: &evidence,
+                fingerprints: &[],
+                extractor_batches: &[],
+                extractor_runs: &[],
+                manual_links: &[],
+                community_snapshot: None,
+            })?;
+        }
+        assert!(!backup.exists());
+
+        let result = SqliteStore::restore_from(&database, &backup);
+
+        assert!(result.is_err());
+        let unchanged =
+            SqliteStore::open_read_only(&database)?.current_snapshot_summary("commerce")?;
+        assert_eq!(unchanged.snapshot_id, "snapshot:before");
+        assert!(
+            !backup.exists(),
+            "missing input backup must not be materialized as a safety backup"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rollback_restore_should_recover_database_from_safety_backup()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temporary = tempfile::tempdir()?;
+        let database = temporary.path().join("store.db");
+        let safety = temporary.path().join("store.db.pre-restore.backup");
+        let workspace = workspace();
+        let (nodes, edges, evidence) = fixture();
+        {
+            let mut store = SqliteStore::open(&database)?;
+            store.publish_snapshot(SnapshotBatch {
+                workspace: &workspace,
+                snapshot_id: "snapshot:before",
+                nodes: &nodes,
+                edges: &edges,
+                evidence: &evidence,
+                fingerprints: &[],
+                extractor_batches: &[],
+                extractor_runs: &[],
+                manual_links: &[],
+                community_snapshot: None,
+            })?;
+            store.backup_to(&safety)?;
+            store.publish_snapshot(SnapshotBatch {
+                workspace: &workspace,
+                snapshot_id: "snapshot:after",
+                nodes: &nodes,
+                edges: &edges,
+                evidence: &evidence,
+                fingerprints: &[],
+                extractor_batches: &[],
+                extractor_runs: &[],
+                manual_links: &[],
+                community_snapshot: None,
+            })?;
+        }
+
+        super::rollback_restore_from_safety_backup(&database, &safety)?;
+        let recovered =
+            SqliteStore::open_read_only(&database)?.current_snapshot_summary("commerce")?;
+
+        assert_eq!(recovered.snapshot_id, "snapshot:before");
         Ok(())
     }
 
