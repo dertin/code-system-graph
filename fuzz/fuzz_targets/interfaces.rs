@@ -1,10 +1,9 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use code_system_graph_core::{
-    ChangeRequest, ContractRequest, DoctorRequest, ExportRequest, ImpactRequest,
-    PullRequestListRequest, SearchRequest, TraversalRequest,
+    ChangeRequest, ContractRequest, DoctorRequest, ExportRequest, ImpactRequest, PullRequestListRequest, SearchRequest, TraversalRequest
 };
+use libfuzzer_sys::fuzz_target;
 
 const MAX_FUZZ_INPUT_BYTES: usize = 2 * 1024 * 1024;
 

@@ -1,14 +1,10 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use code_system_graph_core::{
-    extract_asyncapi, extract_data_artifact, extract_docker_compose, extract_graphql_document,
-    extract_kubernetes, extract_openapi, extract_package_manifest, extract_protobuf,
-    extract_safe_config, extract_terraform, parse_go_source, parse_java_source,
-    parse_javascript_source, parse_manifest, parse_python_source, parse_rust_source,
-    parse_typescript_source,
+    extract_asyncapi, extract_data_artifact, extract_docker_compose, extract_graphql_document, extract_kubernetes, extract_openapi, extract_package_manifest, extract_protobuf, extract_safe_config, extract_terraform, parse_go_source, parse_java_source, parse_javascript_source, parse_manifest, parse_python_source, parse_rust_source, parse_typescript_source
 };
 use code_system_graph_model::RepoId;
+use libfuzzer_sys::fuzz_target;
 
 const MAX_FUZZ_INPUT_BYTES: usize = 2 * 1024 * 1024;
 

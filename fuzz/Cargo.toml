@@ -26,6 +26,3 @@ path = "fuzz_targets/interfaces.rs"
 test = false
 doc = false
 bench = false
-
-[workspace]
-members = ["."]

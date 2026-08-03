@@ -67,6 +67,11 @@ cargo cooldown update
 Use `cargo cooldown check`, `build`, `test`, or `run` when you want the same guard before local
 work. CI and release validation continue to use plain Cargo with the committed `Cargo.lock`.
 
+The fuzz workspace is a root workspace member and shares the repository `Cargo.lock`. The fuzz CI
+workflow runs `scripts/validate-lockfile-cooldown.sh` with `COOLDOWN_LOCKFILE_BASELINE=ignore` so
+every registry package in the lockfile must satisfy `cooldown.toml` before `cargo fuzz` downloads or
+builds dependencies.
+
 Add focused tests for relevant success and failure paths. For graph and provider behavior, cover
 stale, incomplete, ambiguous, bounded, timeout, or cancellation outcomes when applicable.
 
