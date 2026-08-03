@@ -21,10 +21,11 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-fuzz
+          fallback: cargo-install
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: fuzz
-      - run: cargo fuzz run parsers -- -max_total_time=120 -max_len=2097152
+      - run: cargo fuzz run parsers --target x86_64-unknown-linux-gnu -- -max_total_time=120 -max_len=2097152
         working-directory: fuzz
-      - run: cargo fuzz run interfaces -- -max_total_time=120 -max_len=2097152
+      - run: cargo fuzz run interfaces --target x86_64-unknown-linux-gnu -- -max_total_time=120 -max_len=2097152
         working-directory: fuzz
