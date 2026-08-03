@@ -1,5 +1,6 @@
 [workspace]
-members = ["crates/*"]
+members = ["crates/*", "fuzz"]
+default-members = ["crates/*"]
 resolver = "3"
 
 [workspace.package]

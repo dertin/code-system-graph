@@ -43,11 +43,11 @@ and Clippy components, and Rust 1.97.1:
 
 ```text
 cargo +nightly fmt --all -- --check
-cargo +nightly clippy --workspace --all-targets --all-features --locked -- -D warnings
-cargo +stable check --workspace --all-targets --all-features --locked
-cargo +stable test --workspace --all-targets --all-features --locked
-RUSTDOCFLAGS="-D warnings" cargo +stable doc --workspace --all-features --no-deps --locked
-cargo +1.97.1 check --workspace --all-targets --all-features --locked
+cargo +nightly clippy --workspace --exclude code-system-graph-fuzz --all-targets --all-features --locked -- -D warnings
+cargo +stable check --workspace --exclude code-system-graph-fuzz --all-targets --all-features --locked
+cargo +stable test --workspace --exclude code-system-graph-fuzz --all-targets --all-features --locked
+RUSTDOCFLAGS="-D warnings" cargo +stable doc --workspace --exclude code-system-graph-fuzz --all-features --no-deps --locked
+cargo +1.97.1 check --workspace --exclude code-system-graph-fuzz --all-targets --all-features --locked
 ```
 
 Dependency and source-policy tools can then run against the locked workspace:
@@ -55,6 +55,15 @@ Dependency and source-policy tools can then run against the locked workspace:
 ```text
 cargo deny check
 cargo audit --deny warnings
+```
+
+When refreshing registry dependencies before a release, use
+[cargo-cooldown](https://github.com/dertin/cargo-cooldown) with the workspace `cooldown.toml`
+policy instead of plain `cargo update`:
+
+```text
+cargo install --locked cargo-cooldown
+cargo cooldown update
 ```
 
 The release-mode scale workloads are intentionally ignored during the normal test suite:

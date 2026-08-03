@@ -2,15 +2,18 @@
 name = "code-system-graph-fuzz"
 version = "0.0.0"
 publish = false
-edition = "2024"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [package.metadata]
 cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4.13"
-code-system-graph-core = { path = "../crates/code-system-graph-core" }
-code-system-graph-model = { path = "../crates/code-system-graph-model" }
+code-system-graph-core = { version = "1.0.0", path = "../crates/code-system-graph-core" }
+code-system-graph-model = { version = "1.0.0", path = "../crates/code-system-graph-model" }
 serde_json = "1.0.151"
 
 [[bin]]
@@ -26,6 +29,3 @@ path = "fuzz_targets/interfaces.rs"
 test = false
 doc = false
 bench = false
-
-[workspace]
-members = ["."]

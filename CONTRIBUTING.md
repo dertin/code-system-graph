@@ -30,18 +30,47 @@ describe the resulting public behavior. Before opening a pull request, run:
 
 ```text
 cargo +nightly fmt --all -- --check
-cargo +nightly clippy --workspace --all-targets --all-features --locked -- -D warnings
-cargo +stable check --workspace --all-targets --all-features --locked
-cargo +stable test --workspace --all-targets --all-features --locked
-RUSTDOCFLAGS="-D warnings" cargo +stable doc --workspace --all-features --no-deps --locked
+cargo +nightly clippy --workspace --exclude code-system-graph-fuzz --all-targets --all-features --locked -- -D warnings
+cargo +stable check --workspace --exclude code-system-graph-fuzz --all-targets --all-features --locked
+cargo +stable test --workspace --exclude code-system-graph-fuzz --all-targets --all-features --locked
+RUSTDOCFLAGS="-D warnings" cargo +stable doc --workspace --exclude code-system-graph-fuzz --all-features --no-deps --locked
 cargo deny check
 ```
 
 Changes must also compile with the MSRV:
 
 ```text
-cargo +1.97.1 check --workspace --all-targets --all-features --locked
+cargo +1.97.1 check --workspace --exclude code-system-graph-fuzz --all-targets --all-features --locked
 ```
+
+## Dependency updates
+
+Registry dependency updates use [cargo-cooldown](https://github.com/dertin/cargo-cooldown) so
+`Cargo.lock` does not pick up releases that are too new. Policy lives in `cooldown.toml` at the
+workspace root:
+
+- default cooldown: 14 days for crates.io packages;
+- TLS, SSL, and cryptography-related crates: 2 days (see `[[allow.package]]` entries).
+
+Install once:
+
+```text
+cargo install --locked cargo-cooldown
+```
+
+Refresh dependencies under cooldown instead of plain `cargo update`:
+
+```text
+cargo cooldown update
+```
+
+Use `cargo cooldown check`, `build`, `test`, or `run` when you want the same guard before local
+work. CI and release validation continue to use plain Cargo with the committed `Cargo.lock`.
+
+The fuzz crate is a workspace member and shares the repository `Cargo.lock`, but routine CI excludes
+it with `--exclude code-system-graph-fuzz`. Fuzzing runs only in the weekly `.github/workflows/fuzz.yml`
+job (and via manual `workflow_dispatch`). That workflow runs
+`scripts/validate-lockfile-cooldown.sh` with `COOLDOWN_LOCKFILE_BASELINE=ignore` before `cargo fuzz`.
 
 Add focused tests for relevant success and failure paths. For graph and provider behavior, cover
 stale, incomplete, ambiguous, bounded, timeout, or cancellation outcomes when applicable.

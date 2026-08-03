@@ -8,10 +8,10 @@ PACKAGE_DIR="$ROOT/dist/code-system-graph-$TARGET-v1.0.0"
 cd "$ROOT"
 
 cargo +nightly fmt --all -- --check
-cargo +nightly clippy --workspace --all-targets --all-features --locked -- -D warnings
-cargo +stable check --workspace --all-targets --all-features --locked
-cargo +stable test --workspace --all-targets --all-features --locked
-RUSTDOCFLAGS="-D warnings" cargo +stable doc --workspace --all-features --no-deps --locked
+cargo +nightly clippy --workspace --exclude code-system-graph-fuzz --all-targets --all-features --locked -- -D warnings
+cargo +stable check --workspace --exclude code-system-graph-fuzz --all-targets --all-features --locked
+cargo +stable test --workspace --exclude code-system-graph-fuzz --all-targets --all-features --locked
+RUSTDOCFLAGS="-D warnings" cargo +stable doc --workspace --exclude code-system-graph-fuzz --all-features --no-deps --locked
 cargo deny check
 cargo audit --deny warnings
 if command -v gitleaks >/dev/null 2>&1; then

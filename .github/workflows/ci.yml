@@ -22,7 +22,7 @@ jobs:
         with:
           shared-key: nightly-quality
       - run: cargo +nightly fmt --all -- --check
-      - run: cargo +nightly clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - run: cargo +nightly clippy --workspace --exclude code-system-graph-fuzz --all-targets --all-features --locked -- -D warnings
 
   stable:
     name: Stable build and tests
@@ -35,9 +35,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: stable
-      - run: cargo +stable check --workspace --all-targets --all-features --locked
-      - run: cargo +stable test --workspace --all-targets --all-features --locked
-      - run: RUSTDOCFLAGS="-D warnings" cargo +stable doc --workspace --all-features --no-deps --locked
+      - run: cargo +stable check --workspace --exclude code-system-graph-fuzz --all-targets --all-features --locked
+      - run: cargo +stable test --workspace --exclude code-system-graph-fuzz --all-targets --all-features --locked
+      - run: RUSTDOCFLAGS="-D warnings" cargo +stable doc --workspace --exclude code-system-graph-fuzz --all-features --no-deps --locked
 
   msrv:
     name: Rust 1.97.1 MSRV
@@ -50,7 +50,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: msrv
-      - run: cargo check --workspace --all-targets --all-features --locked
+      - run: cargo check --workspace --exclude code-system-graph-fuzz --all-targets --all-features --locked
 
   policy:
     name: Dependency policy
