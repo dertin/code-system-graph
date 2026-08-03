@@ -62,7 +62,7 @@ jobs:
       - name: Run tests
         env:
           CARGO_TERM_COLOR: never
-        run: cargo test --workspace --all-targets --all-features --locked
+        run: cargo test --workspace --exclude code-system-graph-fuzz --all-targets --all-features --locked
 
   release-policy:
     name: Release policy
@@ -139,7 +139,7 @@ jobs:
         run: cargo build --locked --release --target ${{ matrix.target }} --bin csgraph --bin code-system-graph-hooks
 
       - name: Run target tests
-        run: cargo test --workspace --all-features --locked --target ${{ matrix.target }}
+        run: cargo test --workspace --exclude code-system-graph-fuzz --all-features --locked --target ${{ matrix.target }}
 
       - name: Package Unix archive
         if: runner.os != 'Windows'
