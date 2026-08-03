@@ -174,6 +174,9 @@ pub enum ApplicationError {
         /// Canonical checkout root.
         checkout: PathBuf,
     },
+    /// Artifact path display contains unsafe metadata characters.
+    #[error("artifact path contains unsafe control or bidirectional characters")]
+    UnsafeArtifactPath,
     /// Persistent storage failed.
     #[error(transparent)]
     Store(#[from] StoreError),
@@ -268,6 +271,7 @@ pub const fn application_exit_code(error: &ApplicationError) -> ExitCode {
         | ApplicationError::UnknownOverrideRepository(_)
         | ApplicationError::WorkspaceNameMismatch { .. }
         | ApplicationError::ArtifactOutsideCheckout { .. }
+        | ApplicationError::UnsafeArtifactPath
         | ApplicationError::PartialScanBudgetChanged
         | ApplicationError::Trace(_)
         | ApplicationError::Community(_)
@@ -5824,18 +5828,21 @@ fn fingerprint_artifact(
             path: canonical_path.clone(),
             source,
         })?;
-    let mut tracker = ExtractionTracker::new(relative_path.to_string_lossy(), extractor, budgets);
-    let content = read_bounded_bytes(&canonical_path, &mut tracker)?;
     let relative = canonical_path.strip_prefix(checkout_path).map_err(|_| {
         ApplicationError::ArtifactOutsideCheckout {
             path: canonical_path.clone(),
             checkout: checkout_path.to_path_buf(),
         }
     })?;
+    let path = encode_native_path(relative);
+    code_system_graph_model::validate_safe_path_display(&path.display)
+        .map_err(|_| ApplicationError::UnsafeArtifactPath)?;
+    let mut tracker = ExtractionTracker::new(&path.display, extractor, budgets);
+    let content = read_bounded_bytes(&canonical_path, &mut tracker)?;
     let fingerprint = ArtifactFingerprint {
         repo_id: repository.id.clone(),
         checkout_id: repository.checkout_id.clone(),
-        path: encode_native_path(relative),
+        path,
         extractor: extractor.to_owned(),
         content_hash: stable_id_bytes("artifact-content", &content),
         size_bytes: metadata.len(),
@@ -6035,6 +6042,26 @@ mod budget_regression_tests {
         assert!(
             accepted.is_ok(),
             "exact observation budget failed: {accepted:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod codex_review_regression_tests {
+    use code_system_graph_model::validate_safe_path_display;
+
+    use super::ApplicationError;
+
+    #[test]
+    fn unsafe_artifact_path_error_must_not_echo_rejected_display() {
+        const BIDI_PAYLOAD: &str = "invoice\u{202e}pay.pdf";
+        assert!(validate_safe_path_display(BIDI_PAYLOAD).is_err());
+        let rendered = ApplicationError::UnsafeArtifactPath.to_string();
+        assert!(!rendered.contains(BIDI_PAYLOAD));
+        assert!(!rendered.contains('\u{202e}'));
+        assert_eq!(
+            rendered,
+            "artifact path contains unsafe control or bidirectional characters"
         );
     }
 }

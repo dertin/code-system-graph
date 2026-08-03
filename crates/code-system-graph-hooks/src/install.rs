@@ -1,12 +1,11 @@
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use atomic_write_file::AtomicWriteFile;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
+use crate::managed_root::{MAX_HOST_FILE_BYTES, ManagedRoot};
 use crate::types::{
     HookError, HookMode, HookStatus, HostKind, InstallReport, InstallRequest, UninstallReport
 };
@@ -51,10 +50,11 @@ struct InstallState {
 /// serialization, backup, or atomic-write operations.
 pub fn install(request: &InstallRequest) -> Result<InstallReport, HookError> {
     validate_request(request)?;
+    let managed = ManagedRoot::open(&request.root)?;
     let spec = host_spec(request);
-    let state_file = state_file(request);
+    let state_relative = state_relative_path(request);
     let mut backups = Vec::new();
-    let mut warnings = duplicate_warnings(request, &spec)?;
+    let mut warnings = duplicate_warnings(&managed, request, &spec)?;
     let runtime = request.code_system_graph_binary.with_file_name(format!(
         "code-system-graph-hooks{}",
         std::env::consts::EXE_SUFFIX
@@ -62,30 +62,31 @@ pub fn install(request: &InstallRequest) -> Result<InstallReport, HookError> {
 
     let routing_changed = match spec.protocol {
         HostProtocol::Json { event } => {
-            install_json_hook(request, &spec.path, event, &runtime, &mut backups)?
+            install_json_hook(&managed, request, &spec.path, event, &runtime, &mut backups)?
         }
-        HostProtocol::Guidance => install_guidance(request, &spec.path, &mut backups)?,
+        HostProtocol::Guidance => install_guidance(&managed, request, &spec.path, &mut backups)?,
     };
     let strict_changed = if request.mode == HookMode::Strict {
-        install_strict_gate(request, &mut backups, &mut warnings)?
+        install_strict_gate(&managed, request, &mut backups, &mut warnings)?
     } else {
-        remove_strict_gate(request, &mut backups, &mut Vec::new())?
+        remove_strict_gate(&managed, request, &mut backups, &mut Vec::new())?
     };
     let state = InstallState {
         marker: PRODUCT_MARKER.to_owned(),
         host: request.host,
         mode: request.mode,
-        host_file: spec.path.clone(),
+        host_file: managed.absolute(&spec.path),
         codegraph_enabled: request.codegraph_enabled,
     };
-    let state_changed = write_json_if_changed(&state_file, &state, false, &mut backups)?;
-    restrict_file(&state_file)?;
-    let (gitignore_path, gitignore_updated) = configure_generated_state_ignore(&request.root)?;
+    let state_changed =
+        write_json_if_changed(&managed, &state_relative, &state, false, &mut backups)?;
+    restrict_file(&managed.absolute(&state_relative))?;
+    let (gitignore_path, gitignore_updated) = configure_generated_state_ignore(&managed)?;
 
     Ok(InstallReport {
         changed: routing_changed || strict_changed || state_changed || gitignore_updated,
-        host_file: spec.path,
-        state_file,
+        host_file: managed.absolute(&spec.path),
+        state_file: managed.absolute(&state_relative),
         gitignore_path,
         gitignore_updated,
         backups,
@@ -101,9 +102,10 @@ pub fn install(request: &InstallRequest) -> Result<InstallReport, HookError> {
 /// Returns [`HookError`] when existing host configuration cannot be read or parsed.
 pub fn status(request: &InstallRequest) -> Result<HookStatus, HookError> {
     validate_request(request)?;
+    let managed = ManagedRoot::open(&request.root)?;
     let spec = host_spec(request);
-    let state_path = state_file(request);
-    let installed_state = read_install_state(&state_path)?;
+    let state_relative = state_relative_path(request);
+    let installed_state = read_install_state(&managed, &state_relative)?;
     let policy = installed_state
         .as_ref()
         .map_or(request.codegraph_enabled, |state| state.codegraph_enabled);
@@ -113,14 +115,20 @@ pub fn status(request: &InstallRequest) -> Result<HookStatus, HookError> {
     ));
     let routing_installed = match spec.protocol {
         HostProtocol::Json { event } => {
-            json_hook_installed(request, &spec.path, event, &runtime, policy)?
+            json_hook_installed(&managed, request, &spec.path, event, &runtime, policy)?
         }
-        HostProtocol::Guidance => file_contains(&spec.path, &guidance_block(request.host, policy))?,
+        HostProtocol::Guidance => {
+            file_contains(&managed, &spec.path, &guidance_block(request.host, policy))?
+        }
     };
     let strict_gate_installed = if request.mode == HookMode::Strict {
-        file_contains(&git_pre_commit(request)?, &begin_marker(request.host))?
-    } else if let Some(path) = optional_git_pre_commit(request)? {
-        file_contains(&path, &begin_marker(request.host))?
+        file_contains(
+            &managed,
+            &git_pre_commit(&managed)?,
+            &begin_marker(request.host),
+        )?
+    } else if let Some(path) = optional_git_pre_commit(&managed)? {
+        file_contains(&managed, &path, &begin_marker(request.host))?
     } else {
         false
     };
@@ -131,14 +139,14 @@ pub fn status(request: &InstallRequest) -> Result<HookStatus, HookError> {
         && (request.mode == HookMode::Advisory || strict_gate_installed)
         && installed_state.is_some()
         && policy_matches;
-    let warnings = duplicate_warnings(request, &spec)?;
+    let warnings = duplicate_warnings(&managed, request, &spec)?;
 
     Ok(HookStatus {
         installed,
         routing_installed,
         strict_gate_installed,
-        host_file: spec.path,
-        state_file: state_path,
+        host_file: managed.absolute(&spec.path),
+        state_file: managed.absolute(&state_relative),
         warnings,
         limitation: spec.limitation.map(str::to_owned),
     })
@@ -155,31 +163,34 @@ pub fn status(request: &InstallRequest) -> Result<HookStatus, HookError> {
 /// permission change, or atomic write fails.
 pub fn uninstall(request: &InstallRequest) -> Result<UninstallReport, HookError> {
     validate_request(request)?;
+    let managed = ManagedRoot::open(&request.root)?;
     let spec = host_spec(request);
+    let state_relative = state_relative_path(request);
     let mut backups = Vec::new();
     let mut removed_files = Vec::new();
     let mut warnings = Vec::new();
 
     let routing_changed = match spec.protocol {
-        HostProtocol::Json { event } => uninstall_json_hook(&spec.path, event, &mut backups)?,
-        HostProtocol::Guidance => {
-            remove_guidance(request, &spec.path, &mut backups, &mut removed_files)?
+        HostProtocol::Json { event } => {
+            uninstall_json_hook(&managed, &spec.path, event, &mut backups)?
         }
+        HostProtocol::Guidance => remove_guidance(
+            &managed,
+            request,
+            &spec.path,
+            &mut backups,
+            &mut removed_files,
+        )?,
     };
-    let strict_changed = remove_strict_gate(request, &mut backups, &mut removed_files)?;
-    let state = state_file(request);
-    let state_changed = if state.exists() {
-        fs::remove_file(&state).map_err(|source| HookError::Io {
-            path: state.clone(),
-            source,
-        })?;
-        removed_files.push(state);
+    let strict_changed = remove_strict_gate(&managed, request, &mut backups, &mut removed_files)?;
+    let state_changed = if managed.remove_file_if_exists(&state_relative)? {
+        removed_files.push(managed.absolute(&state_relative));
         true
     } else {
         false
     };
 
-    warnings.extend(duplicate_warnings(request, &spec)?);
+    warnings.extend(duplicate_warnings(&managed, request, &spec)?);
     Ok(UninstallReport {
         changed: routing_changed || strict_changed || state_changed,
         backups,
@@ -189,16 +200,6 @@ pub fn uninstall(request: &InstallRequest) -> Result<UninstallReport, HookError>
 }
 
 fn validate_request(request: &InstallRequest) -> Result<(), HookError> {
-    let metadata = fs::metadata(&request.root).map_err(|source| HookError::Io {
-        path: request.root.clone(),
-        source,
-    })?;
-    if !metadata.is_dir() {
-        return Err(HookError::InvalidConfiguration {
-            path: request.root.clone(),
-            message: "repository root is not a directory".to_owned(),
-        });
-    }
     if request.workspace.trim().is_empty() {
         return Err(HookError::InvalidConfiguration {
             path: request.root.clone(),
@@ -249,45 +250,40 @@ fn host_spec(request: &InstallRequest) -> HostSpec {
         ),
     };
     HostSpec {
-        path: request.root.join(relative),
+        path: PathBuf::from(relative),
         protocol,
         limitation,
     }
 }
 
-fn state_file(request: &InstallRequest) -> PathBuf {
-    request
-        .root
-        .join(STATE_DIRECTORY)
-        .join(format!("install-{}.json", request.host.as_str()))
+fn state_relative_path(request: &InstallRequest) -> PathBuf {
+    PathBuf::from(STATE_DIRECTORY).join(format!("install-{}.json", request.host.as_str()))
 }
 
-fn read_install_state(path: &Path) -> Result<Option<InstallState>, HookError> {
-    if !path.is_file() {
+fn read_install_state(
+    managed: &ManagedRoot,
+    relative: &Path,
+) -> Result<Option<InstallState>, HookError> {
+    let Some(content) = managed.read_optional_utf8_bounded(relative, MAX_HOST_FILE_BYTES)? else {
         return Ok(None);
-    }
-    let content = fs::read_to_string(path).map_err(|source| HookError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    };
     let state =
         serde_json::from_str(&content).map_err(|error| HookError::InvalidConfiguration {
-            path: path.to_path_buf(),
+            path: managed.absolute(relative),
             message: error.to_string(),
         })?;
     Ok(Some(state))
 }
 
-fn configure_generated_state_ignore(root: &Path) -> Result<(Option<PathBuf>, bool), HookError> {
-    let canonical_root = fs::canonicalize(root).map_err(|source| HookError::Io {
-        path: root.to_path_buf(),
-        source,
-    })?;
-    if !belongs_to_git_worktree(&canonical_root) {
+fn configure_generated_state_ignore(
+    managed: &ManagedRoot,
+) -> Result<(Option<PathBuf>, bool), HookError> {
+    let canonical_root = managed.root();
+    if !belongs_to_git_worktree(canonical_root) {
         return Ok((None, false));
     }
-    let (path, updated) = ensure_generated_state_ignored(root)?;
-    Ok((Some(path), updated))
+    let (relative, updated) = ensure_generated_state_ignored(managed)?;
+    Ok((Some(managed.absolute(&relative)), updated))
 }
 
 fn belongs_to_git_worktree(root: &Path) -> bool {
@@ -315,25 +311,22 @@ fn valid_git_worktree_marker(marker: &Path) -> bool {
         .is_some_and(|line| line.trim_start().starts_with("gitdir:"))
 }
 
-fn ensure_generated_state_ignored(root: &Path) -> Result<(PathBuf, bool), HookError> {
-    let path = root.join(".gitignore");
-    let mut content = match fs::read(&path) {
-        Ok(content) => content,
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        Err(source) => {
-            return Err(HookError::Io { path, source });
-        }
-    };
+fn ensure_generated_state_ignored(managed: &ManagedRoot) -> Result<(PathBuf, bool), HookError> {
+    let relative = PathBuf::from(".gitignore");
+    let content = managed
+        .read_optional_bytes_bounded(&relative, MAX_HOST_FILE_BYTES)?
+        .unwrap_or_default();
     if generated_state_is_ignored(&content) {
-        return Ok((path, false));
+        return Ok((relative, false));
     }
-    if !content.is_empty() && !content.ends_with(b"\n") {
-        content.push(b'\n');
+    let mut updated = content;
+    if !updated.is_empty() && !updated.ends_with(b"\n") {
+        updated.push(b'\n');
     }
-    content.extend_from_slice(GENERATED_STATE_IGNORE_RULE);
-    content.push(b'\n');
-    atomic_write(&path, &content)?;
-    Ok((path, true))
+    updated.extend_from_slice(GENERATED_STATE_IGNORE_RULE);
+    updated.push(b'\n');
+    managed.atomic_write(&relative, &updated)?;
+    Ok((relative, true))
 }
 
 fn generated_state_is_ignored(content: &[u8]) -> bool {
@@ -355,15 +348,16 @@ fn generated_state_is_ignored(content: &[u8]) -> bool {
 }
 
 fn install_json_hook(
+    managed: &ManagedRoot,
     request: &InstallRequest,
-    path: &Path,
+    relative: &Path,
     event: &str,
     runtime: &Path,
     backups: &mut Vec<PathBuf>,
 ) -> Result<bool, HookError> {
-    let (mut root, existed) = read_json_object(path)?;
-    let hooks = object_field_mut(&mut root, "hooks", path)?;
-    let entries = array_field_mut(hooks, event, path)?;
+    let (mut root, existed) = read_json_object(managed, relative)?;
+    let hooks = object_field_mut(&mut root, "hooks", managed, relative)?;
+    let entries = array_field_mut(hooks, event, managed, relative)?;
     let owned = owned_json_entry(request, runtime);
     if entries.iter().any(is_owned_json) {
         if entries.iter().any(|entry| entry == &owned) {
@@ -372,7 +366,7 @@ fn install_json_hook(
         entries.retain(|entry| !is_owned_json(entry));
     }
     entries.push(owned);
-    write_value(path, &root, existed, backups)
+    write_value(managed, relative, &root, existed, backups)
 }
 
 fn owned_json_entry(request: &InstallRequest, runtime: &Path) -> Value {
@@ -416,14 +410,15 @@ fn owned_json_entry_with_policy(
 }
 
 fn uninstall_json_hook(
-    path: &Path,
+    managed: &ManagedRoot,
+    relative: &Path,
     event: &str,
     backups: &mut Vec<PathBuf>,
 ) -> Result<bool, HookError> {
-    if !path.exists() {
+    if !managed.regular_file_exists(relative)? {
         return Ok(false);
     }
-    let (mut root, _) = read_json_object(path)?;
+    let (mut root, _) = read_json_object(managed, relative)?;
     let Some(hooks) = root.get_mut("hooks").and_then(Value::as_object_mut) else {
         return Ok(false);
     };
@@ -441,21 +436,22 @@ fn uninstall_json_hook(
     if hooks.is_empty() {
         root.as_object_mut().map(|object| object.remove("hooks"));
     }
-    write_value(path, &root, true, backups)
+    write_value(managed, relative, &root, true, backups)
 }
 
 fn json_hook_installed(
+    managed: &ManagedRoot,
     request: &InstallRequest,
-    path: &Path,
+    relative: &Path,
     event: &str,
     runtime: &Path,
     policy: bool,
 ) -> Result<bool, HookError> {
-    if !path.exists() {
+    if !managed.regular_file_exists(relative)? {
         return Ok(false);
     }
     let owned = owned_json_entry_with_policy(request, runtime, policy);
-    let (root, _) = read_json_object(path)?;
+    let (root, _) = read_json_object(managed, relative)?;
     Ok(root
         .get("hooks")
         .and_then(|hooks| hooks.get(event))
@@ -464,11 +460,12 @@ fn json_hook_installed(
 }
 
 fn install_guidance(
+    managed: &ManagedRoot,
     request: &InstallRequest,
-    path: &Path,
+    relative: &Path,
     backups: &mut Vec<PathBuf>,
 ) -> Result<bool, HookError> {
-    let existing = read_optional_string(path)?;
+    let existing = read_optional_string(managed, relative)?;
     let marker = begin_marker(request.host);
     let block = guidance_block(request.host, request.codegraph_enabled);
     if existing
@@ -481,7 +478,7 @@ fn install_guidance(
         Some(content) if content.contains(&marker) => {
             let without_owned = remove_marked_block(&content, request.host).ok_or_else(|| {
                 HookError::InvalidConfiguration {
-                    path: path.to_path_buf(),
+                    path: managed.absolute(relative),
                     message: "managed guidance has an incomplete marker block".to_owned(),
                 }
             })?;
@@ -500,7 +497,13 @@ fn install_guidance(
         }
         None => guidance_scaffold(request.host, &block),
     };
-    write_string(path, &updated, path.exists(), backups)
+    write_string(
+        managed,
+        relative,
+        &updated,
+        managed.regular_file_exists(relative)?,
+        backups,
+    )
 }
 
 fn guidance_scaffold(host: HostKind, block: &str) -> String {
@@ -527,12 +530,13 @@ fn guidance_block(host: HostKind, codegraph_enabled: bool) -> String {
 }
 
 fn remove_guidance(
+    managed: &ManagedRoot,
     request: &InstallRequest,
-    path: &Path,
+    relative: &Path,
     backups: &mut Vec<PathBuf>,
     removed_files: &mut Vec<PathBuf>,
 ) -> Result<bool, HookError> {
-    let Some(content) = read_optional_string(path)? else {
+    let Some(content) = read_optional_string(managed, relative)? else {
         return Ok(false);
     };
     let Some(updated) = remove_marked_block(&content, request.host) else {
@@ -543,26 +547,24 @@ fn remove_guidance(
             == format!(
                 "---\ndescription: Code System Graph routing guidance ({PRODUCT_MARKER})\nalwaysApply: true\n---"
             );
-    backup(path, backups)?;
+    backup(managed, relative, backups)?;
     if updated.trim().is_empty() || generated_cursor_scaffold {
-        fs::remove_file(path).map_err(|source| HookError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
-        removed_files.push(path.to_path_buf());
+        managed.remove_file_if_exists(relative)?;
+        removed_files.push(managed.absolute(relative));
     } else {
-        atomic_write(path, updated.as_bytes())?;
+        managed.atomic_write(relative, updated.as_bytes())?;
     }
     Ok(true)
 }
 
 fn install_strict_gate(
+    managed: &ManagedRoot,
     request: &InstallRequest,
     backups: &mut Vec<PathBuf>,
     warnings: &mut Vec<String>,
 ) -> Result<bool, HookError> {
-    let path = git_pre_commit(request)?;
-    let existing = read_optional_string(&path)?;
+    let relative = git_pre_commit(managed)?;
+    let existing = read_optional_string(managed, &relative)?;
     let marker = begin_marker(request.host);
     if existing
         .as_deref()
@@ -573,7 +575,7 @@ fn install_strict_gate(
     if existing.as_deref().is_some_and(contains_product_reference) {
         warnings.push(format!(
             "another Code System Graph pre-commit hook exists in `{}`; it was preserved",
-            path.display()
+            managed.absolute(&relative).display()
         ));
     }
     let block = strict_gate_block(request);
@@ -588,9 +590,15 @@ fn install_strict_gate(
         }
         None => format!("#!/bin/sh\n\n{block}"),
     };
-    let changed = write_string(&path, &updated, path.exists(), backups)?;
+    let changed = write_string(
+        managed,
+        &relative,
+        &updated,
+        managed.regular_file_exists(&relative)?,
+        backups,
+    )?;
     if changed {
-        make_executable(&path)?;
+        make_executable(&managed.absolute(&relative))?;
     }
     Ok(changed)
 }
@@ -614,69 +622,91 @@ fn strict_gate_block(request: &InstallRequest) -> String {
 }
 
 fn remove_strict_gate(
+    managed: &ManagedRoot,
     request: &InstallRequest,
     backups: &mut Vec<PathBuf>,
     removed_files: &mut Vec<PathBuf>,
 ) -> Result<bool, HookError> {
-    let Some(path) = optional_git_pre_commit(request)? else {
+    let Some(relative) = optional_git_pre_commit(managed)? else {
         return Ok(false);
     };
-    let Some(content) = read_optional_string(&path)? else {
+    let Some(content) = read_optional_string(managed, &relative)? else {
         return Ok(false);
     };
     let Some(updated) = remove_marked_block(&content, request.host) else {
         return Ok(false);
     };
-    backup(&path, backups)?;
+    backup(managed, &relative, backups)?;
     if updated.trim() == "#!/bin/sh" || updated.trim().is_empty() {
-        fs::remove_file(&path).map_err(|source| HookError::Io {
-            path: path.clone(),
-            source,
-        })?;
-        removed_files.push(path);
+        managed.remove_file_if_exists(&relative)?;
+        removed_files.push(managed.absolute(&relative));
     } else {
-        atomic_write(&path, updated.as_bytes())?;
-        make_executable(&path)?;
+        managed.atomic_write(&relative, updated.as_bytes())?;
+        make_executable(&managed.absolute(&relative))?;
     }
     Ok(true)
 }
 
-fn git_pre_commit(request: &InstallRequest) -> Result<PathBuf, HookError> {
-    optional_git_pre_commit(request)?.ok_or_else(|| HookError::InvalidConfiguration {
-        path: request.root.clone(),
+fn git_pre_commit(managed: &ManagedRoot) -> Result<PathBuf, HookError> {
+    optional_git_pre_commit(managed)?.ok_or_else(|| HookError::InvalidConfiguration {
+        path: managed.root().to_path_buf(),
         message: "strict mode requires a Git repository worktree".to_owned(),
     })
 }
 
-fn optional_git_pre_commit(request: &InstallRequest) -> Result<Option<PathBuf>, HookError> {
-    let dot_git = request.root.join(".git");
-    if dot_git.is_dir() {
-        return Ok(Some(dot_git.join("hooks/pre-commit")));
+fn optional_git_pre_commit(managed: &ManagedRoot) -> Result<Option<PathBuf>, HookError> {
+    let dot_git = Path::new(".git");
+    if managed.is_directory(dot_git)? {
+        return Ok(Some(PathBuf::from(".git/hooks/pre-commit")));
     }
-    if !dot_git.exists() {
+    if !managed.entry_exists(dot_git)? {
         return Ok(None);
     }
-    let content = fs::read_to_string(&dot_git).map_err(|source| HookError::Io {
-        path: dot_git.clone(),
-        source,
-    })?;
+    let content = managed.read_utf8_bounded(dot_git, 4_096)?;
     let relative = content
         .trim()
         .strip_prefix("gitdir:")
         .map(str::trim)
         .ok_or_else(|| HookError::InvalidConfiguration {
-            path: dot_git.clone(),
+            path: managed.absolute(dot_git),
             message: "expected a Git directory or `gitdir:` pointer".to_owned(),
         })?;
-    let git_dir = request.root.join(relative);
+    let git_dir = Path::new(relative);
+    let git_dir = if git_dir.is_absolute() {
+        let canonical = fs::canonicalize(git_dir).map_err(|source| HookError::Io {
+            path: git_dir.to_path_buf(),
+            source,
+        })?;
+        if !canonical.starts_with(managed.root()) {
+            return Err(HookError::InvalidConfiguration {
+                path: canonical,
+                message: "Git metadata escapes the authorized repository root".to_owned(),
+            });
+        }
+        match canonical.strip_prefix(managed.root()) {
+            Ok(path) => path.to_path_buf(),
+            Err(_) => {
+                return Err(HookError::InvalidConfiguration {
+                    path: canonical,
+                    message: "Git metadata escapes the authorized repository root".to_owned(),
+                });
+            }
+        }
+    } else {
+        git_dir.to_path_buf()
+    };
     Ok(Some(git_dir.join("hooks/pre-commit")))
 }
 
-fn duplicate_warnings(request: &InstallRequest, spec: &HostSpec) -> Result<Vec<String>, HookError> {
+fn duplicate_warnings(
+    managed: &ManagedRoot,
+    request: &InstallRequest,
+    spec: &HostSpec,
+) -> Result<Vec<String>, HookError> {
     let mut warnings = Vec::new();
     match spec.protocol {
-        HostProtocol::Json { event } if spec.path.exists() => {
-            let (root, _) = read_json_object(&spec.path)?;
+        HostProtocol::Json { event } if managed.regular_file_exists(&spec.path)? => {
+            let (root, _) = read_json_object(managed, &spec.path)?;
             if root
                 .get("hooks")
                 .and_then(|hooks| hooks.get(event))
@@ -689,18 +719,18 @@ fn duplicate_warnings(request: &InstallRequest, spec: &HostSpec) -> Result<Vec<S
             {
                 warnings.push(format!(
                     "another Code System Graph hook exists in `{}` and was preserved",
-                    spec.path.display()
+                    managed.absolute(&spec.path).display()
                 ));
             }
         }
-        HostProtocol::Guidance if spec.path.exists() => {
-            if let Some(content) = read_optional_string(&spec.path)?
+        HostProtocol::Guidance if managed.regular_file_exists(&spec.path)? => {
+            if let Some(content) = read_optional_string(managed, &spec.path)?
                 && !content.contains(&begin_marker(request.host))
                 && contains_product_reference(&content)
             {
                 warnings.push(format!(
                     "another Code System Graph guidance file exists in `{}` and was preserved",
-                    spec.path.display()
+                    managed.absolute(&spec.path).display()
                 ));
             }
         }
@@ -709,22 +739,19 @@ fn duplicate_warnings(request: &InstallRequest, spec: &HostSpec) -> Result<Vec<S
     Ok(warnings)
 }
 
-fn read_json_object(path: &Path) -> Result<(Value, bool), HookError> {
-    if !path.exists() {
+fn read_json_object(managed: &ManagedRoot, relative: &Path) -> Result<(Value, bool), HookError> {
+    if !managed.regular_file_exists(relative)? {
         return Ok((Value::Object(Map::new()), false));
     }
-    let bytes = fs::read(path).map_err(|source| HookError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    let content = managed.read_utf8_bounded(relative, MAX_HOST_FILE_BYTES)?;
     let value: Value =
-        serde_json::from_slice(&bytes).map_err(|source| HookError::InvalidConfiguration {
-            path: path.to_path_buf(),
+        serde_json::from_str(&content).map_err(|source| HookError::InvalidConfiguration {
+            path: managed.absolute(relative),
             message: source.to_string(),
         })?;
     if !value.is_object() {
         return Err(HookError::InvalidConfiguration {
-            path: path.to_path_buf(),
+            path: managed.absolute(relative),
             message: "top-level JSON value must be an object".to_owned(),
         });
     }
@@ -734,12 +761,13 @@ fn read_json_object(path: &Path) -> Result<(Value, bool), HookError> {
 fn object_field_mut<'a>(
     root: &'a mut Value,
     key: &str,
-    path: &Path,
+    managed: &ManagedRoot,
+    relative: &Path,
 ) -> Result<&'a mut Map<String, Value>, HookError> {
     let object = root
         .as_object_mut()
         .ok_or_else(|| HookError::InvalidConfiguration {
-            path: path.to_path_buf(),
+            path: managed.absolute(relative),
             message: "top-level JSON value must be an object".to_owned(),
         })?;
     let value = object
@@ -748,7 +776,7 @@ fn object_field_mut<'a>(
     value
         .as_object_mut()
         .ok_or_else(|| HookError::InvalidConfiguration {
-            path: path.to_path_buf(),
+            path: managed.absolute(relative),
             message: format!("`{key}` must be an object"),
         })
 }
@@ -756,7 +784,8 @@ fn object_field_mut<'a>(
 fn array_field_mut<'a>(
     object: &'a mut Map<String, Value>,
     key: &str,
-    path: &Path,
+    managed: &ManagedRoot,
+    relative: &Path,
 ) -> Result<&'a mut Vec<Value>, HookError> {
     let value = object
         .entry(key.to_owned())
@@ -764,7 +793,7 @@ fn array_field_mut<'a>(
     value
         .as_array_mut()
         .ok_or_else(|| HookError::InvalidConfiguration {
-            path: path.to_path_buf(),
+            path: managed.absolute(relative),
             message: format!("hook event `{key}` must be an array"),
         })
 }
@@ -814,118 +843,95 @@ fn remove_marked_block(content: &str, host: HostKind) -> Option<String> {
     Some(updated.trim_end().to_owned() + "\n")
 }
 
-fn file_contains(path: &Path, needle: &str) -> Result<bool, HookError> {
-    Ok(read_optional_string(path)?
+fn file_contains(managed: &ManagedRoot, relative: &Path, needle: &str) -> Result<bool, HookError> {
+    Ok(read_optional_string(managed, relative)?
         .as_deref()
         .is_some_and(|content| content.contains(needle)))
 }
 
-fn read_optional_string(path: &Path) -> Result<Option<String>, HookError> {
-    match fs::read_to_string(path) {
-        Ok(content) => Ok(Some(content)),
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(source) => Err(HookError::Io {
-            path: path.to_path_buf(),
-            source,
-        }),
-    }
+fn read_optional_string(
+    managed: &ManagedRoot,
+    relative: &Path,
+) -> Result<Option<String>, HookError> {
+    managed.read_optional_utf8_bounded(relative, MAX_HOST_FILE_BYTES)
 }
 
 fn write_json_if_changed<T: Serialize>(
-    path: &Path,
+    managed: &ManagedRoot,
+    relative: &Path,
     value: &T,
     backup_existing: bool,
     backups: &mut Vec<PathBuf>,
 ) -> Result<bool, HookError> {
     let bytes = serde_json::to_vec_pretty(value)?;
-    write_bytes_if_changed(path, &bytes, backup_existing, backups)
+    write_bytes_if_changed(managed, relative, &bytes, backup_existing, backups)
 }
 
 fn write_value(
-    path: &Path,
+    managed: &ManagedRoot,
+    relative: &Path,
     value: &Value,
     existed: bool,
     backups: &mut Vec<PathBuf>,
 ) -> Result<bool, HookError> {
     let mut bytes = serde_json::to_vec_pretty(value)?;
     bytes.push(b'\n');
-    write_bytes_if_changed(path, &bytes, existed, backups)
+    write_bytes_if_changed(managed, relative, &bytes, existed, backups)
 }
 
 fn write_string(
-    path: &Path,
+    managed: &ManagedRoot,
+    relative: &Path,
     content: &str,
     existed: bool,
     backups: &mut Vec<PathBuf>,
 ) -> Result<bool, HookError> {
-    write_bytes_if_changed(path, content.as_bytes(), existed, backups)
+    write_bytes_if_changed(managed, relative, content.as_bytes(), existed, backups)
 }
 
 fn write_bytes_if_changed(
-    path: &Path,
+    managed: &ManagedRoot,
+    relative: &Path,
     bytes: &[u8],
     backup_existing: bool,
     backups: &mut Vec<PathBuf>,
 ) -> Result<bool, HookError> {
-    if fs::read(path).ok().as_deref() == Some(bytes) {
+    if managed
+        .read_optional_utf8_bounded(relative, MAX_HOST_FILE_BYTES)?
+        .is_some_and(|existing| existing.as_bytes() == bytes)
+    {
         return Ok(false);
     }
-    if backup_existing && path.exists() {
-        backup(path, backups)?;
+    if backup_existing && managed.regular_file_exists(relative)? {
+        backup(managed, relative, backups)?;
     }
-    atomic_write(path, bytes)?;
+    managed.atomic_write(relative, bytes)?;
     Ok(true)
 }
 
-fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), HookError> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| HookError::InvalidConfiguration {
-            path: path.to_path_buf(),
-            message: "managed file has no parent".to_owned(),
-        })?;
-    fs::create_dir_all(parent).map_err(|source| HookError::Io {
-        path: parent.to_path_buf(),
-        source,
-    })?;
-    let mut destination = AtomicWriteFile::open(path).map_err(|source| HookError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    destination
-        .write_all(bytes)
-        .and_then(|()| destination.sync_all())
-        .map_err(|source| HookError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
-    destination.commit().map_err(|source| HookError::Io {
-        path: path.to_path_buf(),
-        source,
-    })
-}
-
-fn backup(path: &Path, backups: &mut Vec<PathBuf>) -> Result<(), HookError> {
+fn backup(
+    managed: &ManagedRoot,
+    relative: &Path,
+    backups: &mut Vec<PathBuf>,
+) -> Result<(), HookError> {
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| HookError::InvalidSystemTime)?;
-    let file_name = path
+    let file_name = relative
         .file_name()
         .ok_or_else(|| HookError::InvalidConfiguration {
-            path: path.to_path_buf(),
+            path: managed.absolute(relative),
             message: "backup source has no file name".to_owned(),
         })?
         .to_string_lossy();
-    let backup_path = path.with_file_name(format!(
+    let backup_relative = relative.with_file_name(format!(
         "{file_name}.bak.code-system-graph.{}-{}",
         stamp.as_secs(),
         stamp.subsec_nanos()
     ));
-    fs::copy(path, &backup_path).map_err(|source| HookError::Io {
-        path: backup_path.clone(),
-        source,
-    })?;
-    backups.push(backup_path);
+    let content = managed.read_utf8_bounded(relative, MAX_HOST_FILE_BYTES)?;
+    managed.atomic_write(&backup_relative, content.as_bytes())?;
+    backups.push(managed.absolute(&backup_relative));
     Ok(())
 }
 

@@ -291,6 +291,31 @@ pub fn contains_unsafe_metadata_characters(value: &str) -> bool {
     })
 }
 
+/// Rejects repository-relative path display strings that are unsafe for metadata or diagnostics.
+///
+/// # Errors
+///
+/// Returns [`UnsafePathDisplayError`] when `value` contains control or bidirectional characters.
+pub fn validate_safe_path_display(value: &str) -> Result<(), UnsafePathDisplayError> {
+    if contains_unsafe_metadata_characters(value) {
+        Err(UnsafePathDisplayError)
+    } else {
+        Ok(())
+    }
+}
+
+/// Path display string contains unsafe metadata characters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnsafePathDisplayError;
+
+impl std::fmt::Display for UnsafePathDisplayError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("path display contains unsafe control or bidirectional characters")
+    }
+}
+
+impl std::error::Error for UnsafePathDisplayError {}
+
 /// Kind of entity represented in the federated graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]

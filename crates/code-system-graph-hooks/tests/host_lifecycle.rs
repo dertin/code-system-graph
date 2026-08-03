@@ -16,6 +16,18 @@ fn request(root: &std::path::Path, host: HostKind) -> InstallRequest {
 }
 
 #[test]
+fn uninstall_on_clean_repository_without_hooks_directory_should_be_noop()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temporary = tempfile::tempdir()?;
+    std::fs::create_dir_all(temporary.path().join(".git/hooks"))?;
+    std::fs::write(temporary.path().join(".git/HEAD"), "ref: refs/heads/main\n")?;
+    let removal = uninstall(&request(temporary.path(), HostKind::Cursor))?;
+    assert!(!removal.changed);
+    assert!(removal.removed_files.is_empty());
+    Ok(())
+}
+
+#[test]
 fn every_supported_host_should_install_idempotently_and_uninstall_surgically()
 -> Result<(), Box<dyn std::error::Error>> {
     let temporary = tempfile::tempdir()?;
@@ -68,6 +80,26 @@ fn hook_install_should_preserve_gitignore_and_add_generated_state_once()
         )?,
         "target/\n.code-system-graph/\n"
     );
+    Ok(())
+}
+
+#[test]
+fn hook_install_should_preserve_non_utf8_gitignore_bytes() -> Result<(), Box<dyn std::error::Error>>
+{
+    let temporary = tempfile::tempdir()?;
+    std::fs::create_dir(temporary.path().join(".git"))?;
+    std::fs::write(temporary.path().join(".git/HEAD"), "ref: refs/heads/main\n")?;
+    std::fs::write(temporary.path().join(".gitignore"), b"target/\n\xff\xfe\n")?;
+    let request = request(temporary.path(), HostKind::Codex);
+
+    let first = install(&request)?;
+    let second = install(&request)?;
+
+    assert!(first.gitignore_updated);
+    assert!(!second.gitignore_updated);
+    let content = std::fs::read(temporary.path().join(".gitignore"))?;
+    assert_eq!(&content[..11], b"target/\n\xff\xfe\n");
+    assert!(content.ends_with(b".code-system-graph/\n"));
     Ok(())
 }
 

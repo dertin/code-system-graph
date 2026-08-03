@@ -440,6 +440,8 @@ dependencies = [
  "globset",
  "graphql-parser",
  "hcl-rs",
+ "libc",
+ "nix 0.31.3",
  "proto-parser",
  "pulldown-cmark",
  "reqwest",
@@ -480,6 +482,8 @@ version = "1.0.0"
 dependencies = [
  "atomic-write-file",
  "blake3",
+ "libc",
+ "nix 0.31.3",
  "schemars",
  "serde",
  "serde_json",
