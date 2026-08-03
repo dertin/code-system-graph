@@ -84,6 +84,26 @@ fn hook_install_should_preserve_gitignore_and_add_generated_state_once()
 }
 
 #[test]
+fn hook_install_should_preserve_non_utf8_gitignore_bytes() -> Result<(), Box<dyn std::error::Error>>
+{
+    let temporary = tempfile::tempdir()?;
+    std::fs::create_dir(temporary.path().join(".git"))?;
+    std::fs::write(temporary.path().join(".git/HEAD"), "ref: refs/heads/main\n")?;
+    std::fs::write(temporary.path().join(".gitignore"), b"target/\n\xff\xfe\n")?;
+    let request = request(temporary.path(), HostKind::Codex);
+
+    let first = install(&request)?;
+    let second = install(&request)?;
+
+    assert!(first.gitignore_updated);
+    assert!(!second.gitignore_updated);
+    let content = std::fs::read(temporary.path().join(".gitignore"))?;
+    assert_eq!(&content[..11], b"target/\n\xff\xfe\n");
+    assert!(content.ends_with(b".code-system-graph/\n"));
+    Ok(())
+}
+
+#[test]
 fn cursor_advisory_guidance_should_support_non_git_workspace_roots()
 -> Result<(), Box<dyn std::error::Error>> {
     let temporary = tempfile::tempdir()?;

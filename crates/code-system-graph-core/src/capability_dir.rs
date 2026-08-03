@@ -325,6 +325,68 @@ fn is_symlink_or_reparse_point(metadata: &fs::Metadata) -> bool {
     }
 }
 
+/// Walks one relative directory chain without following symbolic links or reparse points.
+#[cfg_attr(unix, allow(dead_code))]
+fn walk_directory_chain(
+    root: &Path,
+    relative: &Path,
+    create: bool,
+) -> Result<PathBuf, CapabilityError> {
+    if relative.as_os_str().is_empty() {
+        return Ok(root.to_path_buf());
+    }
+
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        let Component::Normal(name) = component else {
+            continue;
+        };
+        current.push(name);
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) => {
+                if is_symlink_or_reparse_point(&metadata) {
+                    return Err(CapabilityError::Symlink {
+                        path: current.clone(),
+                    });
+                }
+                if !metadata.is_dir() {
+                    return Err(CapabilityError::NotDirectory { path: current });
+                }
+            }
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                if !create {
+                    return Err(CapabilityError::Io {
+                        path: current.clone(),
+                        source,
+                    });
+                }
+                fs::create_dir(&current).map_err(|source| CapabilityError::Io {
+                    path: current.clone(),
+                    source,
+                })?;
+                let metadata =
+                    fs::symlink_metadata(&current).map_err(|source| CapabilityError::Io {
+                        path: current.clone(),
+                        source,
+                    })?;
+                if is_symlink_or_reparse_point(&metadata) {
+                    return Err(CapabilityError::Symlink { path: current });
+                }
+                if !metadata.is_dir() {
+                    return Err(CapabilityError::NotDirectory { path: current });
+                }
+            }
+            Err(source) => {
+                return Err(CapabilityError::Io {
+                    path: current,
+                    source,
+                });
+            }
+        }
+    }
+    Ok(current)
+}
+
 #[cfg(unix)]
 fn open_directory_nofollow(path: &Path) -> Result<File, CapabilityError> {
     use std::fs::OpenOptions;
@@ -586,20 +648,15 @@ fn atomic_write_portable(
 ) -> Result<(), CapabilityError> {
     use atomic_write_file::AtomicWriteFile;
 
-    let path = root.join(relative);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|source| CapabilityError::Io {
-            path: parent.to_path_buf(),
-            source,
-        })?;
-        let metadata = fs::symlink_metadata(parent).map_err(|source| CapabilityError::Io {
-            path: parent.to_path_buf(),
-            source,
-        })?;
+    let (parent, file_name) = split_relative(relative)?;
+    let parent_path = walk_directory_chain(root, parent, true)?;
+    let path = parent_path.join(file_name);
+    if let Ok(metadata) = fs::symlink_metadata(&path) {
         if is_symlink_or_reparse_point(&metadata) {
-            return Err(CapabilityError::Symlink {
-                path: parent.to_path_buf(),
-            });
+            return Err(CapabilityError::Symlink { path: path.clone() });
+        }
+        if metadata.is_dir() {
+            return Err(CapabilityError::NotRegularFile { path });
         }
     }
     let mut destination = AtomicWriteFile::open(&path).map_err(|source| CapabilityError::Io {
@@ -645,6 +702,27 @@ mod tests {
             let limit = buf.len().min(self.chunk_size);
             self.inner.read(&mut buf[..limit])
         }
+    }
+
+    #[test]
+    fn walk_directory_chain_should_reject_intermediate_symlink()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temporary = tempfile::tempdir()?;
+        let root = temporary.path().join("repo");
+        let outside = temporary.path().join("outside");
+        std::fs::create_dir_all(&root)?;
+        std::fs::create_dir_all(&outside)?;
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, root.join(".code-system-graph"))?;
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(&outside, root.join(".code-system-graph"))?;
+
+        let result =
+            super::walk_directory_chain(&root, Path::new(".code-system-graph/hooks"), true);
+
+        assert!(matches!(result, Err(CapabilityError::Symlink { .. })));
+        assert!(!outside.join("hooks").exists());
+        Ok(())
     }
 
     #[test]

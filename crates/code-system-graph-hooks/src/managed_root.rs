@@ -162,6 +162,23 @@ impl ManagedRoot {
     ///
     /// Returns [`HookError`] when the relative path is invalid, the file is unsafe, or the read
     /// exceeds `max_bytes`.
+    pub fn read_optional_bytes_bounded(
+        &self,
+        relative: &Path,
+        max_bytes: usize,
+    ) -> Result<Option<Vec<u8>>, HookError> {
+        if !self.regular_file_exists(relative)? {
+            return Ok(None);
+        }
+        self.read_bytes_bounded(relative, max_bytes).map(Some)
+    }
+
+    /// Reads a bounded file relative to the authorized root when it exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HookError`] when the relative path is invalid, the file is unsafe, or the read
+    /// exceeds `max_bytes`.
     pub fn read_optional_utf8_bounded(
         &self,
         relative: &Path,
@@ -330,6 +347,62 @@ fn is_symlink_or_reparse_point(metadata: &fs::Metadata) -> bool {
             false
         }
     }
+}
+
+/// Walks one relative directory chain without following symbolic links or reparse points.
+#[cfg_attr(unix, allow(dead_code))]
+fn walk_directory_chain(
+    root: &Path,
+    relative: &Path,
+    create: bool,
+) -> Result<PathBuf, CapabilityIoError> {
+    if relative.as_os_str().is_empty() {
+        return Ok(root.to_path_buf());
+    }
+
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        let Component::Normal(name) = component else {
+            continue;
+        };
+        current.push(name);
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) => {
+                if is_symlink_or_reparse_point(&metadata) {
+                    return Err(CapabilityIoError::Symlink);
+                }
+                if !metadata.is_dir() {
+                    return Err(CapabilityIoError::Io {
+                        source: std::io::Error::new(
+                            std::io::ErrorKind::NotADirectory,
+                            "managed path component is not a directory",
+                        ),
+                    });
+                }
+            }
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                if !create {
+                    return Err(CapabilityIoError::Io { source });
+                }
+                fs::create_dir(&current).map_err(|source| CapabilityIoError::Io { source })?;
+                let metadata = fs::symlink_metadata(&current)
+                    .map_err(|source| CapabilityIoError::Io { source })?;
+                if is_symlink_or_reparse_point(&metadata) {
+                    return Err(CapabilityIoError::Symlink);
+                }
+                if !metadata.is_dir() {
+                    return Err(CapabilityIoError::Io {
+                        source: std::io::Error::new(
+                            std::io::ErrorKind::NotADirectory,
+                            "managed path component is not a directory",
+                        ),
+                    });
+                }
+            }
+            Err(source) => return Err(CapabilityIoError::Io { source }),
+        }
+    }
+    Ok(current)
 }
 
 #[cfg(unix)]
@@ -568,13 +641,22 @@ fn atomic_write_portable(
 ) -> Result<(), CapabilityIoError> {
     use atomic_write_file::AtomicWriteFile;
 
-    let path = root.join(relative);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|source| CapabilityIoError::Io { source })?;
-        let metadata =
-            fs::symlink_metadata(parent).map_err(|source| CapabilityIoError::Io { source })?;
+    let (parent, file_name) = split_relative(relative).map_err(|error| CapabilityIoError::Io {
+        source: std::io::Error::new(std::io::ErrorKind::InvalidInput, error.to_string()),
+    })?;
+    let parent_path = walk_directory_chain(root, parent, true)?;
+    let path = parent_path.join(file_name);
+    if let Ok(metadata) = fs::symlink_metadata(&path) {
         if is_symlink_or_reparse_point(&metadata) {
             return Err(CapabilityIoError::Symlink);
+        }
+        if metadata.is_dir() {
+            return Err(CapabilityIoError::Io {
+                source: std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    "managed path is a directory",
+                ),
+            });
         }
     }
     let mut destination =
@@ -635,6 +717,27 @@ mod tests {
             let limit = buf.len().min(self.chunk_size);
             self.inner.read(&mut buf[..limit])
         }
+    }
+
+    #[test]
+    fn walk_directory_chain_should_reject_intermediate_symlink()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temporary = tempfile::tempdir()?;
+        let root = temporary.path().join("repo");
+        let outside = temporary.path().join("outside");
+        std::fs::create_dir_all(&root)?;
+        std::fs::create_dir_all(&outside)?;
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, root.join(".code-system-graph"))?;
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(&outside, root.join(".code-system-graph"))?;
+
+        let result =
+            super::walk_directory_chain(&root, Path::new(".code-system-graph/hooks"), true);
+
+        assert!(matches!(result, Err(super::CapabilityIoError::Symlink)));
+        assert!(!outside.join("hooks").exists());
+        Ok(())
     }
 
     #[test]

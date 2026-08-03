@@ -313,10 +313,9 @@ fn valid_git_worktree_marker(marker: &Path) -> bool {
 
 fn ensure_generated_state_ignored(managed: &ManagedRoot) -> Result<(PathBuf, bool), HookError> {
     let relative = PathBuf::from(".gitignore");
-    let content = match managed.read_optional_utf8_bounded(&relative, MAX_HOST_FILE_BYTES)? {
-        Some(content) => content.into_bytes(),
-        None => Vec::new(),
-    };
+    let content = managed
+        .read_optional_bytes_bounded(&relative, MAX_HOST_FILE_BYTES)?
+        .unwrap_or_default();
     if generated_state_is_ignored(&content) {
         return Ok((relative, false));
     }
