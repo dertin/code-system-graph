@@ -4,11 +4,18 @@ use std::process::Command;
 #[cfg(unix)]
 use std::time::Duration;
 
-use super::{SQLITE_ARTIFACT_SUFFIXES, artifact_path, remove_database_artifacts};
-use crate::{SqliteStore, StoreError};
+use super::remove_database_artifacts;
+#[cfg(unix)]
+use super::{SQLITE_ARTIFACT_SUFFIXES, artifact_path};
+#[cfg(unix)]
+use crate::SqliteStore;
+use crate::StoreError;
 
+#[cfg(unix)]
 const UMASK_HELPER_ENV: &str = "CODE_SYSTEM_GRAPH_UMASK_PERMISSION_HELPER";
+#[cfg(unix)]
 const UMASK_READY_ENV: &str = "CODE_SYSTEM_GRAPH_UMASK_PERMISSION_READY";
+#[cfg(unix)]
 const UMASK_DATABASE_ENV: &str = "CODE_SYSTEM_GRAPH_UMASK_PERMISSION_DATABASE";
 
 #[cfg(unix)]
@@ -61,12 +68,12 @@ fn artifact_cleanup_should_report_unremovable_sidecar() -> Result<(), Box<dyn st
     Ok(())
 }
 
+#[cfg(unix)]
 #[test]
 fn umask_permission_helper() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::var(UMASK_HELPER_ENV).as_deref() != Ok("1") {
         return Ok(());
     }
-    #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
 

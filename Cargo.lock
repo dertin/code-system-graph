@@ -507,6 +507,7 @@ dependencies = [
 name = "code-system-graph-store-sqlite"
 version = "1.0.0"
 dependencies = [
+ "blake3",
  "code-system-graph-model",
  "libc",
  "rusqlite",

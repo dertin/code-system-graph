@@ -1,3 +1,5 @@
+#[cfg(any(target_os = "linux", target_os = "android", windows))]
+use std::cell::Cell;
 use std::fs;
 use std::path::Path;
 use std::sync::{Arc, Condvar, Mutex};
@@ -9,8 +11,8 @@ use code_system_graph_model::{
 use rusqlite::Connection;
 
 #[cfg(unix)]
-use super::StagedDatabase;
-use super::{ensure_distinct_paths, open_backup_source, restore_database};
+use super::{StagedDatabase, ensure_distinct_paths};
+use super::{open_backup_source, restore_database};
 use crate::{SnapshotBatch, SqliteStore, StoreError};
 
 fn fixture() -> (Vec<Node>, Vec<Edge>, Vec<Evidence>) {
@@ -217,12 +219,14 @@ fn restore_should_not_overwrite_destination_created_during_staging()
         &destination,
         &backup,
         || {},
+        |_| {},
         |_| {
             fs::write(&destination, b"foreign-destination").map_err(|source| StoreError::Io {
                 path: destination.clone(),
                 source,
             })
         },
+        || Ok(()),
     );
 
     assert!(result.is_err());
@@ -302,31 +306,161 @@ fn restore_should_preserve_replaced_database_as_safety_backup()
     Ok(())
 }
 
-#[cfg(any(target_os = "linux", target_os = "android"))]
 #[test]
-fn restore_should_hold_exclusive_sqlite_lock_until_atomic_publication()
+fn restore_should_replace_invalid_schema_and_preserve_it_as_safety_backup()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temporary = tempfile::tempdir()?;
+    let database = temporary.path().join("store.db");
+    let backup = temporary.path().join("selected-backup.db");
+    {
+        let mut store = seeded_store(&database, "snapshot:before")?;
+        store.backup_to(&backup)?;
+        seed_snapshot(&mut store, "snapshot:damaged")?;
+    }
+    Connection::open(&database)?
+        .execute_batch("DROP TRIGGER query_cache_bound_workspace_entries")?;
+
+    let report = SqliteStore::restore_from(&database, &backup)?;
+    let restored = SqliteStore::open_read_only(&database)?.current_snapshot_summary("commerce")?;
+    let safety_path = report
+        .safety_backup_path
+        .ok_or_else(|| std::io::Error::other("restore safety backup missing"))?;
+    let preserved_trigger_count = Connection::open(safety_path)?.query_row(
+        "SELECT count(*) FROM sqlite_schema
+         WHERE type = 'trigger' AND name = 'query_cache_bound_workspace_entries'",
+        [],
+        |row| row.get::<_, i64>(0),
+    )?;
+
+    assert_eq!(
+        (restored.snapshot_id.as_str(), preserved_trigger_count),
+        ("snapshot:before", 0)
+    );
+    Ok(())
+}
+
+#[test]
+fn restore_should_replace_page_corruption_and_preserve_a_safety_copy()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temporary = tempfile::tempdir()?;
+    let database = temporary.path().join("store.db");
+    let backup = temporary.path().join("selected-backup.db");
+    seed_backup(&database, &backup, "snapshot:0")?;
+    let mut damaged = fs::read(&database)?;
+    damaged.truncate(damaged.len() / 2);
+    fs::write(&database, damaged)?;
+
+    let report = SqliteStore::restore_from(&database, &backup)?;
+    let restored = SqliteStore::open_read_only(&database)?.current_snapshot_summary("commerce")?;
+
+    assert_eq!(restored.snapshot_id, "snapshot:0");
+    assert!(report.safety_backup_path.is_some());
+    Ok(())
+}
+
+#[test]
+fn corrupt_restore_should_reject_sidecars_created_before_publication()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temporary = tempfile::tempdir()?;
+    let database = temporary.path().join("store.db");
+    let backup = temporary.path().join("selected-backup.db");
+    let wal = temporary.path().join("store.db-wal");
+    seed_backup(&database, &backup, "snapshot:0")?;
+    let mut damaged = fs::read(&database)?;
+    damaged.truncate(damaged.len() / 2);
+    fs::write(&database, &damaged)?;
+
+    let result = restore_database(
+        &database,
+        &backup,
+        || {},
+        |_| {},
+        |_| Ok(()),
+        || {
+            fs::write(&wal, b"uncheckpointed-pages").map_err(|source| StoreError::Io {
+                path: wal.clone(),
+                source,
+            })
+        },
+    );
+
+    assert!(result.is_err());
+    assert_eq!(fs::read(&database)?, damaged);
+    assert_eq!(fs::read(&wal)?, b"uncheckpointed-pages");
+    Ok(())
+}
+
+#[cfg(any(target_os = "linux", target_os = "android", windows))]
+#[test]
+fn restore_should_lock_destination_before_safety_backup_is_reported()
 -> Result<(), Box<dyn std::error::Error>> {
     let temporary = tempfile::tempdir()?;
     let database = temporary.path().join("store.db");
     let backup = temporary.path().join("backup.db");
     seed_backup(&database, &backup, "snapshot:0")?;
 
+    let competing_writer_was_blocked = Cell::new(false);
     restore_database(
         &database,
         &backup,
         || {},
         |_| {
-            let contender = Connection::open(&database)?;
-            contender.busy_timeout(Duration::ZERO)?;
+            let contender = Connection::open(&database).expect("open competing writer");
+            contender
+                .busy_timeout(Duration::ZERO)
+                .expect("configure competing writer");
             let write = contender.execute_batch("BEGIN IMMEDIATE");
-            assert!(
-                write.is_err(),
-                "another SQLite writer must not create sidecars during publication"
-            );
-            Ok(())
+            competing_writer_was_blocked.set(write.is_err());
         },
+        |_| Ok(()),
+        || Ok(()),
     )?;
 
+    assert!(
+        competing_writer_was_blocked.get(),
+        "another SQLite writer must be blocked before the safety backup is exposed"
+    );
+    Ok(())
+}
+
+#[cfg(windows)]
+#[test]
+fn restore_should_reject_destination_changes_after_lock_release()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temporary = tempfile::tempdir()?;
+    let database = temporary.path().join("store.db");
+    let backup = temporary.path().join("backup.db");
+    seed_backup(&database, &backup, "snapshot:0")?;
+
+    let result = restore_database(
+        &database,
+        &backup,
+        || {},
+        |_| {},
+        |_| Ok(()),
+        || {
+            let connection = Connection::open(&database)?;
+            let journal_mode =
+                connection.query_row("PRAGMA journal_mode", [], |row| row.get::<_, String>(0))?;
+            assert_eq!(journal_mode, "delete");
+            connection.pragma_update(None, "user_version", 73)?;
+            let user_version =
+                connection.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))?;
+            assert_eq!(user_version, 73);
+            drop(connection);
+            let persisted =
+                Connection::open(&database)?
+                    .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))?;
+            assert_eq!(persisted, 73);
+            Ok(())
+        },
+    );
+    let user_version =
+        Connection::open(&database)?
+            .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))?;
+
+    assert!(result.is_err());
+    assert_eq!(user_version, 73);
     Ok(())
 }
 
@@ -407,6 +541,7 @@ fn restore_should_not_replace_destination_swapped_during_staging()
         &database,
         &backup,
         || {},
+        |_| {},
         |_| {
             fs::remove_file(&database).map_err(|source| StoreError::Io {
                 path: database.clone(),
@@ -417,6 +552,7 @@ fn restore_should_not_replace_destination_swapped_during_staging()
                 source,
             })
         },
+        || Ok(()),
     );
 
     assert!(result.is_err());
@@ -441,12 +577,14 @@ fn failed_restore_should_preserve_original_without_publication()
         &database,
         &backup,
         || {},
+        |_| {},
         |_| {
             Err(StoreError::InvalidBackup {
                 path: database.clone(),
                 reason: "injected post-copy failure".to_owned(),
             })
         },
+        || Ok(()),
     );
 
     assert!(matches!(result, Err(StoreError::InvalidBackup { .. })));
@@ -535,7 +673,9 @@ fn restore_should_copy_from_pinned_source_snapshot() -> Result<(), Box<dyn std::
                 drop(ready);
                 std::thread::sleep(Duration::from_millis(50));
             },
+            |_| {},
             |_| Ok(()),
+            || Ok(()),
         )?;
         Ok(())
     });

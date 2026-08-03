@@ -493,7 +493,14 @@ impl SqliteStore {
         database_path: &Path,
         backup_path: &Path,
     ) -> Result<RestoreReport, StoreError> {
-        restore_database(database_path, backup_path, || {}, |_| Ok(()))
+        restore_database(
+            database_path,
+            backup_path,
+            || {},
+            |_| {},
+            |_| Ok(()),
+            || Ok(()),
+        )
     }
 
     /// Opens an existing store without writes or implicit schema changes.

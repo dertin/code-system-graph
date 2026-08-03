@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+blake3 = "1.8.5"
 code-system-graph-model = { version = "1.0.0", path = "../code-system-graph-model" }
 rusqlite = { version = "0.40.1", features = ["backup", "bundled"] }
 same-file = "1.0.6"
@@ -28,4 +29,5 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_Security",
     "Win32_Security_Authorization",
     "Win32_Storage_FileSystem",
+    "Win32_System_Threading",
 ] }
