@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+
+repository_root=$(git rev-parse --show-toplevel)
+cd "$repository_root"
+
+printf '%s\n' 'pre-push: checking Rust formatting with nightly'
+cargo +nightly fmt --all -- --check
+
+printf '%s\n' 'pre-push: running Clippy with nightly'
+cargo +nightly clippy --workspace --exclude code-system-graph-fuzz --all-targets --all-features --locked -- -D warnings

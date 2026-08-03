@@ -25,6 +25,12 @@ Install the additional quality toolchain once:
 rustup toolchain install nightly --profile minimal --component rustfmt --component clippy
 ```
 
+Optional local Git hooks (format + Clippy before `git push`, excluding the weekly fuzz crate):
+
+```text
+scripts/install-git-hooks.sh
+```
+
 Create a focused branch, keep each change reviewable, and include tests and documentation that
 describe the resulting public behavior. Before opening a pull request, run:
 
