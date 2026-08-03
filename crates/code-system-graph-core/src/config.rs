@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    ContractImplementationConfig, HttpConsumerConfig, IgnorePatternError, IgnorePolicy, IntegrationTestConfig, RepositoryConfig, validate_excludes, validate_include_defaults
+    CapabilityDir, CapabilityError, ContractImplementationConfig, HttpConsumerConfig, IgnorePatternError, IgnorePolicy, IntegrationTestConfig, MAX_REPOSITORY_CONFIG_BYTES, RepositoryConfig, validate_excludes, validate_include_defaults
 };
 
 const LOCAL_CONFIG_NAME: &str = ".code-system-graph.yaml";
@@ -147,6 +147,34 @@ pub enum ConfigError {
         #[source]
         source: IgnorePatternError,
     },
+    /// Repository-local configuration is a symbolic link or reparse point.
+    #[error("repository config `{path}` is a symbolic link or reparse point")]
+    Symlink {
+        /// Configuration path.
+        path: PathBuf,
+    },
+    /// Repository-local configuration is not a regular file.
+    #[error("repository config `{path}` is not a regular file")]
+    NotRegularFile {
+        /// Configuration path.
+        path: PathBuf,
+    },
+    /// Repository-local configuration exceeds the accepted size limit.
+    #[error("repository config `{path}` exceeds {limit} bytes")]
+    TooLarge {
+        /// Configuration path.
+        path: PathBuf,
+        /// Maximum accepted size in bytes.
+        limit: usize,
+    },
+    /// Repository-local configuration resolves outside the checkout root.
+    #[error("repository config `{path}` is outside checkout `{checkout}`")]
+    OutsideCheckout {
+        /// Configuration path.
+        path: PathBuf,
+        /// Canonical checkout root.
+        checkout: PathBuf,
+    },
 }
 
 /// Resolves workspace, repository-local, auto-detected, and default values in that order.
@@ -162,12 +190,17 @@ pub fn resolve_repository_config(
     checkout_path: &Path,
     workspace: &RepositoryConfig,
 ) -> Result<EffectiveRepositoryConfig, ConfigError> {
-    let local_path = checkout_path.join(LOCAL_CONFIG_NAME);
-    let (local, local_source) = if local_path.exists() {
-        let source = std::fs::read_to_string(&local_path).map_err(|source| ConfigError::Read {
-            path: local_path.clone(),
-            source,
-        })?;
+    let checkout = CapabilityDir::open(checkout_path)
+        .map_err(|error| map_capability_error(error, checkout_path, LOCAL_CONFIG_NAME))?;
+    let local_relative = Path::new(LOCAL_CONFIG_NAME);
+    let (local, local_source) = if checkout
+        .regular_file_exists(local_relative)
+        .map_err(|error| map_capability_error(error, checkout_path, LOCAL_CONFIG_NAME))?
+    {
+        let local_path = checkout_path.join(LOCAL_CONFIG_NAME);
+        let source = checkout
+            .read_utf8_file_bounded(local_relative, MAX_REPOSITORY_CONFIG_BYTES)
+            .map_err(|error| map_capability_error(error, checkout_path, LOCAL_CONFIG_NAME))?;
         let config: RepositoryLocalConfig =
             crate::yaml::from_str(&source).map_err(|source| ConfigError::Invalid {
                 path: local_path.clone(),
@@ -247,6 +280,26 @@ pub fn resolve_repository_config(
         implementations_source,
         fingerprint: stable_id("repo-config", &fingerprint_material),
     })
+}
+
+fn map_capability_error(error: CapabilityError, checkout: &Path, config_name: &str) -> ConfigError {
+    let path = checkout.join(config_name);
+    match error {
+        CapabilityError::Io { path, source } => ConfigError::Read { path, source },
+        CapabilityError::Symlink { .. } => ConfigError::Symlink { path },
+        CapabilityError::NotRegularFile { .. } => ConfigError::NotRegularFile { path },
+        CapabilityError::TooLarge { limit, .. } => ConfigError::TooLarge { path, limit },
+        CapabilityError::OutsideRoot { root, .. } => ConfigError::OutsideCheckout {
+            path,
+            checkout: root,
+        },
+        CapabilityError::InvalidRelativePath { .. }
+        | CapabilityError::NotDirectory { .. }
+        | CapabilityError::InvalidUtf8 { .. } => ConfigError::Read {
+            path,
+            source: std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string()),
+        },
+    }
 }
 
 fn discover_openapi_candidates(
@@ -688,6 +741,60 @@ mod tests {
         let result = resolve_repository_config(repository.path(), &workspace);
 
         assert!(matches!(result, Err(ConfigError::Invalid { .. })));
+        Ok(())
+    }
+
+    #[test]
+    fn repository_local_config_should_reject_symlink() -> Result<(), Box<dyn std::error::Error>> {
+        let temporary = tempfile::tempdir()?;
+        let repository = temporary.path().join("repository");
+        let outside = temporary.path().join("outside.yaml");
+        std::fs::create_dir_all(&repository)?;
+        std::fs::write(&outside, "version: 1\n")?;
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, repository.join(".code-system-graph.yaml"))?;
+        let workspace = RepositoryConfig {
+            path: ".".to_owned(),
+            openapi: None,
+            http_consumers: None,
+            integration_tests: None,
+            implementations: None,
+            excludes: None,
+            include_defaults: None,
+        };
+
+        let result = resolve_repository_config(&repository, &workspace);
+
+        assert!(matches!(
+            result,
+            Err(ConfigError::Symlink { .. }
+                | ConfigError::OutsideCheckout { .. }
+                | ConfigError::NotRegularFile { .. })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn repository_local_config_should_reject_oversized_file()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let repository = tempfile::tempdir()?;
+        std::fs::write(
+            repository.path().join(".code-system-graph.yaml"),
+            "x".repeat(crate::capability_dir::MAX_REPOSITORY_CONFIG_BYTES + 1),
+        )?;
+        let workspace = RepositoryConfig {
+            path: ".".to_owned(),
+            openapi: None,
+            http_consumers: None,
+            integration_tests: None,
+            implementations: None,
+            excludes: None,
+            include_defaults: None,
+        };
+
+        let result = resolve_repository_config(repository.path(), &workspace);
+
+        assert!(matches!(result, Err(ConfigError::TooLarge { .. })));
         Ok(())
     }
 

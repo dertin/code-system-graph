@@ -14,6 +14,8 @@ blake3 = "1.8.5"
 graphql-parser = "0.4.1"
 globset = "0.4.19"
 hcl-rs = "0.19.7"
+libc = "0.2"
+nix = { version = "0.31.3", features = ["fs"] }
 proto-parser = "1.14.3"
 pulldown-cmark = "0.13.4"
 code-system-graph-model = { version = "1.0.0", path = "../code-system-graph-model" }

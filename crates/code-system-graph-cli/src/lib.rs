@@ -174,6 +174,12 @@ pub enum ApplicationError {
         /// Canonical checkout root.
         checkout: PathBuf,
     },
+    /// Artifact path display contains unsafe metadata characters.
+    #[error("artifact path `{path}` contains unsafe control or bidirectional characters")]
+    UnsafeArtifactPath {
+        /// Repository-relative artifact path display.
+        path: String,
+    },
     /// Persistent storage failed.
     #[error(transparent)]
     Store(#[from] StoreError),
@@ -268,6 +274,7 @@ pub const fn application_exit_code(error: &ApplicationError) -> ExitCode {
         | ApplicationError::UnknownOverrideRepository(_)
         | ApplicationError::WorkspaceNameMismatch { .. }
         | ApplicationError::ArtifactOutsideCheckout { .. }
+        | ApplicationError::UnsafeArtifactPath { .. }
         | ApplicationError::PartialScanBudgetChanged
         | ApplicationError::Trace(_)
         | ApplicationError::Community(_)
@@ -5824,18 +5831,24 @@ fn fingerprint_artifact(
             path: canonical_path.clone(),
             source,
         })?;
-    let mut tracker = ExtractionTracker::new(relative_path.to_string_lossy(), extractor, budgets);
-    let content = read_bounded_bytes(&canonical_path, &mut tracker)?;
     let relative = canonical_path.strip_prefix(checkout_path).map_err(|_| {
         ApplicationError::ArtifactOutsideCheckout {
             path: canonical_path.clone(),
             checkout: checkout_path.to_path_buf(),
         }
     })?;
+    let path = encode_native_path(relative);
+    code_system_graph_model::validate_safe_path_display(&path.display).map_err(|_| {
+        ApplicationError::UnsafeArtifactPath {
+            path: path.display.clone(),
+        }
+    })?;
+    let mut tracker = ExtractionTracker::new(&path.display, extractor, budgets);
+    let content = read_bounded_bytes(&canonical_path, &mut tracker)?;
     let fingerprint = ArtifactFingerprint {
         repo_id: repository.id.clone(),
         checkout_id: repository.checkout_id.clone(),
-        path: encode_native_path(relative),
+        path,
         extractor: extractor.to_owned(),
         content_hash: stable_id_bytes("artifact-content", &content),
         size_bytes: metadata.len(),

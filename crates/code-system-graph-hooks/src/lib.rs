@@ -6,6 +6,7 @@
 //! change analysis.
 
 mod install;
+mod managed_root;
 mod routing;
 mod types;
 

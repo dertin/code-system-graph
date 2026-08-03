@@ -824,7 +824,7 @@ impl SqliteStore {
 
     /// Loads current extractor batches whose payload fits within `maximum_payload_bytes`.
     ///
-    /// Oversized rows are omitted before SQLite copies their BLOB into the process. Callers can
+    /// Oversized rows are omitted before `SQLite` copies their BLOB into the process. Callers can
     /// consequently treat them as cache misses and recompute them under the active policy.
     ///
     /// # Errors
@@ -1446,6 +1446,7 @@ impl SqliteStore {
             community_snapshot,
         } = batch;
         validate_graph_snapshot(nodes, edges, evidence)?;
+        validate_artifact_fingerprints(fingerprints)?;
         validate_manual_links(snapshot_id, manual_links, Some(nodes))?;
         validate_community_snapshot(snapshot_id, nodes, community_snapshot)?;
         let transaction = self.connection.transaction()?;
@@ -2182,6 +2183,22 @@ fn validate_backup(connection: &Connection, path: &Path) -> Result<(), StoreErro
         });
     }
     validate_exact_schema(connection)
+}
+
+fn validate_artifact_fingerprints(fingerprints: &[ArtifactFingerprint]) -> Result<(), StoreError> {
+    const MAX_PATH_DISPLAY_BYTES: usize = 4 * 1024;
+
+    for fingerprint in fingerprints {
+        validate_safe_metadata(
+            "artifact path display",
+            &fingerprint.path.display,
+            1,
+            MAX_PATH_DISPLAY_BYTES,
+        )?;
+        validate_safe_metadata("extractor", &fingerprint.extractor, 1, 256)?;
+        validate_safe_metadata("artifact content hash", &fingerprint.content_hash, 1, 128)?;
+    }
+    Ok(())
 }
 
 fn validate_graph_snapshot(
