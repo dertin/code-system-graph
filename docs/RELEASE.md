@@ -57,6 +57,15 @@ cargo deny check
 cargo audit --deny warnings
 ```
 
+When refreshing registry dependencies before a release, use
+[cargo-cooldown](https://github.com/dertin/cargo-cooldown) with the workspace `cooldown.toml`
+policy instead of plain `cargo update`:
+
+```text
+cargo install --locked cargo-cooldown
+cargo cooldown update
+```
+
 The release-mode scale workloads are intentionally ignored during the normal test suite:
 
 ```text

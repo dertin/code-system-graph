@@ -1,0 +1,112 @@
+# Supply-chain cooldown policy for registry dependency updates.
+# Use `cargo cooldown update` instead of `cargo update`.
+# See https://github.com/dertin/cargo-cooldown
+
+[cooldown]
+incompatible-publish-age = "deny"
+lockfile-baseline = "floor"
+
+[registry]
+global-min-publish-age = "14 days"
+
+# TLS, SSL, and cryptography crates may need security patches sooner.
+# Allow rules only reduce the effective cooldown; they never increase it.
+[[allow.package]]
+crate = "aws-lc-rs"
+min-publish-age = "2 days"
+
+[[allow.package]]
+crate = "aws-lc-sys"
+min-publish-age = "2 days"
+
+[[allow.package]]
+crate = "getrandom"
+min-publish-age = "2 days"
+
+[[allow.package]]
+crate = "hyper-rustls"
+min-publish-age = "2 days"
+
+[[allow.package]]
+crate = "native-tls"
+min-publish-age = "2 days"
+
+[[allow.package]]
+crate = "openssl"
+min-publish-age = "2 days"
+
+[[allow.package]]
+crate = "openssl-probe"
+min-publish-age = "2 days"
+
+[[allow.package]]
+crate = "openssl-sys"
+min-publish-age = "2 days"
+
+[[allow.package]]
+crate = "quinn"
+min-publish-age = "2 days"
+
+[[allow.package]]
+crate = "quinn-proto"
+min-publish-age = "2 days"
+
+[[allow.package]]
+crate = "quinn-udp"
+min-publish-age = "2 days"
+
+[[allow.package]]
+crate = "reqwest"
+min-publish-age = "2 days"
+
+[[allow.package]]
+crate = "ring"
+min-publish-age = "2 days"
+
+[[allow.package]]
+crate = "rustls"
+min-publish-age = "2 days"
+
+[[allow.package]]
+crate = "rustls-native-certs"
+min-publish-age = "2 days"
+
+[[allow.package]]
+crate = "rustls-pki-types"
+min-publish-age = "2 days"
+
+[[allow.package]]
+crate = "rustls-platform-verifier"
+min-publish-age = "2 days"
+
+[[allow.package]]
+crate = "rustls-platform-verifier-android"
+min-publish-age = "2 days"
+
+[[allow.package]]
+crate = "rustls-webpki"
+min-publish-age = "2 days"
+
+[[allow.package]]
+crate = "sct"
+min-publish-age = "2 days"
+
+[[allow.package]]
+crate = "subtle"
+min-publish-age = "2 days"
+
+[[allow.package]]
+crate = "tokio-rustls"
+min-publish-age = "2 days"
+
+[[allow.package]]
+crate = "untrusted"
+min-publish-age = "2 days"
+
+[[allow.package]]
+crate = "webpki-root-certs"
+min-publish-age = "2 days"
+
+[[allow.package]]
+crate = "zeroize"
+min-publish-age = "2 days"
