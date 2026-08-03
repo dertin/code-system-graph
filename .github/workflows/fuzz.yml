@@ -11,6 +11,8 @@ permissions:
 jobs:
   fuzz:
     runs-on: ubuntu-latest
+    env:
+      RUSTUP_TOOLCHAIN: nightly
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@master
