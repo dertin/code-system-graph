@@ -10,6 +10,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
+use crate::{ExtractionLimitExceeded, ExtractionTracker};
+
 const HTTP_METHODS: [&str; 8] = [
     "DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT", "TRACE",
 ];
@@ -183,6 +185,81 @@ pub struct SourceObservation {
     pub warnings: Vec<SourceWarning>,
 }
 
+pub(crate) struct SourceObservationCollector<'a> {
+    observations: Vec<SourceObservation>,
+    tracker: Option<&'a mut ExtractionTracker>,
+    error: Option<ExtractionLimitExceeded>,
+}
+
+impl<'a> SourceObservationCollector<'a> {
+    pub(crate) fn unbounded() -> Self {
+        Self {
+            observations: Vec::new(),
+            tracker: None,
+            error: None,
+        }
+    }
+
+    pub(crate) fn bounded(tracker: &'a mut ExtractionTracker) -> Self {
+        Self {
+            observations: Vec::new(),
+            tracker: Some(tracker),
+            error: None,
+        }
+    }
+
+    pub(crate) fn push(&mut self, observation: SourceObservation) {
+        if self.error.is_some() {
+            return;
+        }
+        if let Some(tracker) = self.tracker.as_deref_mut()
+            && let Err(error) = tracker
+                .charge_observation(1)
+                .and_then(|()| charge_source_observation_values(&observation, tracker))
+        {
+            self.error = Some(error);
+            return;
+        }
+        self.observations.push(observation);
+    }
+
+    pub(crate) fn into_result(self) -> Result<Vec<SourceObservation>, ExtractionLimitExceeded> {
+        match self.error {
+            Some(error) => Err(error),
+            None => Ok(self.observations),
+        }
+    }
+
+    pub(crate) fn into_unbounded(self) -> Vec<SourceObservation> {
+        self.observations
+    }
+}
+
+pub(crate) fn charge_source_observation_values(
+    observation: &SourceObservation,
+    tracker: &mut ExtractionTracker,
+) -> Result<(), ExtractionLimitExceeded> {
+    if let Some(method) = &observation.method {
+        tracker.charge_identifier(method)?;
+    }
+    if let Some(path) = &observation.path {
+        tracker.charge_portable_path(path)?;
+    }
+    for symbol in [
+        observation.symbol_name.as_deref(),
+        observation.related_symbol.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        tracker.charge_identifier(symbol)?;
+    }
+    if let Some(path) = &observation.related_path {
+        tracker.charge_portable_path(path)?;
+    }
+    Ok(())
+}
+
 /// Parses the mandatory focused Rust framework matrix.
 ///
 /// Supported syntax comprises Axum `route` declarations, Actix Web route attributes and builder
@@ -190,10 +267,16 @@ pub struct SourceObservation {
 /// The returned vector is sorted and deduplicated deterministically.
 #[must_use]
 pub fn parse_rust_source(source: &str) -> Vec<SourceObservation> {
+    let collector = collect_rust_source(source, SourceObservationCollector::unbounded());
+    finish(collector.into_unbounded())
+}
+
+fn collect_rust_source<'a>(
+    source: &str,
+    mut observations: SourceObservationCollector<'a>,
+) -> SourceObservationCollector<'a> {
     let tokens = lex_rust(source);
     let functions = rust_functions(&tokens);
-    let mut observations = Vec::new();
-
     parse_rust_attributes(&tokens, &mut observations);
     if has_ident(&tokens, "axum") {
         parse_axum_routes(&tokens, &mut observations);
@@ -204,7 +287,21 @@ pub fn parse_rust_source(source: &str) -> Vec<SourceObservation> {
     if has_ident(&tokens, "reqwest") {
         parse_reqwest_calls(&tokens, &functions, &mut observations);
     }
-    finish(observations)
+    observations
+}
+
+/// Parses focused Rust facts while charging each attempted observation before retention.
+///
+/// # Errors
+///
+/// Returns [`ExtractionLimitExceeded`] before an observation or one of its values exceeds the
+/// effective per-artifact budget.
+pub fn parse_rust_source_with_tracker(
+    source: &str,
+    tracker: &mut ExtractionTracker,
+) -> Result<Vec<SourceObservation>, ExtractionLimitExceeded> {
+    let observations = collect_rust_source(source, SourceObservationCollector::bounded(tracker));
+    Ok(finish(observations.into_result()?))
 }
 
 /// Parses the mandatory focused Python framework matrix.
@@ -216,17 +313,37 @@ pub fn parse_rust_source(source: &str) -> Vec<SourceObservation> {
 /// lexically excluded from recognition. The returned vector is sorted and deduplicated.
 #[must_use]
 pub fn parse_python_source(source: &str) -> Vec<SourceObservation> {
+    let collector = collect_python_source(source, SourceObservationCollector::unbounded());
+    finish(collector.into_unbounded())
+}
+
+fn collect_python_source<'a>(
+    source: &str,
+    mut observations: SourceObservationCollector<'a>,
+) -> SourceObservationCollector<'a> {
     let tokens = lex_python(source);
     let functions = python_functions(source, &tokens);
     let contexts = PythonContexts::discover(&tokens);
-    let mut observations = Vec::new();
-
     parse_python_routes(&tokens, &contexts, &mut observations);
     parse_python_http_registries(&tokens, &mut observations);
     parse_python_http_calls(&tokens, &functions, &contexts, &mut observations);
     parse_python_factories(source, &tokens, &mut observations);
     parse_python_tests(source, &tokens, &mut observations);
-    finish(observations)
+    observations
+}
+
+/// Parses focused Python facts while charging each attempted observation before retention.
+///
+/// # Errors
+///
+/// Returns [`ExtractionLimitExceeded`] before an observation or one of its values exceeds the
+/// effective per-artifact budget.
+pub fn parse_python_source_with_tracker(
+    source: &str,
+    tracker: &mut ExtractionTracker,
+) -> Result<Vec<SourceObservation>, ExtractionLimitExceeded> {
+    let observations = collect_python_source(source, SourceObservationCollector::bounded(tracker));
+    Ok(finish(observations.into_result()?))
 }
 
 /// Normalizes a literal path using the same slash and trailing-separator rules as HTTP contracts.
@@ -612,7 +729,7 @@ fn enclosing_symbol(functions: &[FunctionSpan], token_index: usize) -> Option<St
         .map(|function| function.name.clone())
 }
 
-fn parse_rust_attributes(tokens: &[Token], observations: &mut Vec<SourceObservation>) {
+fn parse_rust_attributes(tokens: &[Token], observations: &mut SourceObservationCollector<'_>) {
     let mut index = 0;
     while index + 2 < tokens.len() {
         if !tokens[index].is_punct('#') || !tokens[index + 1].is_punct('[') {
@@ -676,7 +793,7 @@ fn parse_utoipa_attribute(
     function_index: usize,
     signature_end: usize,
     symbol: &str,
-    observations: &mut Vec<SourceObservation>,
+    observations: &mut SourceObservationCollector<'_>,
 ) {
     let Some(utoipa_index) = (start..close).find(|index| tokens[*index].is_ident("utoipa")) else {
         return;
@@ -809,7 +926,7 @@ fn parse_actix_attribute(
     signature_end: usize,
     symbol: String,
     path: &[String],
-    observations: &mut Vec<SourceObservation>,
+    observations: &mut SourceObservationCollector<'_>,
 ) {
     let direct_method = match path {
         [name] => canonical_method(name),
@@ -865,7 +982,7 @@ fn parse_actix_attribute(
     }
 }
 
-fn parse_axum_routes(tokens: &[Token], observations: &mut Vec<SourceObservation>) {
+fn parse_axum_routes(tokens: &[Token], observations: &mut SourceObservationCollector<'_>) {
     for (index, token) in tokens.iter().enumerate() {
         if !token.is_ident("route")
             || !tokens
@@ -904,7 +1021,7 @@ fn parse_axum_routes(tokens: &[Token], observations: &mut Vec<SourceObservation>
     }
 }
 
-fn parse_actix_builder_routes(tokens: &[Token], observations: &mut Vec<SourceObservation>) {
+fn parse_actix_builder_routes(tokens: &[Token], observations: &mut SourceObservationCollector<'_>) {
     for (index, token) in tokens.iter().enumerate() {
         if !token.is_ident("route")
             || !tokens
@@ -979,7 +1096,7 @@ fn parse_actix_builder_routes(tokens: &[Token], observations: &mut Vec<SourceObs
 fn parse_reqwest_calls(
     tokens: &[Token],
     functions: &[FunctionSpan],
-    observations: &mut Vec<SourceObservation>,
+    observations: &mut SourceObservationCollector<'_>,
 ) {
     let clients = rust_reqwest_clients(tokens);
     for index in 0..tokens.len() {
@@ -1685,7 +1802,7 @@ fn python_block_end(source: &str, start: u32, indent: usize, fallback: u32) -> u
 fn parse_python_routes(
     tokens: &[Token],
     contexts: &PythonContexts,
-    observations: &mut Vec<SourceObservation>,
+    observations: &mut SourceObservationCollector<'_>,
 ) {
     for index in 0..tokens.len() {
         if !tokens[index].is_punct('@') {
@@ -1846,7 +1963,10 @@ fn python_route_methods(
     methods
 }
 
-fn parse_python_http_registries(tokens: &[Token], observations: &mut Vec<SourceObservation>) {
+fn parse_python_http_registries(
+    tokens: &[Token],
+    observations: &mut SourceObservationCollector<'_>,
+) {
     for index in 0..tokens.len() {
         let Some(name) = tokens[index].ident() else {
             continue;
@@ -1876,7 +1996,7 @@ fn parse_python_http_registry_dict(
     open: usize,
     close: usize,
     prefix: &str,
-    observations: &mut Vec<SourceObservation>,
+    observations: &mut SourceObservationCollector<'_>,
     depth: usize,
 ) {
     if depth >= 32 {
@@ -1919,7 +2039,7 @@ fn parse_python_http_registry_value(
     end: usize,
     prefix: &str,
     key: &str,
-    observations: &mut Vec<SourceObservation>,
+    observations: &mut SourceObservationCollector<'_>,
     depth: usize,
 ) {
     if tokens.get(start).is_some_and(|token| token.is_punct('[')) {
@@ -2003,7 +2123,7 @@ fn canonical_python_registry_path(prefix: &str, segment: &str) -> String {
 fn parse_python_factories(
     source: &str,
     tokens: &[Token],
-    observations: &mut Vec<SourceObservation>,
+    observations: &mut SourceObservationCollector<'_>,
 ) {
     let imported_paths = python_imported_symbol_paths(tokens);
     let fallback = saturating_u32(source.lines().count().max(1));
@@ -2126,7 +2246,7 @@ fn parse_python_http_calls(
     tokens: &[Token],
     functions: &[FunctionSpan],
     contexts: &PythonContexts,
-    observations: &mut Vec<SourceObservation>,
+    observations: &mut SourceObservationCollector<'_>,
 ) {
     let receivers = contexts
         .request_modules
@@ -2230,7 +2350,11 @@ fn parse_python_http_calls(
     }
 }
 
-fn parse_python_tests(source: &str, tokens: &[Token], observations: &mut Vec<SourceObservation>) {
+fn parse_python_tests(
+    source: &str,
+    tokens: &[Token],
+    observations: &mut SourceObservationCollector<'_>,
+) {
     let unittest_classes = python_unittest_classes(source, tokens);
     let python_classes = python_class_ranges(source, tokens);
     for index in 0..tokens.len() {

@@ -20,6 +20,7 @@ fn every_supported_host_should_install_idempotently_and_uninstall_surgically()
 -> Result<(), Box<dyn std::error::Error>> {
     let temporary = tempfile::tempdir()?;
     std::fs::create_dir_all(temporary.path().join(".git/hooks"))?;
+    std::fs::write(temporary.path().join(".git/HEAD"), "ref: refs/heads/main\n")?;
     let hosts = [
         HostKind::ClaudeCode,
         HostKind::Codex,
@@ -50,6 +51,7 @@ fn hook_install_should_preserve_gitignore_and_add_generated_state_once()
 -> Result<(), Box<dyn std::error::Error>> {
     let temporary = tempfile::tempdir()?;
     std::fs::create_dir(temporary.path().join(".git"))?;
+    std::fs::write(temporary.path().join(".git/HEAD"), "ref: refs/heads/main\n")?;
     std::fs::write(temporary.path().join(".gitignore"), "target/")?;
     let request = request(temporary.path(), HostKind::Codex);
 

@@ -292,7 +292,27 @@ fn configure_generated_state_ignore(root: &Path) -> Result<(Option<PathBuf>, boo
 
 fn belongs_to_git_worktree(root: &Path) -> bool {
     root.ancestors()
-        .any(|ancestor| ancestor.join(".git").exists())
+        .any(|ancestor| valid_git_worktree_marker(&ancestor.join(".git")))
+}
+
+fn valid_git_worktree_marker(marker: &Path) -> bool {
+    let Ok(metadata) = fs::symlink_metadata(marker) else {
+        return false;
+    };
+    if metadata.file_type().is_dir() {
+        return fs::symlink_metadata(marker.join("HEAD"))
+            .is_ok_and(|head| head.file_type().is_file());
+    }
+    if !metadata.file_type().is_file() || metadata.len() > 4_096 {
+        return false;
+    }
+    let Ok(source) = fs::read_to_string(marker) else {
+        return false;
+    };
+    source
+        .lines()
+        .next()
+        .is_some_and(|line| line.trim_start().starts_with("gitdir:"))
 }
 
 fn ensure_generated_state_ignored(root: &Path) -> Result<(PathBuf, bool), HookError> {

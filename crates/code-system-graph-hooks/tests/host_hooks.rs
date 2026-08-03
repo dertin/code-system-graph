@@ -288,6 +288,7 @@ impl Fixture {
     fn new(host: HostKind) -> Result<Self, Box<dyn Error>> {
         let directory = tempfile::tempdir()?;
         fs::create_dir_all(directory.path().join(".git/hooks"))?;
+        fs::write(directory.path().join(".git/HEAD"), "ref: refs/heads/main\n")?;
         Ok(Self { directory, host })
     }
 

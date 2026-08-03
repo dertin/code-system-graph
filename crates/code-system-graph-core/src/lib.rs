@@ -148,10 +148,10 @@ pub use secret_safety::{
 };
 pub use source_graph::{SourceGraphFacts, source_observations_to_graph};
 pub use source_http::{
-    SourceEpistemicStatus, SourceFramework, SourceLanguage, SourceLineRange, SourceObservation, SourceRole, SourceWarning, normalize_source_http_path, parse_python_source, parse_rust_source
+    SourceEpistemicStatus, SourceFramework, SourceLanguage, SourceLineRange, SourceObservation, SourceRole, SourceWarning, normalize_source_http_path, parse_python_source, parse_python_source_with_tracker, parse_rust_source, parse_rust_source_with_tracker
 };
 pub use source_polyglot::{
-    parse_go_source, parse_java_source, parse_javascript_source, parse_javascript_source_at_path, parse_typescript_source, parse_typescript_source_at_path
+    parse_go_source, parse_go_source_with_tracker, parse_java_source, parse_java_source_with_tracker, parse_javascript_source, parse_javascript_source_at_path, parse_javascript_source_at_path_with_tracker, parse_typescript_source, parse_typescript_source_at_path, parse_typescript_source_at_path_with_tracker
 };
 pub use source_syntax::{
     SourceSyntaxError, SourceSyntaxInspection, SourceSyntaxLanguage, inspect_source_syntax

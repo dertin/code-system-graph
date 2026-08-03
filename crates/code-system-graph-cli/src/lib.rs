@@ -16,7 +16,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use atomic_write_file::AtomicWriteFile;
 use code_system_graph_core::{
-    AffectedTestsRequest, AnalyzerVersions, ArtifactKey, BatchAction, BatchPlanError, BitbucketProvider, ChangeAnalysisError, ChangeAnalysisOptions, ChangeError, ChangeImpactReport, ChangeProvider, ChangeRequest, ChangeScope, ChangeSet, CodeGraphConfig, CodeGraphProvider, CommunityError, ConfigDoctorInput, ConfigError, ConfigExtractionError, ContractReport, ContractRequest, CorroborationReport, DataDocument, DataExtractionError, DeclaredImplementation, DeclaredTestCase, DoctorReport, DoctorRequest, DocumentationDocument, DocumentationExtractionError, EXTRACTION_CONTRACT_VERSION, EffectiveRepositoryConfig, EventDocument, EventExtractionError, EventGraphFacts, ExecutionPolicy, ExitCode, ExportReport, ExportRequest, ExtractionBudgets, ExtractionGraphFacts, ExtractionLimitExceeded, ExtractionTracker, ExtractorBatch, ExtractorBatchPlan, FederatedGraph, FreshnessDoctorInput, GeneratedClientError, GeneratedClientMetadata, GitCliChangeProvider, GitHubProvider, GraphqlDocument, GraphqlExtractionError, GraphqlGraphFacts, HttpBoundary, HttpExtractionError, ImpactContext, ImpactError, ImpactReport, ImpactRequest, ImpactTarget, IncrementalPlan, InfrastructureDocument, InfrastructureExtractionError, IntegrityDoctorInput, InterfaceError, LinkError, LocalCodeIntelligenceProvider, LocalContextRequest, LocalContextResult, LocalEnrichmentInput, LocalEnrichmentStatus, LocalImpactItem, LocalImpactRequest, ManifestEdit, ManifestEditError, ManifestError, ManualLinkConfig, ManualLinkError, PackageGraphFacts, PackageManifest, PackageManifestError, PrAuthToken, ProtobufDocument, ProtobufExtractionError, ProtobufGraphFacts, ProviderBudget, ProviderCapability, ProviderDoctorInput, ProviderDoctorStatus, ProviderError, ProviderRequest, ProviderStatus, PullRequestCoordinates, PullRequestError, PullRequestInspectRequest, PullRequestInspection, PullRequestListPage, PullRequestListRequest, PullRequestListState, PullRequestProvider, PullRequestProviderConfig, PullRequestProviderKind, QueryError, RecommendedCommand, RegisteredWorkspace, RegistryError, ReqwestPrHttpTransport, SafeConfigDocument, SchemaDoctorInput, SearchFilters, SearchReport, SearchRequest, SourceEpistemicStatus, SourceGraphFacts, SourceLanguage, SourceObservation, SourceRole, SourceSyntaxError, SourceSyntaxLanguage, SourceWarning, SymbolAnchor, SymbolCorroboration, TraceError, TraversalReport, TraversalRequest, WorkspaceManifest, affected_link_keys, analyze_changes, analyze_communities_with_progress, analyze_impact, apply_openapi_override, charge_source_observation, classify_interface_error, commit_manifest_edit, compare_community_snapshots, corroborate_repository, declared_implementation, declared_test_case, doctor, documents_to_graph, encode_native_path, event_documents_to_graph, export_graph, extract_asyncapi, extract_codeowners, extract_data_artifact, extract_docker_compose, extract_generated_client_metadata, extract_graphql_document_with_tracker, extract_graphql_persisted_operations_with_tracker, extract_helm, extract_kubernetes, extract_markdown, extract_openapi_with_tracker, extract_package_manifest_with_tracker, extract_protobuf_with_tracker, extract_safe_config, extract_service_catalog, extract_terraform, graphql_documents_to_graph, inspect_contracts, inspect_source_syntax, link_declared_implementations, link_declared_tests, link_http_boundaries, link_registered_package_owners, load_extractor_batch_with_budgets, merge_affected_link_neighborhoods, package_manifest_to_graph, parse_event_source, parse_go_source, parse_graphql_source_with_tracker, parse_java_source, parse_javascript_source_at_path, parse_literal_sql_source_at_root, parse_manifest, parse_protobuf_generated_source, parse_python_source, parse_rust_source, parse_typescript_source_at_path, plan_extractor_batches, plan_incremental_scan, precheck_focused_source_values, preview_add_manual_link, preview_add_repository, preview_remove_repository, protobuf_documents_to_graph, register_workspace, resolve_manual_links, resolve_repository_config, search, source_observations_to_graph, store_extractor_batch, traverse
+    AffectedTestsRequest, AnalyzerVersions, ArtifactKey, BatchAction, BatchPlanError, BitbucketProvider, ChangeAnalysisError, ChangeAnalysisOptions, ChangeError, ChangeImpactReport, ChangeProvider, ChangeRequest, ChangeScope, ChangeSet, CodeGraphConfig, CodeGraphProvider, CommunityError, ConfigDoctorInput, ConfigError, ConfigExtractionError, ContractReport, ContractRequest, CorroborationReport, DataDocument, DataExtractionError, DeclaredImplementation, DeclaredTestCase, DoctorReport, DoctorRequest, DocumentationDocument, DocumentationExtractionError, EXTRACTION_CONTRACT_VERSION, EffectiveRepositoryConfig, EventDocument, EventExtractionError, EventGraphFacts, ExecutionPolicy, ExitCode, ExportReport, ExportRequest, ExtractionBudgets, ExtractionGraphFacts, ExtractionLimitExceeded, ExtractionTracker, ExtractorBatch, ExtractorBatchPlan, FederatedGraph, FreshnessDoctorInput, GeneratedClientError, GeneratedClientMetadata, GitCliChangeProvider, GitHubProvider, GraphqlDocument, GraphqlExtractionError, GraphqlGraphFacts, HttpBoundary, HttpExtractionError, ImpactContext, ImpactError, ImpactReport, ImpactRequest, ImpactTarget, IncrementalPlan, InfrastructureDocument, InfrastructureExtractionError, IntegrityDoctorInput, InterfaceError, LinkError, LocalCodeIntelligenceProvider, LocalContextRequest, LocalContextResult, LocalEnrichmentInput, LocalEnrichmentStatus, LocalImpactItem, LocalImpactRequest, ManifestEdit, ManifestEditError, ManifestError, ManualLinkConfig, ManualLinkError, PackageGraphFacts, PackageManifest, PackageManifestError, PrAuthToken, ProtobufDocument, ProtobufExtractionError, ProtobufGraphFacts, ProviderBudget, ProviderCapability, ProviderDoctorInput, ProviderDoctorStatus, ProviderError, ProviderRequest, ProviderStatus, PullRequestCoordinates, PullRequestError, PullRequestInspectRequest, PullRequestInspection, PullRequestListPage, PullRequestListRequest, PullRequestListState, PullRequestProvider, PullRequestProviderConfig, PullRequestProviderKind, QueryError, RecommendedCommand, RegisteredWorkspace, RegistryError, ReqwestPrHttpTransport, SafeConfigDocument, SchemaDoctorInput, SearchFilters, SearchReport, SearchRequest, SourceEpistemicStatus, SourceGraphFacts, SourceLanguage, SourceObservation, SourceRole, SourceSyntaxError, SourceSyntaxLanguage, SourceWarning, SymbolAnchor, SymbolCorroboration, TraceError, TraversalReport, TraversalRequest, WorkspaceManifest, affected_link_keys, analyze_changes, analyze_communities_with_progress, analyze_impact, apply_openapi_override, classify_interface_error, commit_manifest_edit, compare_community_snapshots, corroborate_repository, declared_implementation, declared_test_case, doctor, documents_to_graph, encode_native_path, event_documents_to_graph, export_graph, extract_asyncapi, extract_codeowners, extract_data_artifact, extract_docker_compose, extract_generated_client_metadata, extract_graphql_document_with_tracker, extract_graphql_persisted_operations_with_tracker, extract_helm, extract_kubernetes, extract_markdown, extract_openapi_with_tracker, extract_package_manifest_with_tracker, extract_protobuf_with_tracker, extract_safe_config, extract_service_catalog, extract_terraform, graphql_documents_to_graph, inspect_contracts, inspect_source_syntax, link_declared_implementations, link_declared_tests, link_http_boundaries, link_registered_package_owners, load_extractor_batch_with_budgets, merge_affected_link_neighborhoods, package_manifest_to_graph, parse_event_source, parse_go_source_with_tracker, parse_graphql_source_with_tracker, parse_java_source_with_tracker, parse_javascript_source_at_path_with_tracker, parse_literal_sql_source_at_root, parse_manifest, parse_protobuf_generated_source, parse_python_source_with_tracker, parse_rust_source_with_tracker, parse_typescript_source_at_path_with_tracker, plan_extractor_batches, plan_incremental_scan, precheck_focused_source_values, preview_add_manual_link, preview_add_repository, preview_remove_repository, protobuf_documents_to_graph, register_workspace, resolve_manual_links, resolve_repository_config, search, source_observations_to_graph, store_extractor_batch, traverse
 };
 pub use code_system_graph_core::{
     ConfigSource, DEFAULT_EXCLUDES, IgnorePolicy, PROTECTED_EXCLUDES
@@ -1039,7 +1039,27 @@ fn configure_generated_state_ignore(
 fn belongs_to_git_worktree(directory: &Path) -> bool {
     directory
         .ancestors()
-        .any(|ancestor| ancestor.join(".git").exists())
+        .any(|ancestor| valid_git_worktree_marker(&ancestor.join(".git")))
+}
+
+fn valid_git_worktree_marker(marker: &Path) -> bool {
+    let Ok(metadata) = fs::symlink_metadata(marker) else {
+        return false;
+    };
+    if metadata.file_type().is_dir() {
+        return fs::symlink_metadata(marker.join("HEAD"))
+            .is_ok_and(|head| head.file_type().is_file());
+    }
+    if !metadata.file_type().is_file() || metadata.len() > 4_096 {
+        return false;
+    }
+    let Ok(source) = fs::read_to_string(marker) else {
+        return false;
+    };
+    source
+        .lines()
+        .next()
+        .is_some_and(|line| line.trim_start().starts_with("gitdir:"))
 }
 
 fn ensure_generated_state_ignored(directory: &Path) -> Result<(PathBuf, bool), ApplicationError> {
@@ -3926,40 +3946,37 @@ fn assemble_focused_batches(
                         fingerprint.path.display
                     ))
                 })?;
-            tracker.check_observations(reserved_observations)?;
             tracker.charge_work(reserved_observations)?;
             precheck_focused_source_values(&source, &mut tracker)?;
             let mut observations = match fingerprint.extractor.as_str() {
-                "code-system-graph.source.javascript" => parse_javascript_source_at_path(
-                    &portable_path(&fingerprint.path.display),
-                    &source,
-                ),
-                "code-system-graph.source.typescript" => parse_typescript_source_at_path(
-                    &portable_path(&fingerprint.path.display),
-                    &source,
-                ),
-                "code-system-graph.source.rust" => parse_rust_source(&source),
-                "code-system-graph.source.python" => parse_python_source(&source),
-                "code-system-graph.source.go" => parse_go_source(&source),
-                "code-system-graph.source.java" => parse_java_source(&source),
+                "code-system-graph.source.javascript" => {
+                    parse_javascript_source_at_path_with_tracker(
+                        &portable_path(&fingerprint.path.display),
+                        &source,
+                        &mut tracker,
+                    )?
+                }
+                "code-system-graph.source.typescript" => {
+                    parse_typescript_source_at_path_with_tracker(
+                        &portable_path(&fingerprint.path.display),
+                        &source,
+                        &mut tracker,
+                    )?
+                }
+                "code-system-graph.source.rust" => {
+                    parse_rust_source_with_tracker(&source, &mut tracker)?
+                }
+                "code-system-graph.source.python" => {
+                    parse_python_source_with_tracker(&source, &mut tracker)?
+                }
+                "code-system-graph.source.go" => {
+                    parse_go_source_with_tracker(&source, &mut tracker)?
+                }
+                "code-system-graph.source.java" => {
+                    parse_java_source_with_tracker(&source, &mut tracker)?
+                }
                 _ => Vec::new(),
             };
-            let output_count = u64::try_from(observations.len()).map_err(|_| {
-                ApplicationError::InvalidSourceObservation(format!(
-                    "{} produced too many source observations",
-                    fingerprint.path.display
-                ))
-            })?;
-            if output_count > reserved_observations {
-                return Err(ApplicationError::InvalidSourceObservation(format!(
-                    "{} produced more observations than its syntax candidate reservation",
-                    fingerprint.path.display
-                )));
-            }
-            tracker.charge_observation(output_count)?;
-            for observation in &observations {
-                charge_source_observation(observation, &mut tracker)?;
-            }
             if observations
                 .iter()
                 .any(|observation| observation.role != SourceRole::Test)
@@ -5982,6 +5999,42 @@ mod budget_regression_tests {
                         && error.extractor == "code-system-graph.source.rust"
             ),
             "unexpected direct source budget result: {result:?}"
+        );
+    }
+
+    #[test]
+    fn direct_scan_should_charge_observations_independently_of_syntax_candidates() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let repository = temporary.path().join("tests");
+        fs::create_dir_all(repository.join("tests")).expect("source directory");
+        fs::write(
+            repository.join("tests/test_api.py"),
+            "import requests\ndef test_create_order():\n    requests.post(\"https://api.test/v1/orders\")\n",
+        )
+        .expect("source fixture");
+        let config = temporary.path().join("code-system-graph.yaml");
+        let database = temporary.path().join("code-system-graph.db");
+        let manifest = |maximum| {
+            format!(
+                "version: 1\nname: source-observation-unit\nextractionBudgets:\n  maxObservationsPerArtifact: {maximum}\nrepos:\n  tests:\n    path: tests\n"
+            )
+        };
+        fs::write(&config, manifest(1)).expect("limited manifest");
+
+        let rejected = scan_workspace_direct(&config, &database, &ScanOverrides::default());
+        assert!(matches!(
+            rejected,
+            Err(ApplicationError::ExtractionLimit(error))
+                if error.resource == code_system_graph_core::ExtractionResource::Observations
+                    && error.observed == 2
+                    && error.maximum == 1
+        ));
+
+        fs::write(&config, manifest(2)).expect("exact manifest");
+        let accepted = scan_workspace_direct(&config, &database, &ScanOverrides::default());
+        assert!(
+            accepted.is_ok(),
+            "exact observation budget failed: {accepted:?}"
         );
     }
 }

@@ -6,7 +6,7 @@ use semver::Version;
 use serde::Serialize;
 
 use crate::{
-    BoundaryExtractor, ContentFingerprint, DiscoverContext, DiscoveredInput, ExtractInput, ExtractionBatch, ExtractionBudgets, ExtractionCompleteness, ExtractionReport, ExtractionTracker, ExtractorError, FileDescriptor, SourceEpistemicStatus, SourceObservation, SourceSyntaxLanguage, extract_generated_client_metadata, extract_package_manifest_with_tracker, inspect_source_syntax, parse_go_source, parse_java_source, parse_javascript_source_at_path, parse_python_source, parse_rust_source, parse_typescript_source_at_path
+    BoundaryExtractor, ContentFingerprint, DiscoverContext, DiscoveredInput, ExtractInput, ExtractionBatch, ExtractionBudgets, ExtractionCompleteness, ExtractionReport, ExtractionTracker, ExtractorError, FileDescriptor, SourceEpistemicStatus, SourceObservation, SourceSyntaxLanguage, extract_generated_client_metadata, extract_package_manifest_with_tracker, inspect_source_syntax, parse_go_source_with_tracker, parse_java_source_with_tracker, parse_javascript_source_at_path_with_tracker, parse_python_source_with_tracker, parse_rust_source_with_tracker, parse_typescript_source_at_path_with_tracker
 };
 
 /// Focused source language selected for HTTP and test extraction.
@@ -116,20 +116,25 @@ impl BoundaryExtractor for FocusedSourceExtractor {
         .map_err(extractor_source_syntax_error)?;
         let reserved_observations = u64::try_from(syntax.boundary_candidate_count)
             .map_err(|_| ExtractorError::InvalidInput("too many syntax candidates".to_owned()))?;
-        tracker.check_observations(reserved_observations)?;
         tracker.charge_work(reserved_observations)?;
         precheck_focused_source_values(source, &mut tracker)?;
         let observations = match self.language {
-            FocusedSourceLanguage::JavaScript => {
-                parse_javascript_source_at_path(&input.file.path.display, source)
+            FocusedSourceLanguage::JavaScript => parse_javascript_source_at_path_with_tracker(
+                &input.file.path.display,
+                source,
+                &mut tracker,
+            )?,
+            FocusedSourceLanguage::TypeScript => parse_typescript_source_at_path_with_tracker(
+                &input.file.path.display,
+                source,
+                &mut tracker,
+            )?,
+            FocusedSourceLanguage::Rust => parse_rust_source_with_tracker(source, &mut tracker)?,
+            FocusedSourceLanguage::Python => {
+                parse_python_source_with_tracker(source, &mut tracker)?
             }
-            FocusedSourceLanguage::TypeScript => {
-                parse_typescript_source_at_path(&input.file.path.display, source)
-            }
-            FocusedSourceLanguage::Rust => parse_rust_source(source),
-            FocusedSourceLanguage::Python => parse_python_source(source),
-            FocusedSourceLanguage::Go => parse_go_source(source),
-            FocusedSourceLanguage::Java => parse_java_source(source),
+            FocusedSourceLanguage::Go => parse_go_source_with_tracker(source, &mut tracker)?,
+            FocusedSourceLanguage::Java => parse_java_source_with_tracker(source, &mut tracker)?,
         };
         if !observations.is_empty() && syntax.boundary_candidate_count == 0 {
             return Err(ExtractorError::InvalidInput(
@@ -155,15 +160,6 @@ impl BoundaryExtractor for FocusedSourceExtractor {
         }
         let output_count = u64::try_from(observations.len())
             .map_err(|_| ExtractorError::InvalidInput("too many observations".to_owned()))?;
-        if output_count > reserved_observations {
-            return Err(ExtractorError::InvalidInput(
-                "focused parser exceeded its Tree-sitter candidate reservation".to_owned(),
-            ));
-        }
-        tracker.charge_observation(output_count)?;
-        for observation in &observations {
-            charge_source_observation(observation, &mut tracker)?;
-        }
         let payload = serialize_bounded(&observations, &tracker)?;
         tracker.check_structured_time()?;
         Ok(ExtractionBatch {
@@ -536,25 +532,7 @@ pub fn charge_source_observation(
     observation: &SourceObservation,
     tracker: &mut ExtractionTracker,
 ) -> Result<(), crate::ExtractionLimitExceeded> {
-    if let Some(method) = &observation.method {
-        tracker.charge_identifier(method)?;
-    }
-    if let Some(path) = &observation.path {
-        tracker.charge_portable_path(path)?;
-    }
-    for symbol in [
-        observation.symbol_name.as_deref(),
-        observation.related_symbol.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        tracker.charge_identifier(symbol)?;
-    }
-    if let Some(path) = &observation.related_path {
-        tracker.charge_portable_path(path)?;
-    }
-    Ok(())
+    crate::source_http::charge_source_observation_values(observation, tracker)
 }
 
 fn serialize_bounded<T: Serialize>(
@@ -655,7 +633,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn source_extractor_should_preflight_work_observations_and_values() {
+    async fn source_extractor_should_preflight_work_and_values() {
         let file = file("src/routes.rs");
         let source =
             b"use axum::{Router, routing::get}; Router::new().route(\"/health\", get(health));";
@@ -666,13 +644,6 @@ mod tests {
                     ..ExtractionBudgets::default()
                 },
                 crate::ExtractionResource::WorkUnits,
-            ),
-            (
-                ExtractionBudgets {
-                    max_observations_per_artifact: 1,
-                    ..ExtractionBudgets::default()
-                },
-                crate::ExtractionResource::Observations,
             ),
             (
                 ExtractionBudgets {
@@ -697,6 +668,41 @@ mod tests {
                 Err(ExtractorError::LimitExceeded(error)) if error.resource == resource
             ));
         }
+    }
+
+    #[tokio::test]
+    async fn source_extractor_should_charge_each_observation_before_retention() {
+        let file = file("tests/test_api.py");
+        let source = b"import requests\ndef test_create_order():\n    requests.post(\"https://api.test/v1/orders\")\n";
+        let one = ExtractionBudgets {
+            max_observations_per_artifact: 1,
+            ..ExtractionBudgets::default()
+        };
+        let rejected = FocusedSourceExtractor::with_budgets(FocusedSourceLanguage::Python, one)
+            .extract(&ExtractInput {
+                file: &file,
+                content: source,
+            })
+            .await;
+        assert!(matches!(
+            rejected,
+            Err(ExtractorError::LimitExceeded(error))
+                if error.resource == crate::ExtractionResource::Observations
+                    && error.observed == 2
+                    && error.maximum == 1
+        ));
+
+        let exact = ExtractionBudgets {
+            max_observations_per_artifact: 2,
+            ..ExtractionBudgets::default()
+        };
+        let accepted = FocusedSourceExtractor::with_budgets(FocusedSourceLanguage::Python, exact)
+            .extract(&ExtractInput {
+                file: &file,
+                content: source,
+            })
+            .await;
+        assert!(matches!(accepted, Ok(batch) if batch.output_count == 2));
     }
 
     #[tokio::test]
