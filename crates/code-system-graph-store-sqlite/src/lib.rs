@@ -464,9 +464,19 @@ impl SqliteStore {
     /// Returns [`StoreError`] when the source is invalid or the destination already exists.
     pub fn backup_file(database_path: &Path, destination: &Path) -> Result<(), StoreError> {
         ensure_distinct_paths(database_path, destination)?;
-        let source = open_validated_backup_source(database_path)?;
-        validate_backup(&source, database_path)?;
-        backup_connection(&source, destination)
+        if destination.exists() {
+            return Err(StoreError::Io {
+                path: destination.to_path_buf(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    "backup destination already exists",
+                ),
+            });
+        }
+        prepare_database_file(destination)?;
+        let mut destination_connection = Connection::open(destination)?;
+        copy_validated_backup_source(database_path, &mut destination_connection)?;
+        restrict_store_permissions(destination)
     }
 
     /// Restores a validated backup with the exact 1.0.0 schema.
@@ -482,8 +492,6 @@ impl SqliteStore {
     ) -> Result<RestoreReport, StoreError> {
         ensure_distinct_paths(database_path, backup_path)?;
         let _lock = StoreLock::acquire(database_path, Duration::from_mins(5))?;
-        let source = open_validated_backup_source(backup_path)?;
-        validate_backup(&source, backup_path)?;
         let safety_backup_path = if database_path.exists() {
             let existing = Connection::open(database_path)?;
             let safety_path = next_backup_path(database_path, "pre-restore")?;
@@ -495,9 +503,9 @@ impl SqliteStore {
         };
         prepare_database_file(database_path)?;
         let mut destination = Connection::open(database_path)?;
-        backup_connection_to(&source, &mut destination)?;
+        copy_validated_backup_source(backup_path, &mut destination)?;
         configure_connection(&destination)?;
-        validate_exact_schema(&destination)?;
+        validate_backup(&destination, database_path)?;
         destination.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
         restrict_store_permissions(database_path)?;
         Ok(RestoreReport {
@@ -2183,6 +2191,26 @@ fn backup_connection(source: &Connection, destination: &Path) -> Result<(), Stor
     restrict_store_permissions(destination)
 }
 
+fn copy_validated_backup_source(
+    source_path: &Path,
+    destination: &mut Connection,
+) -> Result<(), StoreError> {
+    let source = open_validated_backup_source(source_path)?;
+    source.execute_batch("BEGIN DEFERRED")?;
+    let result = (|| {
+        validate_backup(&source, source_path)?;
+        backup_connection_to(&source, destination)
+    })();
+    match result {
+        Ok(()) => source.execute_batch("COMMIT")?,
+        Err(error) => {
+            let _ = source.execute_batch("ROLLBACK");
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
 fn backup_connection_to(
     source: &Connection,
     destination: &mut Connection,
@@ -2333,8 +2361,80 @@ fn set_owner_only(path: &Path) -> Result<(), StoreError> {
 }
 
 #[cfg(not(unix))]
-fn set_owner_only(_path: &Path) -> Result<(), StoreError> {
-    Ok(())
+#[cfg_attr(windows, allow(unsafe_code))]
+fn set_owner_only(path: &Path) -> Result<(), StoreError> {
+    #[cfg(windows)]
+    {
+        use std::ffi::c_void;
+        use std::os::windows::ffi::OsStrExt;
+        use std::ptr;
+
+        use windows_sys::Win32::Foundation::LocalFree;
+        use windows_sys::Win32::Security::Authorization::{
+            ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1
+        };
+        use windows_sys::Win32::Security::{
+            DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SetFileSecurityW
+        };
+
+        let mut path_wide = path.as_os_str().encode_wide().collect::<Vec<_>>();
+        if path_wide.contains(&0) {
+            return Err(StoreError::Io {
+                path: path.to_path_buf(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "database path contains a NUL code unit",
+                ),
+            });
+        }
+        path_wide.push(0);
+        let descriptor_sddl = "D:P(A;;FA;;;OW)\0".encode_utf16().collect::<Vec<_>>();
+        let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
+        // SAFETY: both UTF-16 inputs are NUL-terminated, `descriptor` is a valid out-pointer, and
+        // the returned LocalAlloc allocation is released exactly once below.
+        let converted = unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                descriptor_sddl.as_ptr(),
+                SDDL_REVISION_1,
+                &mut descriptor,
+                ptr::null_mut(),
+            )
+        };
+        if converted == 0 {
+            return Err(StoreError::Io {
+                path: path.to_path_buf(),
+                source: std::io::Error::last_os_error(),
+            });
+        }
+        // SAFETY: `path_wide` is NUL-terminated and `descriptor` was initialized successfully above.
+        let applied = unsafe {
+            SetFileSecurityW(
+                path_wide.as_ptr(),
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                descriptor,
+            )
+        };
+        // SAFETY: the descriptor was allocated by LocalAlloc inside the conversion API.
+        let _released = unsafe { LocalFree(descriptor.cast::<c_void>()) };
+        if applied == 0 {
+            return Err(StoreError::Io {
+                path: path.to_path_buf(),
+                source: std::io::Error::last_os_error(),
+            });
+        }
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        Err(StoreError::Io {
+            path: path.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "owner-only database permissions are unsupported on this platform",
+            ),
+        })
+    }
 }
 
 fn validate_backup(connection: &Connection, path: &Path) -> Result<(), StoreError> {
@@ -3659,12 +3759,13 @@ fn lock_is_stale(path: &Path, stale_after: Duration) -> Result<bool, StoreError>
 mod tests {
     use std::fs;
     use std::process::Command;
+    use std::sync::{Arc, Condvar, Mutex};
     use std::time::Duration;
 
     use code_system_graph_model::{
         ArtifactFingerprint, CheckoutId, Community, CommunityAlgorithm, CommunityConfig, CommunityId, CommunityMetrics, CommunityScope, CommunitySnapshot, Edge, EdgeId, EdgeKind, EpistemicStatus, Evidence, EvidenceId, ExtractorRun, ExtractorRunStatus, NativePath, NativePathEncoding, Node, NodeId, NodeKind, Provenance, RepoFreshnessState, RepoId, RepositoryRecord, StoredExtractorBatch, WorkspaceId, WorkspaceRecord
     };
-    use rusqlite::params;
+    use rusqlite::{Connection, params};
 
     use super::{
         INITIAL_SCHEMA, ManualLinkDisposition, ManualLinkRecord, ProviderCapabilityRecord, QueryCacheRecord, SnapshotBatch, SqliteStore, StoreError, StoreLock, lock_path
@@ -4814,6 +4915,92 @@ mod tests {
             Err(StoreError::InvalidBackup { reason, .. })
                 if reason == "foreign key check reported violations"
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn restore_should_copy_from_pinned_source_snapshot() -> Result<(), Box<dyn std::error::Error>> {
+        let temporary = tempfile::tempdir()?;
+        let backup = temporary.path().join("backup.db");
+        let restore_target = temporary.path().join("restored.db");
+        let workspace = workspace();
+        let (nodes, edges, evidence) = fixture();
+        {
+            let mut store = SqliteStore::open(temporary.path().join("store.db"))?;
+            store.publish_snapshot(SnapshotBatch {
+                workspace: &workspace,
+                snapshot_id: "snapshot:0",
+                nodes: &nodes,
+                edges: &edges,
+                evidence: &evidence,
+                fingerprints: &[],
+                extractor_batches: &[],
+                extractor_runs: &[],
+                manual_links: &[],
+                community_snapshot: None,
+            })?;
+            store.backup_to(&backup)?;
+        }
+
+        let coordination = Arc::new((Mutex::new(false), Condvar::new()));
+        let backup_for_corruptor = backup.clone();
+        let restore_target_for_restorer = restore_target.clone();
+        let coordination_for_corruptor = Arc::clone(&coordination);
+        let coordination_for_restorer = Arc::clone(&coordination);
+
+        let corruptor = std::thread::spawn(move || {
+            let (lock, cv) = &*coordination_for_corruptor;
+            let mut ready = lock.lock().expect("coordination lock");
+            while !*ready {
+                ready = cv.wait(ready).expect("coordination wait");
+            }
+            let connection = Connection::open(&backup_for_corruptor)?;
+            connection.execute_batch(
+                "PRAGMA foreign_keys = OFF;
+                 INSERT INTO edges(
+                    snapshot_id, id, source_node_id, target_node_id, kind, confidence,
+                    epistemic_status
+                 ) VALUES (
+                    'snapshot:0', 'edge:corrupt', 'missing:a', 'missing:b',
+                    '\"calls_remote\"', 1.0, '\"confirmed\"'
+                 );
+                 PRAGMA foreign_keys = ON;",
+            )
+        });
+
+        let restorer = std::thread::spawn(move || -> Result<(), StoreError> {
+            let source = super::open_validated_backup_source(&backup)?;
+            source.execute_batch("BEGIN DEFERRED")?;
+            let restore_result = (|| {
+                super::validate_backup(&source, &backup)?;
+                {
+                    let (lock, cv) = &*coordination_for_restorer;
+                    let mut ready = lock.lock().expect("coordination lock");
+                    *ready = true;
+                    cv.notify_one();
+                }
+                std::thread::sleep(Duration::from_millis(50));
+                super::prepare_database_file(&restore_target_for_restorer)?;
+                let mut destination = Connection::open(&restore_target_for_restorer)?;
+                super::backup_connection_to(&source, &mut destination)?;
+                super::configure_connection(&destination)?;
+                super::validate_backup(&destination, &restore_target_for_restorer)
+            })();
+            match restore_result {
+                Ok(()) => source.execute_batch("COMMIT")?,
+                Err(error) => {
+                    let _ = source.execute_batch("ROLLBACK");
+                    return Err(error);
+                }
+            }
+            Ok(())
+        });
+
+        corruptor.join().expect("corruptor thread panicked")?;
+        restorer.join().expect("restorer thread panicked")?;
+
+        let store = SqliteStore::open_read_only(&restore_target)?;
+        assert!(store.integrity_check()?);
         Ok(())
     }
 
