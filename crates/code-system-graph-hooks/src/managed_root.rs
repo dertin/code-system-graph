@@ -435,13 +435,13 @@ fn read_bytes_bounded_unix(
 }
 
 fn read_file_to_end_bounded(
-    mut file: File,
+    mut reader: impl Read,
     max_bytes: usize,
 ) -> Result<Vec<u8>, CapabilityIoError> {
     let mut buffer = Vec::new();
     let mut chunk = [0_u8; 8 * 1024];
     loop {
-        let read = file
+        let read = reader
             .read(&mut chunk)
             .map_err(|source| CapabilityIoError::Io { source })?;
         if read == 0 {
@@ -620,9 +620,22 @@ impl std::fmt::Display for ValidationError {
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Cursor, Read};
     use std::path::Path;
 
-    use super::ManagedRoot;
+    use super::{MAX_HOST_FILE_BYTES, ManagedRoot};
+
+    struct ChunkedReader<R> {
+        inner: R,
+        chunk_size: usize,
+    }
+
+    impl<R: Read> Read for ChunkedReader<R> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let limit = buf.len().min(self.chunk_size);
+            self.inner.read(&mut buf[..limit])
+        }
+    }
 
     #[test]
     fn managed_root_should_treat_missing_parent_as_absent_on_remove()
@@ -633,5 +646,31 @@ mod tests {
             managed.remove_file_if_exists(Path::new(".code-system-graph/hooks/state.json"))?;
         assert!(!removed);
         Ok(())
+    }
+
+    #[test]
+    fn read_file_to_end_bounded_should_survive_short_reads() {
+        let payload = b"{\"hooks\":{}}\n".repeat(4_096);
+        let reader = ChunkedReader {
+            inner: Cursor::new(payload.clone()),
+            chunk_size: 11,
+        };
+        let read = super::read_file_to_end_bounded(reader, payload.len())
+            .expect("short reads should still return the full payload");
+        assert_eq!(read, payload);
+    }
+
+    #[test]
+    fn read_file_to_end_bounded_should_reject_overflow_after_short_reads() {
+        let payload = vec![b'#'; MAX_HOST_FILE_BYTES + 32];
+        let reader = ChunkedReader {
+            inner: Cursor::new(payload),
+            chunk_size: 19,
+        };
+        let result = super::read_file_to_end_bounded(reader, MAX_HOST_FILE_BYTES);
+        assert!(matches!(
+            result,
+            Err(super::CapabilityIoError::TooLarge { .. })
+        ));
     }
 }

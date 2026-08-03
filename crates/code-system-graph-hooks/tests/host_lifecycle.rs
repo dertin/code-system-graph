@@ -16,6 +16,18 @@ fn request(root: &std::path::Path, host: HostKind) -> InstallRequest {
 }
 
 #[test]
+fn uninstall_on_clean_repository_without_hooks_directory_should_be_noop()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temporary = tempfile::tempdir()?;
+    std::fs::create_dir_all(temporary.path().join(".git/hooks"))?;
+    std::fs::write(temporary.path().join(".git/HEAD"), "ref: refs/heads/main\n")?;
+    let removal = uninstall(&request(temporary.path(), HostKind::Cursor))?;
+    assert!(!removal.changed);
+    assert!(removal.removed_files.is_empty());
+    Ok(())
+}
+
+#[test]
 fn every_supported_host_should_install_idempotently_and_uninstall_surgically()
 -> Result<(), Box<dyn std::error::Error>> {
     let temporary = tempfile::tempdir()?;

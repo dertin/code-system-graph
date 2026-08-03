@@ -6045,3 +6045,23 @@ mod budget_regression_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod codex_review_regression_tests {
+    use code_system_graph_model::validate_safe_path_display;
+
+    use super::ApplicationError;
+
+    #[test]
+    fn unsafe_artifact_path_error_must_not_echo_rejected_display() {
+        const BIDI_PAYLOAD: &str = "invoice\u{202e}pay.pdf";
+        assert!(validate_safe_path_display(BIDI_PAYLOAD).is_err());
+        let rendered = ApplicationError::UnsafeArtifactPath.to_string();
+        assert!(!rendered.contains(BIDI_PAYLOAD));
+        assert!(!rendered.contains('\u{202e}'));
+        assert_eq!(
+            rendered,
+            "artifact path contains unsafe control or bidirectional characters"
+        );
+    }
+}

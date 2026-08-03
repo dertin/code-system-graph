@@ -448,14 +448,14 @@ fn read_file_bounded_unix(
 }
 
 fn read_file_to_end_bounded(
-    mut file: File,
+    mut reader: impl Read,
     path: &Path,
     max_bytes: usize,
 ) -> Result<Vec<u8>, CapabilityError> {
     let mut buffer = Vec::new();
     let mut chunk = [0_u8; 8 * 1024];
     loop {
-        let read = file
+        let read = reader
             .read(&mut chunk)
             .map_err(|source| CapabilityError::Io {
                 path: path.to_path_buf(),
@@ -630,9 +630,22 @@ fn remove_file_portable(root: &Path, relative: &Path) -> Result<bool, Capability
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Cursor, Read};
     use std::path::Path;
 
     use super::{CapabilityDir, CapabilityError, MAX_REPOSITORY_CONFIG_BYTES};
+
+    struct ChunkedReader<R> {
+        inner: R,
+        chunk_size: usize,
+    }
+
+    impl<R: Read> Read for ChunkedReader<R> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let limit = buf.len().min(self.chunk_size);
+            self.inner.read(&mut buf[..limit])
+        }
+    }
 
     #[test]
     fn capability_dir_should_reject_symlinked_config() -> Result<(), Box<dyn std::error::Error>> {
@@ -688,5 +701,34 @@ mod tests {
             root.remove_file_if_exists(Path::new(".code-system-graph/hooks/state.json"))?;
         assert!(!removed);
         Ok(())
+    }
+
+    #[test]
+    fn read_file_to_end_bounded_should_survive_short_reads()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let payload = b"version: 1\n".repeat(2_048);
+        let reader = ChunkedReader {
+            inner: Cursor::new(payload.clone()),
+            chunk_size: 13,
+        };
+        let read =
+            super::read_file_to_end_bounded(reader, Path::new("config.yaml"), payload.len())?;
+        assert_eq!(read, payload);
+        Ok(())
+    }
+
+    #[test]
+    fn read_file_to_end_bounded_should_reject_overflow_after_short_reads() {
+        let payload = vec![b'x'; MAX_REPOSITORY_CONFIG_BYTES + 64];
+        let reader = ChunkedReader {
+            inner: Cursor::new(payload),
+            chunk_size: 17,
+        };
+        let result = super::read_file_to_end_bounded(
+            reader,
+            Path::new("config.yaml"),
+            MAX_REPOSITORY_CONFIG_BYTES,
+        );
+        assert!(matches!(result, Err(CapabilityError::TooLarge { .. })));
     }
 }
