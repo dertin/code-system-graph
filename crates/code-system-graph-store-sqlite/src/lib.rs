@@ -2077,7 +2077,78 @@ fn normalize_schema_sql(sql: &str) -> String {
     if sql.is_empty() {
         return String::new();
     }
-    sql.split_whitespace().collect::<Vec<_>>().join(" ")
+
+    let mut normalized = String::with_capacity(sql.len());
+    let mut chars = sql.chars().peekable();
+    let mut pending_space = false;
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\'' => {
+                if pending_space {
+                    normalized.push(' ');
+                    pending_space = false;
+                }
+                normalized.push('\'');
+                while let Some(inner) = chars.next() {
+                    normalized.push(inner);
+                    if inner == '\'' {
+                        if chars.peek() == Some(&'\'') {
+                            normalized.push(chars.next().expect("peeked doubled quote"));
+                        } else {
+                            break;
+                        }
+                    }
+                }
+            }
+            '"' => {
+                if pending_space {
+                    normalized.push(' ');
+                    pending_space = false;
+                }
+                normalized.push('"');
+                while let Some(inner) = chars.next() {
+                    normalized.push(inner);
+                    if inner == '"' {
+                        if chars.peek() == Some(&'"') {
+                            normalized.push(chars.next().expect("peeked doubled quote"));
+                        } else {
+                            break;
+                        }
+                    }
+                }
+            }
+            '-' if chars.peek() == Some(&'-') => {
+                chars.next();
+                for comment in chars.by_ref() {
+                    if comment == '\n' {
+                        pending_space = true;
+                        break;
+                    }
+                }
+            }
+            '/' if chars.peek() == Some(&'*') => {
+                chars.next();
+                while let Some(comment) = chars.next() {
+                    if comment == '*' && chars.peek() == Some(&'/') {
+                        chars.next();
+                        pending_space = true;
+                        break;
+                    }
+                }
+            }
+            ch if ch.is_whitespace() => pending_space = true,
+            ch => {
+                if pending_space {
+                    normalized.push(' ');
+                    pending_space = false;
+                }
+                normalized.push(ch);
+            }
+        }
+    }
+
+    normalized.trim().to_owned()
 }
 
 fn expected_schema_contract() -> Result<Vec<SchemaContractEntry>, StoreError> {
@@ -4833,6 +4904,64 @@ mod tests {
             super::normalize_schema_sql("CREATE  TABLE\nfoo ( id INTEGER )"),
             "CREATE TABLE foo ( id INTEGER )"
         );
+    }
+
+    #[test]
+    fn normalize_schema_sql_should_preserve_whitespace_inside_literals() {
+        let with_space =
+            "SELECT RAISE(ABORT, 'provider capability repository is not registered in workspace')";
+        let with_newline =
+            "SELECT RAISE(ABORT, 'provider\ncapability repository is not registered in workspace')";
+
+        assert_ne!(
+            super::normalize_schema_sql(with_space),
+            super::normalize_schema_sql(with_newline)
+        );
+    }
+
+    #[test]
+    fn restore_should_reject_backup_with_literal_whitespace_tampering()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temporary = tempfile::tempdir()?;
+        let database = temporary.path().join("store.db");
+        let backup = temporary.path().join("backup.db");
+        let workspace = workspace();
+        let (nodes, edges, evidence) = fixture();
+        {
+            let mut store = SqliteStore::open(&database)?;
+            store.publish_snapshot(SnapshotBatch {
+                workspace: &workspace,
+                snapshot_id: "snapshot:0",
+                nodes: &nodes,
+                edges: &edges,
+                evidence: &evidence,
+                fingerprints: &[],
+                extractor_batches: &[],
+                extractor_runs: &[],
+                manual_links: &[],
+                community_snapshot: None,
+            })?;
+            store.backup_to(&backup)?;
+        }
+        let original_sql: String = rusqlite::Connection::open(&backup)?.query_row(
+            "SELECT sql FROM sqlite_schema
+             WHERE name = 'provider_capabilities_require_registration'",
+            [],
+            |row| row.get(0),
+        )?;
+        let tampered_sql = original_sql.replace(
+            "'provider capability repository is not registered in workspace'",
+            "'provider\ncapability repository is not registered in workspace'",
+        );
+        let connection = rusqlite::Connection::open(&backup)?;
+        connection.execute_batch(&format!(
+            "DROP TRIGGER provider_capabilities_require_registration; {tampered_sql};"
+        ))?;
+
+        let result = SqliteStore::restore_from(&database, &backup);
+
+        assert!(matches!(result, Err(StoreError::InvalidBackup { .. })));
+        Ok(())
     }
 
     #[test]
