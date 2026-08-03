@@ -464,10 +464,7 @@ impl SqliteStore {
     /// Returns [`StoreError`] when the source is invalid or the destination already exists.
     pub fn backup_file(database_path: &Path, destination: &Path) -> Result<(), StoreError> {
         ensure_distinct_paths(database_path, destination)?;
-        let source = Connection::open_with_flags(
-            database_path,
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )?;
+        let source = open_validated_backup_source(database_path)?;
         validate_backup(&source, database_path)?;
         backup_connection(&source, destination)
     }
@@ -485,24 +482,24 @@ impl SqliteStore {
     ) -> Result<RestoreReport, StoreError> {
         ensure_distinct_paths(database_path, backup_path)?;
         let _lock = StoreLock::acquire(database_path, Duration::from_mins(5))?;
-        let source = Connection::open_with_flags(
-            backup_path,
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )?;
+        let source = open_validated_backup_source(backup_path)?;
         validate_backup(&source, backup_path)?;
         let safety_backup_path = if database_path.exists() {
             let existing = Connection::open(database_path)?;
             let safety_path = next_backup_path(database_path, "pre-restore")?;
             backup_connection(&existing, &safety_path)?;
+            restrict_store_permissions(&safety_path)?;
             Some(safety_path)
         } else {
             None
         };
+        prepare_database_file(database_path)?;
         let mut destination = Connection::open(database_path)?;
         backup_connection_to(&source, &mut destination)?;
         configure_connection(&destination)?;
         validate_exact_schema(&destination)?;
         destination.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+        restrict_store_permissions(database_path)?;
         Ok(RestoreReport {
             source_path: backup_path.to_path_buf(),
             safety_backup_path,
@@ -2011,8 +2008,10 @@ fn decode_optional_path(
 }
 
 fn open_exact(path: &Path) -> Result<Connection, StoreError> {
+    prepare_database_file(path)?;
     let mut connection = Connection::open(path)?;
     configure_connection(&connection)?;
+    restrict_store_permissions(path)?;
     let current = existing_schema_version(&connection)?;
     if current == 0 && database_is_empty(&connection)? {
         initialize_empty_schema(&mut connection)?;
@@ -2063,9 +2062,22 @@ fn schema_contract(connection: &Connection) -> Result<Vec<SchemaContractEntry>, 
     )?;
     Ok(statement
         .query_map([], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            let sql: String = row.get(3)?;
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                normalize_schema_sql(&sql),
+            ))
         })?
         .collect::<Result<_, _>>()?)
+}
+
+fn normalize_schema_sql(sql: &str) -> String {
+    if sql.is_empty() {
+        return String::new();
+    }
+    sql.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn expected_schema_contract() -> Result<Vec<SchemaContractEntry>, StoreError> {
@@ -2094,8 +2106,10 @@ fn backup_connection(source: &Connection, destination: &Path) -> Result<(), Stor
             ),
         });
     }
+    prepare_database_file(destination)?;
     let mut destination_connection = Connection::open(destination)?;
-    backup_connection_to(source, &mut destination_connection)
+    backup_connection_to(source, &mut destination_connection)?;
+    restrict_store_permissions(destination)
 }
 
 fn backup_connection_to(
@@ -2158,6 +2172,100 @@ fn ensure_distinct_paths(database: &Path, backup: &Path) -> Result<(), StoreErro
     Ok(())
 }
 
+fn open_validated_backup_source(path: &Path) -> Result<Connection, StoreError> {
+    let connection = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    connection.pragma_update(None, "query_only", true)?;
+    connection.pragma_update(None, "trusted_schema", false)?;
+    connection.pragma_update(None, "foreign_keys", true)?;
+    Ok(connection)
+}
+
+fn prepare_database_file(path: &Path) -> Result<(), StoreError> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|source| StoreError::Io {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    if path.exists() {
+        let metadata = fs::symlink_metadata(path).map_err(|source| StoreError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(StoreError::Io {
+                path: path.to_path_buf(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "database path must be a regular file",
+                ),
+            });
+        }
+        return Ok(());
+    }
+    let mut options = OpenOptions::new();
+    options.create_new(true).read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        options.mode(0o600);
+    }
+    options.open(path).map_err(|source| StoreError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    Ok(())
+}
+
+fn restrict_store_permissions(database_path: &Path) -> Result<(), StoreError> {
+    set_owner_only(database_path)?;
+    for suffix in ["-wal", "-shm", "-journal"] {
+        let mut sidecar = database_path.as_os_str().to_os_string();
+        sidecar.push(suffix);
+        let sidecar_path = PathBuf::from(sidecar);
+        let metadata = match fs::symlink_metadata(&sidecar_path) {
+            Ok(metadata) => metadata,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(source) => {
+                return Err(StoreError::Io {
+                    path: sidecar_path,
+                    source,
+                });
+            }
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(StoreError::Io {
+                path: sidecar_path,
+                source: std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "database sidecar path must be a regular file",
+                ),
+            });
+        }
+        set_owner_only(&sidecar_path)?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_owner_only(path: &Path) -> Result<(), StoreError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(|source| StoreError::Io {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+#[cfg(not(unix))]
+fn set_owner_only(_path: &Path) -> Result<(), StoreError> {
+    Ok(())
+}
+
 fn validate_backup(connection: &Connection, path: &Path) -> Result<(), StoreError> {
     let integrity =
         connection.query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0))?;
@@ -2165,6 +2273,19 @@ fn validate_backup(connection: &Connection, path: &Path) -> Result<(), StoreErro
         return Err(StoreError::InvalidBackup {
             path: path.to_path_buf(),
             reason: format!("integrity check returned `{integrity}`"),
+        });
+    }
+    let foreign_key_violation = connection
+        .query_row(
+            "SELECT 1 FROM pragma_foreign_key_check LIMIT 1",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?;
+    if foreign_key_violation.is_some() {
+        return Err(StoreError::InvalidBackup {
+            path: path.to_path_buf(),
+            reason: "foreign key check reported violations".to_owned(),
         });
     }
     let version = existing_schema_version(connection)?;
@@ -2182,7 +2303,13 @@ fn validate_backup(connection: &Connection, path: &Path) -> Result<(), StoreErro
             ),
         });
     }
-    validate_exact_schema(connection)
+    validate_exact_schema(connection).map_err(|error| match error {
+        StoreError::ObsoleteDevelopmentDatabase => StoreError::InvalidBackup {
+            path: path.to_path_buf(),
+            reason: "schema objects do not match the exact supported contract".to_owned(),
+        },
+        other => other,
+    })
 }
 
 fn validate_artifact_fingerprints(fingerprints: &[ArtifactFingerprint]) -> Result<(), StoreError> {
@@ -3475,6 +3602,9 @@ mod tests {
     const LOCK_HELPER_ENV: &str = "CODE_SYSTEM_GRAPH_LOCK_HELPER";
     const LOCK_DATABASE_ENV: &str = "CODE_SYSTEM_GRAPH_LOCK_DATABASE";
     const LOCK_READY_ENV: &str = "CODE_SYSTEM_GRAPH_LOCK_READY";
+    const UMASK_HELPER_ENV: &str = "CODE_SYSTEM_GRAPH_UMASK_PERMISSION_HELPER";
+    const UMASK_READY_ENV: &str = "CODE_SYSTEM_GRAPH_UMASK_PERMISSION_READY";
+    const UMASK_DATABASE_ENV: &str = "CODE_SYSTEM_GRAPH_UMASK_PERMISSION_DATABASE";
 
     fn fixture() -> (Vec<Node>, Vec<Edge>, Vec<Evidence>) {
         let evidence = Evidence {
@@ -4490,6 +4620,317 @@ mod tests {
             ),
             ("snapshot:before".to_owned(), "snapshot:after".to_owned(), 1)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn backup_validation_should_use_read_only_untrusted_schema_connection()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temporary = tempfile::tempdir()?;
+        let database = temporary.path().join("store.db");
+        let backup = temporary.path().join("backup.db");
+        let workspace = workspace();
+        let (nodes, edges, evidence) = fixture();
+        {
+            let mut store = SqliteStore::open(&database)?;
+            store.publish_snapshot(SnapshotBatch {
+                workspace: &workspace,
+                snapshot_id: "snapshot:0",
+                nodes: &nodes,
+                edges: &edges,
+                evidence: &evidence,
+                fingerprints: &[],
+                extractor_batches: &[],
+                extractor_runs: &[],
+                manual_links: &[],
+                community_snapshot: None,
+            })?;
+            store.backup_to(&backup)?;
+        }
+
+        let connection = super::open_validated_backup_source(&backup)?;
+        let query_only =
+            connection.query_row("PRAGMA query_only", [], |row| row.get::<_, i64>(0))?;
+        let trusted_schema =
+            connection.query_row("PRAGMA trusted_schema", [], |row| row.get::<_, i64>(0))?;
+        let write_result =
+            connection.execute("CREATE TABLE injected_table(id INTEGER PRIMARY KEY)", []);
+
+        assert_eq!((query_only, trusted_schema), (1, 0));
+        assert!(
+            write_result.is_err(),
+            "validated backup source must stay read-only"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn restore_should_reject_backup_with_extra_trigger() -> Result<(), Box<dyn std::error::Error>> {
+        let temporary = tempfile::tempdir()?;
+        let database = temporary.path().join("store.db");
+        let backup = temporary.path().join("backup.db");
+        let workspace = workspace();
+        let (nodes, edges, evidence) = fixture();
+        {
+            let mut store = SqliteStore::open(&database)?;
+            store.publish_snapshot(SnapshotBatch {
+                workspace: &workspace,
+                snapshot_id: "snapshot:0",
+                nodes: &nodes,
+                edges: &edges,
+                evidence: &evidence,
+                fingerprints: &[],
+                extractor_batches: &[],
+                extractor_runs: &[],
+                manual_links: &[],
+                community_snapshot: None,
+            })?;
+            store.backup_to(&backup)?;
+        }
+        let connection = rusqlite::Connection::open(&backup)?;
+        connection.execute(
+            "CREATE TRIGGER injected AFTER INSERT ON workspaces BEGIN SELECT 1; END",
+            [],
+        )?;
+
+        let result = SqliteStore::restore_from(&database, &backup);
+
+        assert!(matches!(result, Err(StoreError::InvalidBackup { .. })));
+        Ok(())
+    }
+
+    #[test]
+    fn restore_should_reject_backup_with_foreign_key_violations()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temporary = tempfile::tempdir()?;
+        let database = temporary.path().join("store.db");
+        let backup = temporary.path().join("backup.db");
+        let workspace = workspace();
+        let (nodes, edges, evidence) = fixture();
+        {
+            let mut store = SqliteStore::open(&database)?;
+            store.publish_snapshot(SnapshotBatch {
+                workspace: &workspace,
+                snapshot_id: "snapshot:0",
+                nodes: &nodes,
+                edges: &edges,
+                evidence: &evidence,
+                fingerprints: &[],
+                extractor_batches: &[],
+                extractor_runs: &[],
+                manual_links: &[],
+                community_snapshot: None,
+            })?;
+            store.backup_to(&backup)?;
+        }
+        let connection = rusqlite::Connection::open(&backup)?;
+        connection.execute_batch(
+            "PRAGMA foreign_keys = OFF;
+             INSERT INTO edges(
+                snapshot_id, id, source_node_id, target_node_id, kind, confidence,
+                epistemic_status
+             ) VALUES (
+                'snapshot:0', 'edge:corrupt', 'missing:a', 'missing:b',
+                '\"calls_remote\"', 1.0, '\"confirmed\"'
+             );
+             PRAGMA foreign_keys = ON;",
+        )?;
+
+        let result = SqliteStore::restore_from(&database, &backup);
+
+        assert!(matches!(
+            result,
+            Err(StoreError::InvalidBackup { reason, .. })
+                if reason == "foreign key check reported violations"
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn restore_should_reject_backup_with_altered_trigger_sql()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temporary = tempfile::tempdir()?;
+        let database = temporary.path().join("store.db");
+        let backup = temporary.path().join("backup.db");
+        let workspace = workspace();
+        let (nodes, edges, evidence) = fixture();
+        {
+            let mut store = SqliteStore::open(&database)?;
+            store.publish_snapshot(SnapshotBatch {
+                workspace: &workspace,
+                snapshot_id: "snapshot:0",
+                nodes: &nodes,
+                edges: &edges,
+                evidence: &evidence,
+                fingerprints: &[],
+                extractor_batches: &[],
+                extractor_runs: &[],
+                manual_links: &[],
+                community_snapshot: None,
+            })?;
+            store.backup_to(&backup)?;
+        }
+        let connection = rusqlite::Connection::open(&backup)?;
+        connection.execute_batch(
+            "DROP TRIGGER query_cache_bound_workspace_entries;
+             CREATE TRIGGER query_cache_bound_workspace_entries
+             BEFORE INSERT ON query_cache
+             BEGIN
+                 SELECT RAISE(ABORT, 'tampered');
+             END;",
+        )?;
+
+        let result = SqliteStore::restore_from(&database, &backup);
+
+        assert!(matches!(result, Err(StoreError::InvalidBackup { .. })));
+        Ok(())
+    }
+
+    #[test]
+    fn restore_should_reject_corrupt_backup() -> Result<(), Box<dyn std::error::Error>> {
+        let temporary = tempfile::tempdir()?;
+        let database = temporary.path().join("store.db");
+        let backup = temporary.path().join("backup.db");
+        let workspace = workspace();
+        let (nodes, edges, evidence) = fixture();
+        {
+            let mut store = SqliteStore::open(&database)?;
+            store.publish_snapshot(SnapshotBatch {
+                workspace: &workspace,
+                snapshot_id: "snapshot:0",
+                nodes: &nodes,
+                edges: &edges,
+                evidence: &evidence,
+                fingerprints: &[],
+                extractor_batches: &[],
+                extractor_runs: &[],
+                manual_links: &[],
+                community_snapshot: None,
+            })?;
+            store.backup_to(&backup)?;
+        }
+        let mut bytes = fs::read(&backup)?;
+        bytes.truncate(bytes.len() / 4);
+        fs::write(&backup, bytes)?;
+
+        let result = SqliteStore::restore_from(&database, &backup);
+
+        assert!(
+            matches!(
+                result,
+                Err(StoreError::InvalidBackup { .. }
+                    | StoreError::Io { .. }
+                    | StoreError::Sqlite(_))
+            ),
+            "unexpected restore result: {result:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn normalize_schema_sql_should_collapse_whitespace() {
+        assert_eq!(
+            super::normalize_schema_sql("CREATE  TABLE\nfoo ( id INTEGER )"),
+            "CREATE TABLE foo ( id INTEGER )"
+        );
+    }
+
+    #[test]
+    fn umask_permission_helper() -> Result<(), Box<dyn std::error::Error>> {
+        if std::env::var(UMASK_HELPER_ENV).as_deref() != Ok("1") {
+            return Ok(());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let database = std::env::var_os(UMASK_DATABASE_ENV)
+                .map(std::path::PathBuf::from)
+                .ok_or_else(|| std::io::Error::other("umask database environment is missing"))?;
+            let ready = std::env::var_os(UMASK_READY_ENV)
+                .map(std::path::PathBuf::from)
+                .ok_or_else(|| std::io::Error::other("umask ready environment is missing"))?;
+            let backup = database.with_extension("db.backup");
+            let workspace = workspace();
+            let (nodes, edges, evidence) = fixture();
+            {
+                let mut store = SqliteStore::open(&database)?;
+                store.publish_snapshot(SnapshotBatch {
+                    workspace: &workspace,
+                    snapshot_id: "snapshot:umask",
+                    nodes: &nodes,
+                    edges: &edges,
+                    evidence: &evidence,
+                    fingerprints: &[],
+                    extractor_batches: &[],
+                    extractor_runs: &[],
+                    manual_links: &[],
+                    community_snapshot: None,
+                })?;
+                store.backup_to(&backup)?;
+            }
+            for path in [
+                database.clone(),
+                backup,
+                {
+                    let mut wal = database.as_os_str().to_os_string();
+                    wal.push("-wal");
+                    std::path::PathBuf::from(wal)
+                },
+                {
+                    let mut shm = database.as_os_str().to_os_string();
+                    shm.push("-shm");
+                    std::path::PathBuf::from(shm)
+                },
+            ] {
+                if path.exists() {
+                    assert_eq!(
+                        fs::metadata(&path)?.permissions().mode() & 0o777,
+                        0o600,
+                        "permissions differ for `{}`",
+                        path.display()
+                    );
+                }
+            }
+            fs::write(ready, "ready")?;
+            std::thread::sleep(Duration::from_secs(30));
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn database_files_should_use_owner_only_permissions_under_permissive_umask()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temporary = tempfile::tempdir()?;
+        let database = temporary.path().join("umask.db");
+        let ready = temporary.path().join("ready");
+        let executable = std::env::current_exe()?;
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "umask 000; exec {} --exact tests::umask_permission_helper --nocapture",
+                executable.display()
+            ))
+            .env(UMASK_HELPER_ENV, "1")
+            .env(UMASK_DATABASE_ENV, &database)
+            .env(UMASK_READY_ENV, &ready)
+            .spawn()?;
+        let mut helper_ready = false;
+        for _attempt in 0..200 {
+            if ready.exists() {
+                helper_ready = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        if !helper_ready {
+            child.kill()?;
+            let _status = child.wait()?;
+            return Err(std::io::Error::other("umask helper did not become ready").into());
+        }
+        child.kill()?;
+        let _status = child.wait()?;
         Ok(())
     }
 
