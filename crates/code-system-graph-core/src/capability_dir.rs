@@ -79,6 +79,15 @@ pub struct CapabilityDir {
     directory: File,
 }
 
+/// Classification of a repository-relative path for regular-file reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegularFileEntry {
+    /// No entry exists at the relative path.
+    Absent,
+    /// A regular file exists at the relative path.
+    Regular,
+}
+
 impl CapabilityDir {
     /// Opens one canonical directory without following a symlink root.
     ///
@@ -166,6 +175,35 @@ impl CapabilityDir {
         }
     }
 
+    /// Classifies whether a relative path is absent, a regular file, or an unsafe non-regular entry.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CapabilityError`] when the relative path is invalid, a symlink, or unreadable.
+    pub fn classify_regular_file_entry(
+        &self,
+        relative: &Path,
+    ) -> Result<RegularFileEntry, CapabilityError> {
+        validate_relative_path(relative, &self.root)?;
+        let path = self.root.join(relative);
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) => {
+                if is_symlink_or_reparse_point(&metadata) {
+                    return Err(CapabilityError::Symlink { path });
+                }
+                if metadata.is_file() {
+                    Ok(RegularFileEntry::Regular)
+                } else {
+                    Err(CapabilityError::NotRegularFile { path })
+                }
+            }
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                Ok(RegularFileEntry::Absent)
+            }
+            Err(source) => Err(CapabilityError::Io { path, source }),
+        }
+    }
+
     /// Returns whether a regular file exists at a relative path.
     ///
     /// # Errors
@@ -217,7 +255,15 @@ impl CapabilityDir {
         #[cfg(unix)]
         {
             let (parent, file_name) = split_relative(relative)?;
-            let parent_dir = descend_unix(&self.directory, &self.root, parent, false)?;
+            let parent_dir = match descend_unix(&self.directory, &self.root, parent, false) {
+                Ok(directory) => directory,
+                Err(CapabilityError::Io { source, .. })
+                    if source.kind() == std::io::ErrorKind::NotFound =>
+                {
+                    return Ok(false);
+                }
+                Err(error) => return Err(error),
+            };
             remove_file_unix(&parent_dir, &self.root.join(parent), file_name)
         }
         #[cfg(not(unix))]
@@ -397,21 +443,35 @@ fn read_file_bounded_unix(
             limit: max_bytes,
         });
     }
-    let mut file = File::from(fd);
-    let mut buffer = vec![0_u8; size.saturating_add(1)];
-    let read = file
-        .read(&mut buffer)
-        .map_err(|source| CapabilityError::Io {
-            path: parent_path.join(file_name),
-            source,
-        })?;
-    if read > max_bytes {
-        return Err(CapabilityError::TooLarge {
-            path: parent_path.join(file_name),
-            limit: max_bytes,
-        });
+    let file = File::from(fd);
+    read_file_to_end_bounded(file, &parent_path.join(file_name), max_bytes)
+}
+
+fn read_file_to_end_bounded(
+    mut file: File,
+    path: &Path,
+    max_bytes: usize,
+) -> Result<Vec<u8>, CapabilityError> {
+    let mut buffer = Vec::new();
+    let mut chunk = [0_u8; 8 * 1024];
+    loop {
+        let read = file
+            .read(&mut chunk)
+            .map_err(|source| CapabilityError::Io {
+                path: path.to_path_buf(),
+                source,
+            })?;
+        if read == 0 {
+            break;
+        }
+        if buffer.len() + read > max_bytes {
+            return Err(CapabilityError::TooLarge {
+                path: path.to_path_buf(),
+                limit: max_bytes,
+            });
+        }
+        buffer.extend_from_slice(&chunk[..read]);
     }
-    buffer.truncate(read);
     Ok(buffer)
 }
 
@@ -515,21 +575,7 @@ fn read_file_bounded_portable(
         });
     }
     let mut file = fs::File::open(&path).map_err(|source| CapabilityError::Io { path, source })?;
-    let mut buffer = vec![0_u8; size.saturating_add(1)];
-    let read = file
-        .read(&mut buffer)
-        .map_err(|source| CapabilityError::Io {
-            path: path.clone(),
-            source,
-        })?;
-    if read > max_bytes {
-        return Err(CapabilityError::TooLarge {
-            path,
-            limit: max_bytes,
-        });
-    }
-    buffer.truncate(read);
-    Ok(buffer)
+    read_file_to_end_bounded(file, &path, max_bytes)
 }
 
 #[cfg(not(unix))]
@@ -630,6 +676,17 @@ mod tests {
             MAX_REPOSITORY_CONFIG_BYTES,
         );
         assert!(matches!(result, Err(CapabilityError::TooLarge { .. })));
+        Ok(())
+    }
+
+    #[test]
+    fn capability_dir_should_treat_missing_parent_as_absent_on_remove()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let checkout = tempfile::tempdir()?;
+        let root = CapabilityDir::open(checkout.path())?;
+        let removed =
+            root.remove_file_if_exists(Path::new(".code-system-graph/hooks/state.json"))?;
+        assert!(!removed);
         Ok(())
     }
 }

@@ -53,7 +53,9 @@ pub use batch::{
 pub use builtin_extractors::{
     FocusedSourceExtractor, FocusedSourceLanguage, GeneratedClientMetadataExtractor, PackageManifestExtractor, charge_source_observation, precheck_focused_source_values
 };
-pub use capability_dir::{CapabilityDir, CapabilityError, MAX_REPOSITORY_CONFIG_BYTES};
+pub use capability_dir::{
+    CapabilityDir, CapabilityError, MAX_REPOSITORY_CONFIG_BYTES, RegularFileEntry
+};
 pub use change_analysis::{
     CHANGE_ANALYZER_VERSION, ChangeAnalysisCoverage, ChangeAnalysisError, ChangeAnalysisOptions, ChangeAnalysisSummary, ChangeConclusion, ChangeImpactReport, ChangedArtifactMapping, ChangedEntity, ChangedEntityRole, ChangedPathSide, ContractCompatibilityInput, EvidenceMatchKind, HunkLineMatch, MappingCompleteness, SemanticContractDelta, analyze_changes, validate_change_analysis
 };

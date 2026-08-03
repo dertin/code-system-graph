@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    CapabilityDir, CapabilityError, ContractImplementationConfig, HttpConsumerConfig, IgnorePatternError, IgnorePolicy, IntegrationTestConfig, MAX_REPOSITORY_CONFIG_BYTES, RepositoryConfig, validate_excludes, validate_include_defaults
+    CapabilityDir, CapabilityError, ContractImplementationConfig, HttpConsumerConfig, IgnorePatternError, IgnorePolicy, IntegrationTestConfig, MAX_REPOSITORY_CONFIG_BYTES, RegularFileEntry, RepositoryConfig, validate_excludes, validate_include_defaults
 };
 
 const LOCAL_CONFIG_NAME: &str = ".code-system-graph.yaml";
@@ -193,23 +193,24 @@ pub fn resolve_repository_config(
     let checkout = CapabilityDir::open(checkout_path)
         .map_err(|error| map_capability_error(error, checkout_path, LOCAL_CONFIG_NAME))?;
     let local_relative = Path::new(LOCAL_CONFIG_NAME);
-    let (local, local_source) = if checkout
-        .regular_file_exists(local_relative)
+    let (local, local_source) = match checkout
+        .classify_regular_file_entry(local_relative)
         .map_err(|error| map_capability_error(error, checkout_path, LOCAL_CONFIG_NAME))?
     {
-        let local_path = checkout_path.join(LOCAL_CONFIG_NAME);
-        let source = checkout
-            .read_utf8_file_bounded(local_relative, MAX_REPOSITORY_CONFIG_BYTES)
-            .map_err(|error| map_capability_error(error, checkout_path, LOCAL_CONFIG_NAME))?;
-        let config: RepositoryLocalConfig =
-            crate::yaml::from_str(&source).map_err(|source| ConfigError::Invalid {
-                path: local_path.clone(),
-                source: Box::new(source),
-            })?;
-        validate_local(&local_path, &config)?;
-        (Some(config), Some(source))
-    } else {
-        (None, None)
+        RegularFileEntry::Absent => (None, None),
+        RegularFileEntry::Regular => {
+            let local_path = checkout_path.join(LOCAL_CONFIG_NAME);
+            let source = checkout
+                .read_utf8_file_bounded(local_relative, MAX_REPOSITORY_CONFIG_BYTES)
+                .map_err(|error| map_capability_error(error, checkout_path, LOCAL_CONFIG_NAME))?;
+            let config: RepositoryLocalConfig =
+                crate::yaml::from_str(&source).map_err(|source| ConfigError::Invalid {
+                    path: local_path.clone(),
+                    source: Box::new(source),
+                })?;
+            validate_local(&local_path, &config)?;
+            (Some(config), Some(source))
+        }
     };
 
     let ignore_policy = resolve_ignore_policy(checkout_path, workspace, local.as_ref())?;
@@ -795,6 +796,27 @@ mod tests {
         let result = resolve_repository_config(repository.path(), &workspace);
 
         assert!(matches!(result, Err(ConfigError::TooLarge { .. })));
+        Ok(())
+    }
+
+    #[test]
+    fn repository_local_config_should_reject_directory_entry()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let repository = tempfile::tempdir()?;
+        std::fs::create_dir_all(repository.path().join(".code-system-graph.yaml"))?;
+        let workspace = RepositoryConfig {
+            path: ".".to_owned(),
+            openapi: None,
+            http_consumers: None,
+            integration_tests: None,
+            implementations: None,
+            excludes: None,
+            include_defaults: None,
+        };
+
+        let result = resolve_repository_config(repository.path(), &workspace);
+
+        assert!(matches!(result, Err(ConfigError::NotRegularFile { .. })));
         Ok(())
     }
 

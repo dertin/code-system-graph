@@ -207,8 +207,15 @@ impl ManagedRoot {
         #[cfg(unix)]
         {
             let (parent, file_name) = split_relative(relative).map_err(map_validation_error)?;
-            let parent_dir = descend_unix(&self.directory, &self.root, parent, false)
-                .map_err(map_io_error(&self.root.join(parent)))?;
+            let parent_dir = match descend_unix(&self.directory, &self.root, parent, false) {
+                Ok(directory) => directory,
+                Err(CapabilityIoError::Io { source })
+                    if source.kind() == std::io::ErrorKind::NotFound =>
+                {
+                    return Ok(false);
+                }
+                Err(error) => return Err(map_io_error(&self.root.join(parent))(error)),
+            };
             remove_file_unix(&parent_dir, &self.root.join(parent), file_name)
                 .map_err(map_io_error(&self.root.join(relative)))
         }
@@ -423,15 +430,28 @@ fn read_bytes_bounded_unix(
     if size > max_bytes {
         return Err(CapabilityIoError::TooLarge { limit: max_bytes });
     }
-    let mut file = File::from(fd);
-    let mut buffer = vec![0_u8; size.saturating_add(1)];
-    let read = file
-        .read(&mut buffer)
-        .map_err(|source| CapabilityIoError::Io { source })?;
-    if read > max_bytes {
-        return Err(CapabilityIoError::TooLarge { limit: max_bytes });
+    let file = File::from(fd);
+    read_file_to_end_bounded(file, max_bytes)
+}
+
+fn read_file_to_end_bounded(
+    mut file: File,
+    max_bytes: usize,
+) -> Result<Vec<u8>, CapabilityIoError> {
+    let mut buffer = Vec::new();
+    let mut chunk = [0_u8; 8 * 1024];
+    loop {
+        let read = file
+            .read(&mut chunk)
+            .map_err(|source| CapabilityIoError::Io { source })?;
+        if read == 0 {
+            break;
+        }
+        if buffer.len() + read > max_bytes {
+            return Err(CapabilityIoError::TooLarge { limit: max_bytes });
+        }
+        buffer.extend_from_slice(&chunk[..read]);
     }
-    buffer.truncate(read);
     Ok(buffer)
 }
 
@@ -536,16 +556,8 @@ fn read_bytes_bounded_portable(
     if size > max_bytes {
         return Err(CapabilityIoError::TooLarge { limit: max_bytes });
     }
-    let mut file = fs::File::open(&path).map_err(|source| CapabilityIoError::Io { source })?;
-    let mut buffer = vec![0_u8; size.saturating_add(1)];
-    let read = file
-        .read(&mut buffer)
-        .map_err(|source| CapabilityIoError::Io { source })?;
-    if read > max_bytes {
-        return Err(CapabilityIoError::TooLarge { limit: max_bytes });
-    }
-    buffer.truncate(read);
-    Ok(buffer)
+    let file = fs::File::open(&path).map_err(|source| CapabilityIoError::Io { source })?;
+    read_file_to_end_bounded(file, max_bytes)
 }
 
 #[cfg(not(unix))]
@@ -603,5 +615,23 @@ impl std::fmt::Display for ValidationError {
                 root.display()
             ),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::ManagedRoot;
+
+    #[test]
+    fn managed_root_should_treat_missing_parent_as_absent_on_remove()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let repository = tempfile::tempdir()?;
+        let managed = ManagedRoot::open(repository.path())?;
+        let removed =
+            managed.remove_file_if_exists(Path::new(".code-system-graph/hooks/state.json"))?;
+        assert!(!removed);
+        Ok(())
     }
 }

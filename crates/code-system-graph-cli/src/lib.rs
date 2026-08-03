@@ -175,11 +175,8 @@ pub enum ApplicationError {
         checkout: PathBuf,
     },
     /// Artifact path display contains unsafe metadata characters.
-    #[error("artifact path `{path}` contains unsafe control or bidirectional characters")]
-    UnsafeArtifactPath {
-        /// Repository-relative artifact path display.
-        path: String,
-    },
+    #[error("artifact path contains unsafe control or bidirectional characters")]
+    UnsafeArtifactPath,
     /// Persistent storage failed.
     #[error(transparent)]
     Store(#[from] StoreError),
@@ -274,7 +271,7 @@ pub const fn application_exit_code(error: &ApplicationError) -> ExitCode {
         | ApplicationError::UnknownOverrideRepository(_)
         | ApplicationError::WorkspaceNameMismatch { .. }
         | ApplicationError::ArtifactOutsideCheckout { .. }
-        | ApplicationError::UnsafeArtifactPath { .. }
+        | ApplicationError::UnsafeArtifactPath
         | ApplicationError::PartialScanBudgetChanged
         | ApplicationError::Trace(_)
         | ApplicationError::Community(_)
@@ -5838,11 +5835,8 @@ fn fingerprint_artifact(
         }
     })?;
     let path = encode_native_path(relative);
-    code_system_graph_model::validate_safe_path_display(&path.display).map_err(|_| {
-        ApplicationError::UnsafeArtifactPath {
-            path: path.display.clone(),
-        }
-    })?;
+    code_system_graph_model::validate_safe_path_display(&path.display)
+        .map_err(|_| ApplicationError::UnsafeArtifactPath)?;
     let mut tracker = ExtractionTracker::new(&path.display, extractor, budgets);
     let content = read_bounded_bytes(&canonical_path, &mut tracker)?;
     let fingerprint = ArtifactFingerprint {
