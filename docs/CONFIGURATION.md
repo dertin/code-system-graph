@@ -221,6 +221,83 @@ The local database should never be committed. When the workspace belongs to a Gi
 .code-system-graph/
 ```
 
+## Advanced configuration
+
+### Security budgets
+
+Extraction budgets are global operator-owned safety limits. Each value applies independently to
+one artifact-extractor invocation and resets for the next file and for another extractor on the
+same file. They do not limit repository count, discovered file count, persisted node count, or the
+complete graph.
+
+The defaults are effective when this block is absent. A partial block changes only the named
+values:
+
+```yaml
+extractionBudgets:
+  maxInputBytesPerArtifact: 8388608
+  maxStructuralDepthPerArtifact: 64
+  maxAstDepthPerArtifact: 256
+  maxWorkUnitsPerArtifact: 100000
+  maxTreeSitterNodesPerArtifact: 500000
+  maxObservationsPerArtifact: 100000
+  maxAccumulatedStringBytesPerArtifact: 33554432
+  maxSerializedOutputBytesPerArtifact: 33554432
+  maxStringBytesPerValue: 65536
+  maxPortablePathBytesPerValue: 4096
+  maxIdentifierBytesPerValue: 1024
+  maxStructuredWallTimeMsPerArtifact: 5000
+  maxTreeSitterWallTimeMsPerArtifact: 10000
+```
+
+All values must be positive integers representable by the running build. Unknown fields, zero,
+and numeric overflow are rejected. Higher values are accepted, but increase the maximum CPU,
+memory, input, or output consumption explicitly authorized by the operator. Lower values can
+reject artifacts that scan successfully with the defaults.
+
+This block is accepted only in a trusted global `code-system-graph.yaml` located outside every
+checkout listed in `repos`. A manifest inside an analyzed checkout cannot set this block, even when
+that checkout uses `path: .`. Repository-local `.code-system-graph.yaml`, environment variables,
+and CLI arguments also cannot set or raise these limits. `csgraph config show` reports every
+effective value, including defaults.
+
+Effective values are fingerprinted into each extractor batch. A changed fingerprint prevents
+batch reuse. If budgets changed, a scan restricted with `--repo` fails early and requests a full
+scan so one snapshot cannot mix global policies. Any exhausted budget aborts before publication;
+the previous snapshot remains current and queryable.
+
+Supervised execution policy is also global and operator-owned. It bounds the lifetime and resident
+memory of each fresh scan or sync worker, and makes a foreground watcher expire even when changes
+continue indefinitely. It does not cap repositories, files, graph nodes, graph edges, or the active
+candidate size.
+
+```yaml
+executionPolicy:
+  maxScanWallTimeMs: 21600000
+  maxNoProgressTimeMs: 300000
+  maxCodeGraphSyncWallTimeMsPerRepo: 3600000
+  maxWorkerMemoryBytes: 17179869184
+  gracefulTerminationMs: 5000
+  watchIdleTimeoutMs: 28800000
+  maxWatchSessionWallTimeMs: 86400000
+  minWatchRescanIntervalMs: 10000
+  maxCheckpointCacheBytes: 10737418240
+```
+
+The defaults allow six hours and 16 GiB per worker, five minutes without verified completed work,
+eight idle hours and 24 total hours per watcher session, and 10 GiB of historical checkpoint cache.
+The cache is not preallocated. Completed batches and a fully validated candidate graph may be
+resumed from the owner-only operational sidecar; that candidate remains invisible to every query
+surface until one atomic publication transaction succeeds.
+
+All values must be positive and representable. The no-progress and per-repository CodeGraph
+deadlines cannot exceed the pass deadline; the termination grace cannot exceed the no-progress
+deadline; and watcher sub-deadlines cannot exceed the session deadline. Raising values explicitly
+authorizes greater maximum CPU, memory, or cloud-agent cost. Like extraction budgets, this block is
+accepted only from a global manifest outside every analyzed checkout; it is rejected in repository
+local configuration and has no environment or CLI equivalent. Changing it does not invalidate
+deterministic extractor batches.
+
 ## Optional features
 
 ### CodeGraph

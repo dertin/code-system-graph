@@ -330,7 +330,7 @@ pub enum DoctorStatus {
     Unknown,
 }
 
-/// Schema and migration state supplied to the pure doctor function.
+/// Exact schema state supplied to the pure doctor function.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SchemaDoctorInput {
     /// Stable store or component name.
@@ -339,8 +339,8 @@ pub struct SchemaDoctorInput {
     pub expected_version: u32,
     /// Observed schema version, or `None` when unavailable.
     pub actual_version: Option<u32>,
-    /// Whether the migration inventory is internally consistent.
-    pub migrations_consistent: Option<bool>,
+    /// Whether the exact schema metadata is internally consistent.
+    pub metadata_consistent: Option<bool>,
 }
 
 /// Integrity observation supplied to the pure doctor function.
@@ -1662,35 +1662,36 @@ fn append_schema_checks(inputs: &[SchemaDoctorInput], checks: &mut Vec<DoctorChe
         checks.push(missing_doctor_category(DoctorCategory::Schema));
     }
     for input in inputs {
-        let (status, summary, remediation) =
-            match (input.actual_version, input.migrations_consistent) {
-                (Some(actual), Some(true)) if actual == input.expected_version => (
-                    DoctorStatus::Healthy,
-                    format!("Schema version {actual} and migration inventory are consistent."),
-                    None,
+        let (status, summary, remediation) = match (input.actual_version, input.metadata_consistent)
+        {
+            (Some(actual), Some(true)) if actual == input.expected_version => (
+                DoctorStatus::Healthy,
+                format!("Schema version {actual} and metadata are consistent."),
+                None,
+            ),
+            (Some(actual), _) if actual != input.expected_version => (
+                DoctorStatus::Failed,
+                format!(
+                    "Schema version {actual} does not match expected version {}.",
+                    input.expected_version
                 ),
-                (Some(actual), _) if actual != input.expected_version => (
-                    DoctorStatus::Failed,
-                    format!(
-                        "Schema version {actual} does not match expected version {}.",
-                        input.expected_version
-                    ),
-                    Some("Run the supported migration command after creating a backup.".to_owned()),
+                Some(
+                    "Remove the incompatible development database and run a full scan.".to_owned(),
                 ),
-                (Some(_), Some(false)) => (
-                    DoctorStatus::Failed,
-                    "Migration inventory is inconsistent.".to_owned(),
-                    Some(
-                        "Repair or restore the migration inventory before writing state."
-                            .to_owned(),
-                    ),
+            ),
+            (Some(_), Some(false)) => (
+                DoctorStatus::Failed,
+                "Schema metadata is inconsistent.".to_owned(),
+                Some(
+                    "Restore an exact 1.0.0 backup or rebuild the development database.".to_owned(),
                 ),
-                _ => (
-                    DoctorStatus::Unknown,
-                    "Schema or migration state was not fully observed.".to_owned(),
-                    Some("Open the store and run schema and migration checks.".to_owned()),
-                ),
-            };
+            ),
+            _ => (
+                DoctorStatus::Unknown,
+                "Schema state was not fully observed.".to_owned(),
+                Some("Open the store and validate its exact schema metadata.".to_owned()),
+            ),
+        };
         checks.push(DoctorCheck {
             category: DoctorCategory::Schema,
             name: input.name.clone(),
@@ -1961,7 +1962,7 @@ mod tests {
                 name: "store".to_owned(),
                 expected_version: 8,
                 actual_version: Some(8),
-                migrations_consistent: Some(true),
+                metadata_consistent: Some(true),
             }],
             integrity: vec![IntegrityDoctorInput {
                 name: "sqlite".to_owned(),

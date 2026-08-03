@@ -3,12 +3,17 @@
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
-use code_system_graph_core::{EffectiveRepositoryConfig, IgnorePolicy};
+use code_system_graph_core::{ConfigSource, EffectiveRepositoryConfig, IgnorePolicy};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::{ApplicationError, ScanOverrides, ScanSummary, load_workspace_context};
+use super::{
+    ApplicationError, ScanOverrides, ScanSummary, load_workspace_context, work_database_instance_id
+};
+
+const MAX_PERSISTED_WATCH_TARGET_BYTES: u64 = 8 * 1024 * 1024;
 
 /// One registered repository that participates in synchronization.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,6 +26,53 @@ pub struct SyncTarget {
     pub ignore_policy: IgnorePolicy,
     /// Explicit repository-relative artifacts that must remain observable through exclusions.
     pub explicit_paths: Vec<PathBuf>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PersistedWatchTarget {
+    alias: String,
+    path: PathBuf,
+    configured_excludes: Vec<String>,
+    configured_excludes_source: ConfigSource,
+    include_defaults: Vec<String>,
+    include_defaults_source: ConfigSource,
+    explicit_paths: Vec<PathBuf>,
+}
+
+impl From<&SyncTarget> for PersistedWatchTarget {
+    fn from(target: &SyncTarget) -> Self {
+        Self {
+            alias: target.alias.clone(),
+            path: target.path.clone(),
+            configured_excludes: target.ignore_policy.configured_excludes().to_vec(),
+            configured_excludes_source: target.ignore_policy.configured_excludes_source(),
+            include_defaults: target.ignore_policy.include_defaults().to_vec(),
+            include_defaults_source: target.ignore_policy.include_defaults_source(),
+            explicit_paths: target.explicit_paths.clone(),
+        }
+    }
+}
+
+impl TryFrom<PersistedWatchTarget> for SyncTarget {
+    type Error = ApplicationError;
+
+    fn try_from(target: PersistedWatchTarget) -> Result<Self, Self::Error> {
+        let ignore_policy = IgnorePolicy::new(
+            target.configured_excludes,
+            target.configured_excludes_source,
+            target.include_defaults,
+            target.include_defaults_source,
+        )
+        .map_err(|error| {
+            ApplicationError::Initialization(format!("invalid persisted watch scope: {error}"))
+        })?;
+        Ok(Self {
+            alias: target.alias,
+            path: target.path,
+            ignore_policy,
+            explicit_paths: target.explicit_paths,
+        })
+    }
 }
 
 /// Outcome of synchronizing one repository's local `CodeGraph` index.
@@ -68,6 +120,8 @@ pub struct CodeGraphSyncSummary {
 pub struct SyncSummary {
     /// Output schema version.
     pub schema_version: u8,
+    /// Resource accounting for the complete supervised sync pass.
+    pub execution: code_system_graph_core::ExecutionSummary,
     /// Incremental Code System Graph scan result.
     pub scan: ScanSummary,
     /// Local per-repository `CodeGraph` index results.
@@ -177,19 +231,121 @@ pub fn sync_workspace_with_overrides(
     overrides: &ScanOverrides,
     synchronize_codegraph: bool,
 ) -> Result<SyncSummary, ApplicationError> {
+    super::worker::supervise_sync(config_path, database_path, overrides, synchronize_codegraph)
+}
+
+/// Synchronizes through an explicitly selected compatible worker executable.
+///
+/// Embedding applications can pass their own executable after dispatching `__worker-v1` to
+/// [`crate::run_worker_from_stdio`].
+///
+/// # Errors
+///
+/// Returns [`ApplicationError`] when the worker cannot start or synchronization fails.
+pub fn sync_workspace_with_worker_executable(
+    config_path: &Path,
+    database_path: &Path,
+    overrides: &ScanOverrides,
+    synchronize_codegraph: bool,
+    worker_executable: &Path,
+) -> Result<SyncSummary, ApplicationError> {
+    super::worker::supervise_sync_with_executable(
+        config_path,
+        database_path,
+        overrides,
+        synchronize_codegraph,
+        worker_executable,
+    )
+}
+
+#[doc(hidden)]
+pub fn sync_workspace_with_wall_time_cap(
+    config_path: &Path,
+    database_path: &Path,
+    overrides: &ScanOverrides,
+    synchronize_codegraph: bool,
+    wall_time_cap_ms: u64,
+) -> Result<SyncSummary, ApplicationError> {
+    super::worker::supervise_sync_with_wall_time_cap(
+        config_path,
+        database_path,
+        overrides,
+        synchronize_codegraph,
+        wall_time_cap_ms,
+    )
+}
+
+pub(crate) fn sync_workspace_direct(
+    config_path: &Path,
+    database_path: &Path,
+    overrides: &ScanOverrides,
+    synchronize_codegraph: bool,
+) -> Result<SyncSummary, ApplicationError> {
+    let context = load_workspace_context(config_path, overrides)?;
+    let policy = context.execution_policy;
+    let workspace = context.manifest.name;
     let targets = workspace_sync_targets(config_path, overrides)?;
+    persist_watch_targets(database_path, &workspace, &targets)?;
     let binary = codegraph_binary(overrides);
     let codegraph = synchronize_codegraph_targets(&targets, synchronize_codegraph, |path| {
-        run_codegraph_sync(&binary, path)
+        run_codegraph_sync(
+            &binary,
+            path,
+            Duration::from_millis(policy.max_codegraph_sync_wall_time_ms_per_repo),
+        )
     });
     let mut scan_overrides = overrides.clone();
     scan_overrides.codegraph = codegraph.synchronized_count > 0;
-    let scan = super::scan_workspace_with_overrides(config_path, database_path, &scan_overrides)?;
+    let scan = super::scan_workspace_direct(config_path, database_path, &scan_overrides)?;
     Ok(SyncSummary {
         schema_version: 1,
+        execution: code_system_graph_core::ExecutionSummary::default(),
         scan,
         codegraph,
     })
+}
+
+fn persist_watch_targets(
+    database_path: &Path,
+    workspace: &str,
+    targets: &[SyncTarget],
+) -> Result<(), ApplicationError> {
+    let mut encoded = Vec::with_capacity(targets.len());
+    for target in targets {
+        let payload = serde_json::to_vec(&PersistedWatchTarget::from(target))
+            .map_err(|error| ApplicationError::Initialization(error.to_string()))?;
+        if u64::try_from(payload.len()).unwrap_or(u64::MAX) > MAX_PERSISTED_WATCH_TARGET_BYTES {
+            return Err(ApplicationError::Initialization(
+                "persisted watch target exceeded its protocol bound".to_owned(),
+            ));
+        }
+        encoded.push((target.alias.clone(), payload));
+    }
+    let database_instance_id =
+        code_system_graph_store_sqlite::SqliteStore::open(database_path)?.database_instance_id()?;
+    super::work_state::WorkState::open(database_path, &database_instance_id)
+        .and_then(|mut state| state.replace_watch_scope(workspace, &encoded))
+        .map_err(ApplicationError::Initialization)
+}
+
+#[doc(hidden)]
+pub fn load_persisted_watch_targets(
+    database_path: &Path,
+    workspace: &str,
+) -> Result<Vec<SyncTarget>, ApplicationError> {
+    let database_instance_id = work_database_instance_id(database_path)?;
+    let state = super::work_state::WorkState::open(database_path, &database_instance_id)
+        .map_err(ApplicationError::Initialization)?;
+    state
+        .load_watch_scope(workspace, MAX_PERSISTED_WATCH_TARGET_BYTES)
+        .map_err(ApplicationError::Initialization)?
+        .into_iter()
+        .map(|encoded| {
+            serde_json::from_slice::<PersistedWatchTarget>(&encoded)
+                .map_err(|error| ApplicationError::Initialization(error.to_string()))?
+                .try_into()
+        })
+        .collect()
 }
 
 fn codegraph_binary(overrides: &ScanOverrides) -> OsString {
@@ -203,21 +359,88 @@ fn codegraph_binary(overrides: &ScanOverrides) -> OsString {
         .unwrap_or_else(|| OsString::from("codegraph"))
 }
 
-fn run_codegraph_sync(binary: &OsStr, project_path: &Path) -> Result<(), String> {
-    let status = Command::new(binary)
+fn run_codegraph_sync(
+    binary: &OsStr,
+    project_path: &Path,
+    timeout: Duration,
+) -> Result<(), String> {
+    let mut command = Command::new(binary);
+    command
         .arg("sync")
         .arg("--quiet")
         .arg(project_path)
         .current_dir(project_path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
+        .stderr(Stdio::null());
+    configure_codegraph_process_group(&mut command);
+    let mut child = command
+        .spawn()
         .map_err(|error| format!("failed to start codegraph sync: {error}"))?;
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|error| format!("failed to wait for codegraph sync: {error}"))?
+        {
+            break status;
+        }
+        if started.elapsed() >= timeout {
+            super::worker::terminate_process_tree(child.id());
+            terminate_codegraph_process_group(&mut child);
+            return Err(format!(
+                "codegraph sync exceeded {} ms and was terminated",
+                timeout.as_millis()
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    cleanup_exited_codegraph_process_group(child.id());
     if status.success() {
         return Ok(());
     }
     Err(format!("codegraph sync exited with {status}"))
+}
+
+#[cfg(unix)]
+fn configure_codegraph_process_group(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    command.process_group(0);
+}
+
+#[cfg(not(unix))]
+fn configure_codegraph_process_group(_command: &mut Command) {}
+
+#[cfg(unix)]
+fn terminate_codegraph_process_group(child: &mut std::process::Child) {
+    if let Ok(process_group_id) = i32::try_from(child.id()) {
+        let process_group_id = nix::unistd::Pid::from_raw(process_group_id);
+        let _ = nix::sys::signal::killpg(process_group_id, nix::sys::signal::Signal::SIGTERM);
+        std::thread::sleep(Duration::from_millis(100));
+        let _ = nix::sys::signal::killpg(process_group_id, nix::sys::signal::Signal::SIGKILL);
+    }
+    let _ = child.wait();
+}
+
+#[cfg(not(unix))]
+fn terminate_codegraph_process_group(child: &mut std::process::Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[cfg(unix)]
+fn cleanup_exited_codegraph_process_group(process_id: u32) {
+    if let Ok(process_group_id) = i32::try_from(process_id) {
+        let _ = nix::sys::signal::killpg(
+            nix::unistd::Pid::from_raw(process_group_id),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+    }
+}
+
+#[cfg(not(unix))]
+fn cleanup_exited_codegraph_process_group(process_id: u32) {
+    super::worker::terminate_process_tree(process_id);
 }
 
 fn synchronize_codegraph_targets<F>(
@@ -247,6 +470,7 @@ where
                 state,
                 detail,
             });
+            super::worker::report_progress(code_system_graph_core::JobPhase::CodeGraphSync, 1);
         }
     }
     repositories.sort_by(|left, right| left.repository.cmp(&right.repository));
@@ -305,6 +529,29 @@ mod tests {
     }
 
     #[test]
+    fn persisted_watch_scope_should_preserve_every_alias_policy() -> anyhow::Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let database = temporary.path().join("graph.db");
+        let shared = temporary.path().join("shared");
+        std::fs::create_dir(&shared)?;
+        let mut restrictive = target("a-restrictive", shared.clone());
+        restrictive.ignore_policy = IgnorePolicy::new(
+            vec!["generated/**".to_owned()],
+            ConfigSource::WorkspaceManifest,
+            Vec::new(),
+            ConfigSource::Default,
+        )?;
+        let permissive = target("b-permissive", shared);
+        let expected = vec![restrictive, permissive];
+
+        persist_watch_targets(&database, "workspace", &expected)?;
+        let actual = load_persisted_watch_targets(&database, "workspace")?;
+
+        assert_eq!(actual, expected);
+        Ok(())
+    }
+
+    #[test]
     fn synchronization_should_skip_uninitialized_indexes_and_bound_failures() -> anyhow::Result<()>
     {
         let temporary = tempfile::tempdir()?;
@@ -348,5 +595,68 @@ mod tests {
         assert!(!report.enabled);
         assert_eq!(report.repository_count, 1);
         assert!(report.repositories.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codegraph_timeout_should_terminate_its_descendant_process() -> anyhow::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temporary = tempfile::tempdir()?;
+        let script = temporary.path().join("codegraph-test");
+        let descendant_pid = temporary.path().join("descendant.pid");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nsleep 30 &\nprintf '%s' \"$!\" > '{}'\nwait\n",
+                descendant_pid.display()
+            ),
+        )?;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700))?;
+
+        let error =
+            run_codegraph_sync(script.as_os_str(), temporary.path(), Duration::from_secs(2))
+                .expect_err("test process must time out");
+        assert!(
+            error.contains("was terminated"),
+            "unexpected error: {error}"
+        );
+        let pid = std::fs::read_to_string(&descendant_pid)?.parse::<i32>()?;
+        for _ in 0..20 {
+            if nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_err() {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        anyhow::bail!("CodeGraph descendant {pid} survived timeout")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn successful_codegraph_sync_should_terminate_surviving_descendants() -> anyhow::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temporary = tempfile::tempdir()?;
+        let script = temporary.path().join("codegraph-test");
+        let descendant_pid = temporary.path().join("descendant.pid");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nsh -c 'trap \"\" TERM; sleep 30' &\nprintf '%s' \"$!\" > '{}'\nexit 0\n",
+                descendant_pid.display()
+            ),
+        )?;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700))?;
+
+        run_codegraph_sync(script.as_os_str(), temporary.path(), Duration::from_secs(2))
+            .map_err(anyhow::Error::msg)?;
+        let pid = std::fs::read_to_string(&descendant_pid)?.parse::<i32>()?;
+        for _ in 0..20 {
+            if nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_err() {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        anyhow::bail!("CodeGraph descendant {pid} survived successful sync")
     }
 }

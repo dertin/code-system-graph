@@ -35,7 +35,7 @@ csgraph config show [--config <manifest>] [--repo <alias>]
 csgraph status --database <db> [--config <manifest>]
 csgraph doctor --database <db> [--config <manifest>]
 csgraph diagnostics --database <db> [--config <manifest>] --output <new-bundle.json>
-csgraph backup|restore|migrate ...
+csgraph backup|restore ...
 ```
 
 Normal scan reuses unchanged source-owned batches. `--repo` recomputes only the selected alias and

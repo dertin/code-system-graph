@@ -13,6 +13,8 @@ mod data_contracts;
 mod documents;
 mod event_graph;
 mod events;
+mod execution_policy;
+mod extraction_budget;
 mod extraction_graph;
 mod extractor;
 mod generated_client;
@@ -45,10 +47,10 @@ mod trace;
 mod yaml;
 
 pub use batch::{
-    ArtifactKey, BatchAction, BatchPlanError, ExtractorBatch, ExtractorBatchPlan, PlannedBatch, affected_link_keys, load_extractor_batch, plan_extractor_batches, store_extractor_batch
+    ArtifactKey, BatchAction, BatchPlanError, ExtractorBatch, ExtractorBatchPlan, PlannedBatch, affected_link_keys, load_extractor_batch, load_extractor_batch_with_budgets, plan_extractor_batches, store_extractor_batch
 };
 pub use builtin_extractors::{
-    FocusedSourceExtractor, FocusedSourceLanguage, GeneratedClientMetadataExtractor, PackageManifestExtractor
+    FocusedSourceExtractor, FocusedSourceLanguage, GeneratedClientMetadataExtractor, PackageManifestExtractor, charge_source_observation, precheck_focused_source_values
 };
 pub use change_analysis::{
     CHANGE_ANALYZER_VERSION, ChangeAnalysisCoverage, ChangeAnalysisError, ChangeAnalysisOptions, ChangeAnalysisSummary, ChangeConclusion, ChangeImpactReport, ChangedArtifactMapping, ChangedEntity, ChangedEntityRole, ChangedPathSide, ContractCompatibilityInput, EvidenceMatchKind, HunkLineMatch, MappingCompleteness, SemanticContractDelta, analyze_changes, validate_change_analysis
@@ -57,7 +59,9 @@ pub use changes::{
     AnalyzerVersions, ChangeError, ChangeHunk, ChangeProvider, ChangeRequest, ChangeScope, ChangeSet, ChangeSourceLayer, ChangeValidity, ChangeValidityInput, ChangedFile, ChangedFileStatus, ChangedLine, ChangedLineKind, CommitFileSelection, CommitGate, CommitIntent, CommitSelection, GitCliChangeProvider, StaleReason, evaluate_commit_gate, validate_change_set
 };
 pub use codegraph::{CodeGraphConfig, CodeGraphProvider};
-pub use communities::{CommunityError, analyze_communities, compare_community_snapshots};
+pub use communities::{
+    CommunityError, analyze_communities, analyze_communities_with_progress, compare_community_snapshots
+};
 pub use config::{
     ConfigError, ConfigSource, EffectiveRepositoryConfig, apply_openapi_override, resolve_repository_config
 };
@@ -77,6 +81,12 @@ pub use event_graph::{EventGraphFacts, event_documents_to_graph};
 pub use events::{
     DeliverySemantics, EventBroker, EventDocument, EventEvidenceLine, EventExtractionError, EventObservation, EventRole, EventSchemaDefinition, EventSchemaField, extract_asyncapi, parse_event_source
 };
+pub use execution_policy::{
+    ExecutionLimitExceeded, ExecutionPolicy, ExecutionPolicyOverrides, ExecutionResource, ExecutionSummary, InvalidExecutionPolicy, JobPhase, MonotonicClock, ScanJobTracker
+};
+pub use extraction_budget::{
+    BoundedJsonWriter, EXTRACTION_CONTRACT_VERSION, ExtractionBudgetOverrides, ExtractionBudgets, ExtractionClock, ExtractionLimitExceeded, ExtractionResource, ExtractionTracker, InvalidExtractionBudget
+};
 pub use extraction_graph::{ExtractionGraphFacts, documents_to_graph};
 pub use extractor::{
     BoundaryExtractor, ContentFingerprint, DiscoverContext, DiscoveredInput, ExtractInput, ExtractionBatch, ExtractionCompleteness, ExtractionReport, ExtractorError, FileDescriptor, MAX_EXTRACTOR_INPUT_BYTES, fingerprint_content
@@ -85,11 +95,11 @@ pub use generated_client::{
     GeneratedClientError, GeneratedClientMetadata, extract_generated_client_metadata
 };
 pub use graphql_contracts::{
-    GraphqlArgumentDefinition, GraphqlDocument, GraphqlExtractionError, GraphqlFederationMetadata, GraphqlFieldDefinition, GraphqlFragment, GraphqlLineRange, GraphqlOperation, GraphqlOperationKind, GraphqlPersistedOperation, GraphqlResolver, GraphqlSelection, GraphqlTypeDefinition, GraphqlTypeKind, GraphqlTypeRef, extract_graphql_document, extract_graphql_persisted_operations, parse_graphql_source
+    GraphqlArgumentDefinition, GraphqlDocument, GraphqlExtractionError, GraphqlFederationMetadata, GraphqlFieldDefinition, GraphqlFragment, GraphqlLineRange, GraphqlLiteralKind, GraphqlOperation, GraphqlOperationKind, GraphqlPersistedOperation, GraphqlResolver, GraphqlSelection, GraphqlTypeDefinition, GraphqlTypeKind, GraphqlTypeRef, extract_graphql_document, extract_graphql_document_with_tracker, extract_graphql_persisted_operations, extract_graphql_persisted_operations_with_tracker, parse_graphql_source, parse_graphql_source_with_tracker
 };
 pub use graphql_graph::{GraphqlGraphFacts, graphql_documents_to_graph};
 pub use http::{
-    BoundaryRole, HttpBoundary, HttpExtractionError, extract_openapi, normalize_http_path
+    BoundaryRole, HttpBoundary, HttpExtractionError, extract_openapi, extract_openapi_with_tracker, normalize_http_path
 };
 pub use ignore_policy::{
     DEFAULT_EXCLUDES, IGNORE_POLICY_VERSION, IgnorePatternError, IgnorePolicy, PROTECTED_EXCLUDES, validate_excludes, validate_include_defaults
@@ -117,10 +127,10 @@ pub use package_graph::{
     PackageDependencyFact, PackageGraphFacts, PackageIdentity, link_registered_package_owners, package_manifest_to_graph
 };
 pub use packages::{
-    DependencyScope, LockfileMetadata, PackageCoordinate, PackageDependency, PackageEcosystem, PackageEvidenceLine, PackageManifest, PackageManifestError, PackageManifestValue, extract_package_manifest
+    DependencyScope, LockfileMetadata, PackageCoordinate, PackageDependency, PackageEcosystem, PackageEvidenceLine, PackageManifest, PackageManifestError, PackageManifestValue, extract_package_manifest, extract_package_manifest_with_tracker
 };
 pub use protobuf_contracts::{
-    ProtoEnum, ProtoEnumValue, ProtoField, ProtoFieldCardinality, ProtoFile, ProtoGeneratedMarker, ProtoGeneratedRole, ProtoMessage, ProtoRpcMethod, ProtoService, ProtoSyntax, ProtoWireType, ProtobufDocument, ProtobufExtractionError, extract_protobuf, parse_protobuf_generated_source
+    ProtoEnum, ProtoEnumValue, ProtoField, ProtoFieldCardinality, ProtoFile, ProtoGeneratedMarker, ProtoGeneratedRole, ProtoMessage, ProtoRpcMethod, ProtoService, ProtoSyntax, ProtoWireType, ProtobufDocument, ProtobufExtractionError, extract_protobuf, extract_protobuf_with_tracker, parse_protobuf_generated_source
 };
 pub use protobuf_graph::{ProtobufGraphFacts, protobuf_documents_to_graph};
 pub use provider::{
@@ -138,10 +148,10 @@ pub use secret_safety::{
 };
 pub use source_graph::{SourceGraphFacts, source_observations_to_graph};
 pub use source_http::{
-    SourceEpistemicStatus, SourceFramework, SourceLanguage, SourceLineRange, SourceObservation, SourceRole, SourceWarning, normalize_source_http_path, parse_python_source, parse_rust_source
+    SourceEpistemicStatus, SourceFramework, SourceLanguage, SourceLineRange, SourceObservation, SourceRole, SourceWarning, normalize_source_http_path, parse_python_source, parse_python_source_with_tracker, parse_rust_source, parse_rust_source_with_tracker
 };
 pub use source_polyglot::{
-    parse_go_source, parse_java_source, parse_javascript_source, parse_javascript_source_at_path, parse_typescript_source, parse_typescript_source_at_path
+    parse_go_source, parse_go_source_with_tracker, parse_java_source, parse_java_source_with_tracker, parse_javascript_source, parse_javascript_source_at_path, parse_javascript_source_at_path_with_tracker, parse_typescript_source, parse_typescript_source_at_path, parse_typescript_source_at_path_with_tracker
 };
 pub use source_syntax::{
     SourceSyntaxError, SourceSyntaxInspection, SourceSyntaxLanguage, inspect_source_syntax

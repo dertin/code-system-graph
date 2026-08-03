@@ -13,7 +13,7 @@ use clap::{ArgAction, CommandFactory, Parser, Subcommand, ValueEnum};
 use code_system_graph::http_server::{BearerToken, HttpServerConfig, serve_http};
 use code_system_graph::mcp::CodeSystemGraphServer;
 use code_system_graph::{
-    ApplicationError, ChangesInput, CommunityInput, PullRequestInput, PullRequestListInput, ScanOverrides, SearchInput, TraceInput, add_repository_to_manifest, add_workspace_to_registry, analyze_workspace_changes_with_cancellation, application_exit_code, backup_database, communities_workspace, contracts_workspace, create_diagnostic_bundle, doctor_workspace, export_workspace, impact_workspace, impact_workspace_with_codegraph, initialize_workspace, inspect_pull_request_with_cancellation, list_pull_requests, list_repository_registry, list_workspace_registry, migrate_database, remove_repository_from_manifest, remove_workspace_from_registry, restore_database, scan_workspace_with_overrides, search_workspace, show_config, status_workspace, sync_workspace_with_overrides, trace_workspace, traverse_workspace
+    ApplicationError, ChangesInput, CommunityInput, PullRequestInput, PullRequestListInput, ScanOverrides, SearchInput, TraceInput, add_repository_to_manifest, add_workspace_to_registry, analyze_workspace_changes_with_cancellation, application_exit_code, backup_database, communities_workspace, contracts_workspace, create_diagnostic_bundle, doctor_workspace, export_workspace, impact_workspace, impact_workspace_with_codegraph, initialize_workspace, inspect_pull_request_with_cancellation, list_pull_requests, list_repository_registry, list_workspace_registry, remove_repository_from_manifest, remove_workspace_from_registry, restore_database, run_worker_from_stdio, scan_workspace_with_overrides, search_workspace, show_config, status_workspace, sync_workspace_with_overrides, trace_workspace, traverse_workspace
 };
 use code_system_graph_core::{
     ChangeAnalysisOptions, ChangeScope, ContractAction, ContractRequest, ExitCode, ExportFormat, ExportRequest, ImpactDirection, ImpactOptions, ImpactRequest, ImpactTarget, PullRequestListState, PullRequestOrderSuggestion, PullRequestOverlap, PullRequestProviderKind, PullRequestSemanticInput, TraversalAlgorithm, TraversalDirection, TraversalFilters, TraversalOptions, TraversalRequest, semantic_pull_request_overlap, suggest_pull_request_order
@@ -57,6 +57,27 @@ enum LogFormat {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Internal supervised worker protocol.
+    #[command(name = "__worker-v1", hide = true)]
+    WorkerV1,
+    /// Internal isolated filesystem-event worker protocol.
+    #[command(name = "__watch-events-v1", hide = true)]
+    WatchEventsV1 {
+        #[arg(long)]
+        config: PathBuf,
+        #[arg(long)]
+        database: PathBuf,
+        #[arg(long)]
+        workspace: String,
+        #[arg(long)]
+        poll_interval_ms: Option<u64>,
+        #[arg(long)]
+        max_wall_time_ms: u64,
+        #[arg(long)]
+        max_no_progress_time_ms: u64,
+        #[arg(long)]
+        max_memory_bytes: u64,
+    },
     /// Create a strict minimal `code-system-graph.yaml` without overwriting.
     Init {
         /// Directory in which to create the manifest.
@@ -167,15 +188,6 @@ enum Command {
         /// Confirm replacement of the destination database.
         #[arg(long)]
         yes: bool,
-    },
-    /// Plan or apply schema migrations with automatic backup.
-    Migrate {
-        /// `SQLite` database path.
-        #[arg(long)]
-        database: PathBuf,
-        /// Report required work without modifying the database.
-        #[arg(long)]
-        dry_run: bool,
     },
     /// Inspect persisted workspace registrations.
     Workspace {
@@ -515,6 +527,8 @@ enum Command {
 
 const fn command_name(command: &Command) -> &'static str {
     match command {
+        Command::WorkerV1 => "__worker-v1",
+        Command::WatchEventsV1 { .. } => "__watch-events-v1",
         Command::Init { .. } => "init",
         Command::Scan { .. } => "scan",
         Command::Sync { .. } => "sync",
@@ -522,7 +536,6 @@ const fn command_name(command: &Command) -> &'static str {
         Command::Config { .. } => "config",
         Command::Backup { .. } => "backup",
         Command::Restore { .. } => "restore",
-        Command::Migrate { .. } => "migrate",
         Command::Workspace { .. } => "workspace",
         Command::Repo { .. } => "repo",
         Command::Trace { .. } => "trace",
@@ -1490,6 +1503,27 @@ fn log_command_event(
 )]
 async fn dispatch(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
+        Command::WorkerV1 => run_worker_from_stdio().map_err(anyhow::Error::msg)?,
+        Command::WatchEventsV1 {
+            config,
+            database,
+            workspace,
+            poll_interval_ms,
+            max_wall_time_ms,
+            max_no_progress_time_ms,
+            max_memory_bytes,
+        } => {
+            sync_watch::run_watch_event_worker(
+                config,
+                database,
+                workspace,
+                poll_interval_ms,
+                max_wall_time_ms,
+                max_no_progress_time_ms,
+                max_memory_bytes,
+            )
+            .await?;
+        }
         Command::Init { path, name } => {
             let report = initialize_workspace(&path, name.as_deref())?;
             println!("{}", serde_json::to_string(&report)?);
@@ -1577,10 +1611,6 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                 anyhow::bail!("restore requires explicit --yes confirmation");
             }
             let summary = restore_database(&database, &input)?;
-            println!("{}", serde_json::to_string(&summary)?);
-        }
-        Command::Migrate { database, dry_run } => {
-            let summary = migrate_database(&database, dry_run)?;
             println!("{}", serde_json::to_string(&summary)?);
         }
         Command::Workspace { action } => handle_workspace_command(action)?,

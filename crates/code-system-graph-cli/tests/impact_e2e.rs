@@ -2,7 +2,9 @@
 
 use std::path::{Path, PathBuf};
 
-use code_system_graph::{impact_workspace, impact_workspace_with_codegraph, scan_workspace};
+#[cfg(unix)]
+use code_system_graph::impact_workspace_with_codegraph;
+use code_system_graph::{impact_workspace, scan_workspace};
 use code_system_graph_core::{
     ImpactDirection, ImpactOptions, ImpactRequest, ImpactTarget, parse_manifest, register_workspace
 };

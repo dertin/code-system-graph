@@ -91,19 +91,38 @@ pub fn analyze_communities(
     edges: &[Edge],
     config: CommunityConfig,
 ) -> Result<CommunitySnapshot, CommunityError> {
+    analyze_communities_with_progress(snapshot_id, nodes, edges, config, |_| {})
+}
+
+/// Analyzes communities while reporting each completed finite optimization unit.
+///
+/// # Errors
+///
+/// Returns [`CommunityError`] under the same conditions as [`analyze_communities`].
+pub fn analyze_communities_with_progress<F>(
+    snapshot_id: impl Into<String>,
+    nodes: &[Node],
+    edges: &[Edge],
+    config: CommunityConfig,
+    mut progress: F,
+) -> Result<CommunitySnapshot, CommunityError>
+where
+    F: FnMut(u64),
+{
     let weights = validate_inputs(nodes, edges, &config)?;
     let selected = scoped_node_ids(nodes, edges, &config, &weights)?;
     let graph = build_graph(nodes, edges, &config, &weights, &selected);
     let assignments = match config.algorithm {
-        CommunityAlgorithm::ConnectedComponents => connected_components(&graph),
+        CommunityAlgorithm::ConnectedComponents => connected_components(&graph, &mut progress),
         CommunityAlgorithm::WeightedClustering => {
-            weighted_label_propagation(&graph, config.seed, config.max_iterations)
+            weighted_label_propagation(&graph, config.seed, config.max_iterations, &mut progress)
         }
         CommunityAlgorithm::Louvain => louvain(
             &graph,
             config.seed,
             config.resolution,
             config.max_iterations,
+            &mut progress,
         ),
     };
     let communities = describe_communities(&graph, &assignments);
@@ -485,7 +504,10 @@ fn build_graph(
     }
 }
 
-fn connected_components(graph: &WeightedGraph) -> Vec<usize> {
+fn connected_components<F>(graph: &WeightedGraph, progress: &mut F) -> Vec<usize>
+where
+    F: FnMut(u64),
+{
     let mut assignments = vec![usize::MAX; graph.nodes.len()];
     let mut component = 0;
     for start in 0..graph.nodes.len() {
@@ -503,11 +525,20 @@ fn connected_components(graph: &WeightedGraph) -> Vec<usize> {
             }
         }
         component += 1;
+        progress(1);
     }
     assignments
 }
 
-fn weighted_label_propagation(graph: &WeightedGraph, seed: u64, max_iterations: u32) -> Vec<usize> {
+fn weighted_label_propagation<F>(
+    graph: &WeightedGraph,
+    seed: u64,
+    max_iterations: u32,
+    progress: &mut F,
+) -> Vec<usize>
+where
+    F: FnMut(u64),
+{
     let mut assignments: Vec<usize> = (0..graph.nodes.len()).collect();
     let order = seeded_node_order(graph, seed);
     for _ in 0..max_iterations {
@@ -539,6 +570,7 @@ fn weighted_label_propagation(graph: &WeightedGraph, seed: u64, max_iterations: 
                 changed = true;
             }
         }
+        progress(1);
         if !changed {
             break;
         }
@@ -546,7 +578,16 @@ fn weighted_label_propagation(graph: &WeightedGraph, seed: u64, max_iterations: 
     assignments
 }
 
-fn louvain(graph: &WeightedGraph, seed: u64, resolution: f64, max_iterations: u32) -> Vec<usize> {
+fn louvain<F>(
+    graph: &WeightedGraph,
+    seed: u64,
+    resolution: f64,
+    max_iterations: u32,
+    progress: &mut F,
+) -> Vec<usize>
+where
+    F: FnMut(u64),
+{
     let mut assignments: Vec<usize> = (0..graph.nodes.len()).collect();
     if graph.total_undirected_weight <= EPSILON {
         return assignments;
@@ -588,6 +629,7 @@ fn louvain(graph: &WeightedGraph, seed: u64, resolution: f64, max_iterations: u3
                 changed = true;
             }
         }
+        progress(1);
         if !changed {
             break;
         }
@@ -1488,5 +1530,22 @@ mod tests {
             error,
             CommunityError::InvalidEdgeConfidence { .. }
         ));
+    }
+
+    #[test]
+    fn completed_community_units_should_report_progress() {
+        let (nodes, edges) = two_cluster_graph();
+        let mut completed = 0_u64;
+
+        analyze_communities_with_progress(
+            "snapshot",
+            &nodes,
+            &edges,
+            config(CommunityAlgorithm::Louvain),
+            |units| completed = completed.checked_add(units).expect("bounded progress"),
+        )
+        .expect("analysis");
+
+        assert!(completed > 0);
     }
 }

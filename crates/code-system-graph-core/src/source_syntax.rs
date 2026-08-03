@@ -1,5 +1,9 @@
+use std::ops::ControlFlow;
+
 use thiserror::Error;
-use tree_sitter::{Language, Parser};
+use tree_sitter::{Language, ParseOptions, Parser};
+
+use crate::{ExtractionLimitExceeded, ExtractionTracker};
 
 /// Source grammar selected for focused boundary inspection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,6 +40,9 @@ pub enum SourceSyntaxError {
     /// Tree-sitter did not return a syntax tree.
     #[error("Tree-sitter did not return a syntax tree")]
     MissingTree,
+    /// Parsing or traversal exceeded one configured invocation resource.
+    #[error(transparent)]
+    LimitExceeded(#[from] ExtractionLimitExceeded),
 }
 
 /// Inspects a focused source file with its mandatory Tree-sitter grammar.
@@ -50,16 +57,38 @@ pub fn inspect_source_syntax(
     language: SourceSyntaxLanguage,
     source_path: &str,
     source: &str,
+    tracker: &mut ExtractionTracker,
 ) -> Result<SourceSyntaxInspection, SourceSyntaxError> {
+    tracker.check_input_bytes(u64::try_from(source.len()).unwrap_or(u64::MAX))?;
+    tracker.check_tree_sitter_time()?;
     let grammar = grammar(language, source_path);
     let mut parser = Parser::new();
     parser.set_language(&grammar)?;
-    let tree = parser
-        .parse(source, None)
-        .ok_or(SourceSyntaxError::MissingTree)?;
+    let mut timeout = None;
+    let tree = {
+        let mut progress = |_: &tree_sitter::ParseState| match tracker.check_tree_sitter_time() {
+            Ok(()) => ControlFlow::Continue(()),
+            Err(error) => {
+                timeout = Some(error);
+                ControlFlow::Break(())
+            }
+        };
+        let options = ParseOptions::new().progress_callback(&mut progress);
+        let bytes = source.as_bytes();
+        parser.parse_with_options(
+            &mut |offset, _| bytes.get(offset..).unwrap_or_default(),
+            None,
+            Some(options),
+        )
+    };
+    if let Some(error) = timeout {
+        return Err(error.into());
+    }
+    let tree = tree.ok_or(SourceSyntaxError::MissingTree)?;
     let root = tree.root_node();
     let mut boundary_candidate_count = 0;
-    count_candidates(language, root, &mut boundary_candidate_count);
+    count_candidates(language, root, &mut boundary_candidate_count, tracker)?;
+    tracker.check_tree_sitter_time()?;
     Ok(SourceSyntaxInspection {
         has_error: root.has_error(),
         boundary_candidate_count,
@@ -86,16 +115,24 @@ fn grammar(language: SourceSyntaxLanguage, source_path: &str) -> Language {
 
 fn count_candidates(
     language: SourceSyntaxLanguage,
-    node: tree_sitter::Node<'_>,
+    root: tree_sitter::Node<'_>,
     count: &mut usize,
-) {
-    if candidate_kind(language, node.kind()) {
-        *count = count.saturating_add(1);
+    tracker: &mut ExtractionTracker,
+) -> Result<(), ExtractionLimitExceeded> {
+    tracker.charge_tree_sitter_node(0)?;
+    let mut pending = vec![(root, 0_u64)];
+    while let Some((node, depth)) = pending.pop() {
+        if candidate_kind(language, node.kind()) {
+            *count = count.saturating_add(1);
+        }
+        let child_depth = depth.saturating_add(1);
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            tracker.charge_tree_sitter_node(child_depth)?;
+            pending.push((child, child_depth));
+        }
     }
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        count_candidates(language, child, count);
-    }
+    Ok(())
 }
 
 fn candidate_kind(language: SourceSyntaxLanguage, kind: &str) -> bool {
@@ -129,7 +166,8 @@ fn candidate_kind(language: SourceSyntaxLanguage, kind: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{SourceSyntaxLanguage, inspect_source_syntax};
+    use super::{SourceSyntaxError, SourceSyntaxLanguage, inspect_source_syntax};
+    use crate::{ExtractionBudgets, ExtractionResource, ExtractionTracker};
 
     #[test]
     fn mandatory_grammars_should_find_boundary_candidates() {
@@ -182,11 +220,105 @@ mod tests {
         ];
 
         for (language, path, source) in fixtures {
-            let result = inspect_source_syntax(language, path, source);
+            let mut tracker =
+                ExtractionTracker::new(path, "tree-sitter", &ExtractionBudgets::default());
+            let result = inspect_source_syntax(language, path, source, &mut tracker);
             assert!(
                 matches!(result, Ok(report) if report.boundary_candidate_count > 0),
                 "{path}: {result:?}"
             );
         }
+    }
+
+    #[test]
+    fn javascript_ast_depth_should_accept_256_and_reject_257() {
+        fn nested_arrays(count: usize) -> String {
+            format!("{}0{};", "[".repeat(count), "]".repeat(count))
+        }
+
+        let budgets = ExtractionBudgets {
+            max_ast_depth_per_artifact: 256,
+            ..ExtractionBudgets::default()
+        };
+        let mut exact = ExtractionTracker::new("exact.js", "tree-sitter", &budgets);
+        let mut above = ExtractionTracker::new("above.js", "tree-sitter", &budgets);
+
+        assert!(
+            inspect_source_syntax(
+                SourceSyntaxLanguage::JavaScript,
+                "exact.js",
+                &nested_arrays(254),
+                &mut exact,
+            )
+            .is_ok()
+        );
+        assert!(matches!(
+            inspect_source_syntax(
+                SourceSyntaxLanguage::JavaScript,
+                "above.js",
+                &nested_arrays(255),
+                &mut above,
+            ),
+            Err(SourceSyntaxError::LimitExceeded(error))
+                if error.resource == ExtractionResource::AstDepth
+                    && error.observed == 257
+                    && error.maximum == 256
+        ));
+    }
+
+    #[test]
+    fn javascript_node_budget_should_accept_500000_and_reject_500001() {
+        let budgets = ExtractionBudgets {
+            max_tree_sitter_nodes_per_artifact: 500_000,
+            ..ExtractionBudgets::default()
+        };
+        let mut exact = ExtractionTracker::new("exact.js", "tree-sitter", &budgets);
+        let mut above = ExtractionTracker::new("above.js", "tree-sitter", &budgets);
+        let exact_source = format!("{}// one", ";".repeat(249_999));
+        let above_source = ";".repeat(250_000);
+
+        assert!(
+            inspect_source_syntax(
+                SourceSyntaxLanguage::JavaScript,
+                "exact.js",
+                &exact_source,
+                &mut exact,
+            )
+            .is_ok()
+        );
+        assert!(matches!(
+            inspect_source_syntax(
+                SourceSyntaxLanguage::JavaScript,
+                "above.js",
+                &above_source,
+                &mut above,
+            ),
+            Err(SourceSyntaxError::LimitExceeded(error))
+                if error.resource == ExtractionResource::TreeSitterNodes
+                    && error.observed == 500_001
+                    && error.maximum == 500_000
+        ));
+    }
+
+    #[test]
+    fn parser_should_cancel_on_a_real_wall_time_deadline() {
+        let budgets = ExtractionBudgets {
+            max_tree_sitter_wall_time_ms_per_artifact: 1,
+            max_tree_sitter_nodes_per_artifact: 1_000_000,
+            ..ExtractionBudgets::default()
+        };
+        let mut tracker = ExtractionTracker::new("slow.js", "tree-sitter", &budgets);
+        let source = ";".repeat(750_000);
+
+        assert!(matches!(
+            inspect_source_syntax(
+                SourceSyntaxLanguage::JavaScript,
+                "slow.js",
+                &source,
+                &mut tracker,
+            ),
+            Err(SourceSyntaxError::LimitExceeded(error))
+                if error.resource == ExtractionResource::TreeSitterWallTimeMs
+        ));
     }
 }

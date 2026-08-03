@@ -99,14 +99,9 @@ The package installer preserves replaced binaries under:
 $PREFIX/share/code-system-graph/backups/
 ```
 
-Binary installation does not migrate an existing graph database automatically. Before an explicit
-schema migration:
-
-```bash
-csgraph migrate --database /path/to/code-system-graph.db --dry-run
-csgraph backup --database /path/to/code-system-graph.db --output /new/path/backup.db
-csgraph migrate --database /path/to/code-system-graph.db
-```
+The unpublished 1.0.0 build supports one exact initial database schema. An incompatible
+development database is disposable: remove it and run a full scan. Backup and restore accept only
+that exact schema and never migrate it.
 
 ## Uninstall
 

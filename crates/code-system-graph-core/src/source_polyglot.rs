@@ -1,7 +1,8 @@
 use std::collections::BTreeSet;
 
+use crate::source_http::SourceObservationCollector;
 use crate::{
-    SourceEpistemicStatus, SourceFramework, SourceLanguage, SourceLineRange, SourceObservation, SourceRole, SourceWarning, normalize_source_http_path
+    ExtractionLimitExceeded, ExtractionTracker, SourceEpistemicStatus, SourceFramework, SourceLanguage, SourceLineRange, SourceObservation, SourceRole, SourceWarning, normalize_source_http_path
 };
 
 const METHODS: [(&str, &str); 8] = [
@@ -24,7 +25,33 @@ pub fn parse_javascript_source(source: &str) -> Vec<SourceObservation> {
 /// Extracts JavaScript framework facts with repository-relative file-route context.
 #[must_use]
 pub fn parse_javascript_source_at_path(source_path: &str, source: &str) -> Vec<SourceObservation> {
-    parse_ecmascript_at_path(source_path, source, SourceLanguage::JavaScript)
+    let observations = collect_ecmascript_at_path(
+        source_path,
+        source,
+        SourceLanguage::JavaScript,
+        SourceObservationCollector::unbounded(),
+    );
+    finish(observations.into_unbounded())
+}
+
+/// Extracts JavaScript facts while charging each attempted observation before retention.
+///
+/// # Errors
+///
+/// Returns [`ExtractionLimitExceeded`] before an observation or one of its values exceeds the
+/// effective per-artifact budget.
+pub fn parse_javascript_source_at_path_with_tracker(
+    source_path: &str,
+    source: &str,
+    tracker: &mut ExtractionTracker,
+) -> Result<Vec<SourceObservation>, ExtractionLimitExceeded> {
+    let observations = collect_ecmascript_at_path(
+        source_path,
+        source,
+        SourceLanguage::JavaScript,
+        SourceObservationCollector::bounded(tracker),
+    );
+    Ok(finish(observations.into_result()?))
 }
 
 /// Extracts Fetch, Axios, Express, Fastify, and `NestJS` facts from TypeScript.
@@ -36,16 +63,63 @@ pub fn parse_typescript_source(source: &str) -> Vec<SourceObservation> {
 /// Extracts TypeScript framework facts with repository-relative file-route context.
 #[must_use]
 pub fn parse_typescript_source_at_path(source_path: &str, source: &str) -> Vec<SourceObservation> {
-    parse_ecmascript_at_path(source_path, source, SourceLanguage::TypeScript)
+    let observations = collect_ecmascript_at_path(
+        source_path,
+        source,
+        SourceLanguage::TypeScript,
+        SourceObservationCollector::unbounded(),
+    );
+    finish(observations.into_unbounded())
+}
+
+/// Extracts TypeScript facts while charging each attempted observation before retention.
+///
+/// # Errors
+///
+/// Returns [`ExtractionLimitExceeded`] before an observation or one of its values exceeds the
+/// effective per-artifact budget.
+pub fn parse_typescript_source_at_path_with_tracker(
+    source_path: &str,
+    source: &str,
+    tracker: &mut ExtractionTracker,
+) -> Result<Vec<SourceObservation>, ExtractionLimitExceeded> {
+    let observations = collect_ecmascript_at_path(
+        source_path,
+        source,
+        SourceLanguage::TypeScript,
+        SourceObservationCollector::bounded(tracker),
+    );
+    Ok(finish(observations.into_result()?))
 }
 
 /// Extracts `net/http`, Gin, and Chi facts from Go source.
 #[must_use]
 pub fn parse_go_source(source: &str) -> Vec<SourceObservation> {
+    let observations = collect_go_source(source, SourceObservationCollector::unbounded());
+    finish(observations.into_unbounded())
+}
+
+/// Extracts Go facts while charging each attempted observation before retention.
+///
+/// # Errors
+///
+/// Returns [`ExtractionLimitExceeded`] before an observation or one of its values exceeds the
+/// effective per-artifact budget.
+pub fn parse_go_source_with_tracker(
+    source: &str,
+    tracker: &mut ExtractionTracker,
+) -> Result<Vec<SourceObservation>, ExtractionLimitExceeded> {
+    let observations = collect_go_source(source, SourceObservationCollector::bounded(tracker));
+    Ok(finish(observations.into_result()?))
+}
+
+fn collect_go_source<'a>(
+    source: &str,
+    mut observations: SourceObservationCollector<'a>,
+) -> SourceObservationCollector<'a> {
     let has_http = source.contains("\"net/http\"");
     let has_gin = source.contains("github.com/gin-gonic/gin");
     let has_chi = source.contains("github.com/go-chi/chi");
-    let mut observations = Vec::new();
     for statement in statements(source) {
         if has_http {
             if let Some(method) = method_call(&statement.text, "http.")
@@ -106,17 +180,38 @@ pub fn parse_go_source(source: &str) -> Vec<SourceObservation> {
             );
         }
     }
-    finish(observations)
+    observations
 }
 
 /// Extracts Spring MVC, Spring `WebClient`, and Feign facts from Java source.
 #[must_use]
 pub fn parse_java_source(source: &str) -> Vec<SourceObservation> {
+    let observations = collect_java_source(source, SourceObservationCollector::unbounded());
+    finish(observations.into_unbounded())
+}
+
+/// Extracts Java facts while charging each attempted observation before retention.
+///
+/// # Errors
+///
+/// Returns [`ExtractionLimitExceeded`] before an observation or one of its values exceeds the
+/// effective per-artifact budget.
+pub fn parse_java_source_with_tracker(
+    source: &str,
+    tracker: &mut ExtractionTracker,
+) -> Result<Vec<SourceObservation>, ExtractionLimitExceeded> {
+    let observations = collect_java_source(source, SourceObservationCollector::bounded(tracker));
+    Ok(finish(observations.into_result()?))
+}
+
+fn collect_java_source<'a>(
+    source: &str,
+    mut observations: SourceObservationCollector<'a>,
+) -> SourceObservationCollector<'a> {
     let spring = source.contains("org.springframework.web.bind.annotation");
     let web_client = source.contains("org.springframework.web.reactive.function.client.WebClient");
     let feign = source.contains("@FeignClient") || source.contains("openfeign.FeignClient");
     let lines = source.lines().collect::<Vec<_>>();
-    let mut observations = Vec::new();
     for (index, line) in lines.iter().enumerate() {
         let trimmed = line.trim();
         if spring
@@ -172,18 +267,25 @@ pub fn parse_java_source(source: &str) -> Vec<SourceObservation> {
             ));
         }
     }
-    finish(observations)
+    observations
 }
 
 fn parse_ecmascript(source: &str, language: SourceLanguage) -> Vec<SourceObservation> {
-    parse_ecmascript_at_path("", source, language)
+    let observations = collect_ecmascript_at_path(
+        "",
+        source,
+        language,
+        SourceObservationCollector::unbounded(),
+    );
+    finish(observations.into_unbounded())
 }
 
-fn parse_ecmascript_at_path(
+fn collect_ecmascript_at_path<'a>(
     source_path: &str,
     source: &str,
     language: SourceLanguage,
-) -> Vec<SourceObservation> {
+    mut observations: SourceObservationCollector<'a>,
+) -> SourceObservationCollector<'a> {
     let express = source.contains("from \"express\"")
         || source.contains("from 'express'")
         || source.contains("require(\"express\")")
@@ -199,7 +301,6 @@ fn parse_ecmascript_at_path(
     let nest = source.contains("@nestjs/common");
     let express_receivers = assigned_receivers(source, "express");
     let fastify_receivers = assigned_receivers(source, "fastify");
-    let mut observations = Vec::new();
     for statement in statements(source) {
         if statement.text.contains("fetch(") {
             let method = object_method(&statement.text).or_else(|| Some("GET".to_owned()));
@@ -272,11 +373,11 @@ fn parse_ecmascript_at_path(
         }
     }
     append_next_app_routes(&mut observations, source_path, source, language);
-    finish(observations)
+    observations
 }
 
 fn append_next_app_routes(
-    observations: &mut Vec<SourceObservation>,
+    observations: &mut SourceObservationCollector<'_>,
     source_path: &str,
     source: &str,
     language: SourceLanguage,
@@ -423,7 +524,7 @@ fn delimiter_delta(line: &str) -> i32 {
 }
 
 fn append_js_route(
-    output: &mut Vec<SourceObservation>,
+    output: &mut SourceObservationCollector<'_>,
     language: SourceLanguage,
     framework: SourceFramework,
     statement: &Statement,
@@ -456,7 +557,7 @@ fn append_js_route(
 }
 
 fn append_receiver_route(
-    output: &mut Vec<SourceObservation>,
+    output: &mut SourceObservationCollector<'_>,
     language: SourceLanguage,
     framework: SourceFramework,
     statement: &Statement,
@@ -773,9 +874,33 @@ fn line_number(index: usize) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_go_source, parse_java_source, parse_javascript_source_at_path, parse_typescript_source, parse_typescript_source_at_path
+        parse_go_source, parse_java_source, parse_javascript_source_at_path, parse_javascript_source_at_path_with_tracker, parse_typescript_source, parse_typescript_source_at_path
     };
-    use crate::{SourceEpistemicStatus, SourceFramework, SourceRole};
+    use crate::{
+        ExtractionBudgets, ExtractionResource, ExtractionTracker, SourceEpistemicStatus, SourceFramework, SourceRole
+    };
+
+    #[test]
+    fn polyglot_parser_should_charge_each_attempted_observation_before_retention() {
+        let budgets = ExtractionBudgets {
+            max_observations_per_artifact: 1,
+            ..ExtractionBudgets::default()
+        };
+        let mut tracker = ExtractionTracker::new("client.js", "source.javascript", &budgets);
+        let result = parse_javascript_source_at_path_with_tracker(
+            "client.js",
+            "fetch('/one');\nfetch('/two');\n",
+            &mut tracker,
+        );
+
+        assert!(matches!(
+            result,
+            Err(error)
+                if error.resource == ExtractionResource::Observations
+                    && error.observed == 2
+                    && error.maximum == 1
+        ));
+    }
 
     #[test]
     fn typescript_should_extract_fetch_axios_express_fastify_and_nestjs() {

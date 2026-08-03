@@ -14,8 +14,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use sysinfo::{Pid, ProcessesToUpdate, System};
 use thiserror::Error;
 
-const INITIAL_MIGRATION: &str = include_str!("../../../migrations/0001_initial.sql");
-const MIGRATIONS: &[(i64, &str)] = &[(1, INITIAL_MIGRATION)];
+const INITIAL_SCHEMA: &str = include_str!("../../../migrations/0001_initial.sql");
 const LATEST_SCHEMA_VERSION: i64 = 1;
 
 /// Returns the newest on-disk schema version supported by this binary.
@@ -220,19 +219,6 @@ pub struct SnapshotBatch<'a> {
     pub community_snapshot: Option<&'a CommunitySnapshot>,
 }
 
-/// Planned or completed database migration.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MigrationReport {
-    /// Schema version observed before migration.
-    pub from_version: i64,
-    /// Schema version required by this binary.
-    pub to_version: i64,
-    /// Automatic pre-migration backup, when one was required.
-    pub backup_path: Option<PathBuf>,
-    /// Whether migrations were applied.
-    pub applied: bool,
-}
-
 /// Result of restoring a database backup.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RestoreReport {
@@ -240,7 +226,7 @@ pub struct RestoreReport {
     pub source_path: PathBuf,
     /// Safety backup of the replaced database, when it existed.
     pub safety_backup_path: Option<PathBuf>,
-    /// Schema version after restore and forward migration.
+    /// Exact schema version restored.
     pub schema_version: i64,
 }
 
@@ -282,28 +268,11 @@ pub enum StoreError {
         /// Underlying operating-system error.
         source: std::io::Error,
     },
-    /// Database was created by a newer incompatible schema.
+    /// A database uses anything other than the definitive unpublished 1.0.0 schema.
     #[error(
-        "database schema version {found} is newer than supported version {supported}; \
-         upgrade Code System Graph"
+        "database is incompatible with the definitive 1.0.0 schema; remove it and run a full scan to rebuild"
     )]
-    SchemaTooNew {
-        /// Version found in the database.
-        found: i64,
-        /// Latest version supported by this binary.
-        supported: i64,
-    },
-    /// Read-only access requires pending migrations to be applied by a writer.
-    #[error(
-        "database schema version {found} requires migration to version {required}; \
-         run a mutating Code System Graph command first"
-    )]
-    MigrationRequired {
-        /// Current database version.
-        found: i64,
-        /// Version required by this binary.
-        required: i64,
-    },
+    ObsoleteDevelopmentDatabase,
     /// Another writer owns a non-stale lock.
     #[error("store writer lock is already held at `{0}`")]
     LockHeld(PathBuf),
@@ -478,48 +447,17 @@ impl Drop for StoreLock {
 }
 
 impl SqliteStore {
-    /// Opens or creates a store and applies embedded migrations.
+    /// Opens an exact 1.0.0 store or initializes a new empty database.
     ///
     /// # Errors
     ///
-    /// Returns [`StoreError`] if `SQLite` cannot open, configure, or migrate the database.
+    /// Returns [`StoreError`] if `SQLite` cannot open, initialize, or validate the database.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
-        let (connection, _report) = open_and_migrate(path.as_ref())?;
+        let connection = open_exact(path.as_ref())?;
         Ok(Self { connection })
     }
 
-    /// Reports pending migrations without modifying the database.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`StoreError`] if the database cannot be read or is newer than this binary.
-    pub fn migration_plan(path: impl AsRef<Path>) -> Result<MigrationReport, StoreError> {
-        let path = path.as_ref();
-        let connection = Connection::open_with_flags(
-            path,
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )?;
-        let current = existing_schema_version(&connection)?;
-        validate_supported_schema(current)?;
-        Ok(MigrationReport {
-            from_version: current,
-            to_version: LATEST_SCHEMA_VERSION,
-            backup_path: None,
-            applied: false,
-        })
-    }
-
-    /// Applies pending migrations with an automatic pre-migration backup.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`StoreError`] if backup, migration, or schema validation fails.
-    pub fn migrate(path: impl AsRef<Path>) -> Result<MigrationReport, StoreError> {
-        let (_connection, report) = open_and_migrate(path.as_ref())?;
-        Ok(report)
-    }
-
-    /// Creates a validated online backup without requiring the latest schema.
+    /// Creates a validated online backup of the exact 1.0.0 schema.
     ///
     /// # Errors
     ///
@@ -534,13 +472,13 @@ impl SqliteStore {
         backup_connection(&source, destination)
     }
 
-    /// Restores a validated backup and forward-migrates it to the current schema.
+    /// Restores a validated backup with the exact 1.0.0 schema.
     ///
     /// The existing destination is first preserved as a non-overwriting safety backup.
     ///
     /// # Errors
     ///
-    /// Returns [`StoreError`] if validation, locking, safety backup, restore, or migration fails.
+    /// Returns [`StoreError`] if validation, locking, safety backup, or restore fails.
     pub fn restore_from(
         database_path: &Path,
         backup_path: &Path,
@@ -563,7 +501,7 @@ impl SqliteStore {
         let mut destination = Connection::open(database_path)?;
         backup_connection_to(&source, &mut destination)?;
         configure_connection(&destination)?;
-        apply_migrations(&mut destination)?;
+        validate_exact_schema(&destination)?;
         destination.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
         Ok(RestoreReport {
             source_path: backup_path.to_path_buf(),
@@ -572,12 +510,11 @@ impl SqliteStore {
         })
     }
 
-    /// Opens an existing store without writes or implicit migrations.
+    /// Opens an existing store without writes or implicit schema changes.
     ///
     /// # Errors
     ///
-    /// Returns [`StoreError`] if the database is absent, corrupt, newer than this binary, or
-    /// requires a pending migration.
+    /// Returns [`StoreError`] if the database is absent, corrupt, or not the exact 1.0.0 schema.
     pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let connection = Connection::open_with_flags(
             path,
@@ -585,19 +522,7 @@ impl SqliteStore {
         )?;
         connection.pragma_update(None, "foreign_keys", true)?;
         connection.busy_timeout(Duration::from_secs(5))?;
-        let current = schema_version(&connection)?;
-        if current > LATEST_SCHEMA_VERSION {
-            return Err(StoreError::SchemaTooNew {
-                found: current,
-                supported: LATEST_SCHEMA_VERSION,
-            });
-        }
-        if current < LATEST_SCHEMA_VERSION {
-            return Err(StoreError::MigrationRequired {
-                found: current,
-                required: LATEST_SCHEMA_VERSION,
-            });
-        }
+        validate_exact_schema(&connection)?;
         Ok(Self { connection })
     }
 
@@ -605,24 +530,34 @@ impl SqliteStore {
     ///
     /// # Errors
     ///
-    /// Returns [`StoreError`] if `SQLite` cannot configure or migrate the database.
+    /// Returns [`StoreError`] if `SQLite` cannot configure or initialize the database.
     pub fn in_memory() -> Result<Self, StoreError> {
         Self::from_connection(Connection::open_in_memory()?)
     }
 
     fn from_connection(mut connection: Connection) -> Result<Self, StoreError> {
         configure_connection(&connection)?;
-        apply_migrations(&mut connection)?;
+        initialize_empty_schema(&mut connection)?;
+        validate_exact_schema(&connection)?;
         Ok(Self { connection })
     }
 
-    /// Returns the latest migration version applied to this store.
+    /// Returns the exact initial schema version recorded by this store.
     ///
     /// # Errors
     ///
     /// Returns [`StoreError`] when schema metadata cannot be read.
     pub fn schema_version(&self) -> Result<i64, StoreError> {
         schema_version(&self.connection)
+    }
+
+    /// Returns the opaque identity that binds disposable operational state to this database.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when exact schema metadata cannot be read.
+    pub fn database_instance_id(&self) -> Result<String, StoreError> {
+        database_instance_id(&self.connection)
     }
 
     /// Atomically replaces repository registrations for one workspace.
@@ -884,17 +819,48 @@ impl SqliteStore {
         &self,
         workspace: &str,
     ) -> Result<Vec<StoredExtractorBatch>, StoreError> {
+        self.load_current_extractor_batches_with_limit(workspace, i64::MAX as u64)
+    }
+
+    /// Loads current extractor batches whose payload fits within `maximum_payload_bytes`.
+    ///
+    /// Oversized rows are omitted before SQLite copies their BLOB into the process. Callers can
+    /// consequently treat them as cache misses and recompute them under the active policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when no current snapshot exists or stored values are invalid.
+    pub fn load_current_extractor_batches_with_limit(
+        &self,
+        workspace: &str,
+        maximum_payload_bytes: u64,
+    ) -> Result<Vec<StoredExtractorBatch>, StoreError> {
         let snapshot_id = self.current_snapshot_id(workspace)?;
+        let maximum_payload_bytes = i64::try_from(maximum_payload_bytes).unwrap_or(i64::MAX);
+        let has_obsolete_contract = self.connection.query_row(
+            "SELECT EXISTS(
+                SELECT 1
+                FROM extractor_batches
+                WHERE snapshot_id = ?1
+                  AND (extractor_version <> '1.0.0' OR budget_fingerprint = '')
+             )",
+            [&snapshot_id],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if has_obsolete_contract {
+            return Err(StoreError::ObsoleteDevelopmentDatabase);
+        }
         let mut statement = self.connection.prepare(
             "SELECT
                 repo_id, checkout_id, path_encoding, relative_path, path_display,
-                extractor, content_hash, size_bytes, extractor_version, output_count, payload
+                extractor, content_hash, size_bytes, extractor_version, budget_fingerprint,
+                source_was_lossy, output_count, payload
              FROM extractor_batches
-             WHERE snapshot_id = ?1
+             WHERE snapshot_id = ?1 AND length(payload) <= ?2
              ORDER BY repo_id, checkout_id, path_encoding, relative_path, extractor",
         )?;
         let rows = statement
-            .query_map([snapshot_id], |row| {
+            .query_map(params![snapshot_id, maximum_payload_bytes], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
@@ -905,8 +871,10 @@ impl SqliteStore {
                     row.get::<_, String>(6)?,
                     row.get::<_, i64>(7)?,
                     row.get::<_, String>(8)?,
-                    row.get::<_, i64>(9)?,
-                    row.get::<_, Vec<u8>>(10)?,
+                    row.get::<_, String>(9)?,
+                    row.get::<_, bool>(10)?,
+                    row.get::<_, i64>(11)?,
+                    row.get::<_, Vec<u8>>(12)?,
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -922,6 +890,8 @@ impl SqliteStore {
                     content_hash,
                     stored_size_bytes,
                     extractor_version,
+                    budget_fingerprint,
+                    source_was_lossy,
                     stored_output_count,
                     payload,
                 )| {
@@ -942,6 +912,8 @@ impl SqliteStore {
                             )?,
                         },
                         extractor_version,
+                        budget_fingerprint,
+                        source_was_lossy,
                         output_count: stored_metric_to_u64(
                             "extractor_batches.output_count",
                             stored_output_count,
@@ -1445,6 +1417,22 @@ impl SqliteStore {
     /// Returns [`StoreError`] on community validation, constraint, serialization, or transaction
     /// failure.
     pub fn publish_snapshot(&mut self, batch: SnapshotBatch<'_>) -> Result<(), StoreError> {
+        self.publish_snapshot_with_progress(batch, |_| {})
+    }
+
+    /// Publishes one atomic snapshot while reporting each completed durable row insertion.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] under the same conditions as [`Self::publish_snapshot`].
+    pub fn publish_snapshot_with_progress<F>(
+        &mut self,
+        batch: SnapshotBatch<'_>,
+        mut progress: F,
+    ) -> Result<(), StoreError>
+    where
+        F: FnMut(u64),
+    {
         let SnapshotBatch {
             workspace,
             snapshot_id,
@@ -1463,6 +1451,10 @@ impl SqliteStore {
         let transaction = self.connection.transaction()?;
         upsert_registry(&transaction, workspace)?;
         transaction.execute(
+            "DELETE FROM query_cache WHERE workspace_name = ?1",
+            [&workspace.name],
+        )?;
+        transaction.execute(
             "UPDATE repo_snapshots SET is_current = 0 WHERE workspace_name = ?1",
             [&workspace.name],
         )?;
@@ -1472,13 +1464,27 @@ impl SqliteStore {
             params![snapshot_id, workspace.name],
         )?;
 
-        insert_graph(&transaction, snapshot_id, nodes, edges, evidence)?;
+        insert_graph(
+            &transaction,
+            snapshot_id,
+            nodes,
+            edges,
+            evidence,
+            &mut progress,
+        )?;
         insert_manual_links(&transaction, manual_links)?;
-        insert_incremental_state(&transaction, snapshot_id, fingerprints, extractor_runs)?;
-        insert_extractor_batches(&transaction, snapshot_id, extractor_batches)?;
+        progress(u64::try_from(manual_links.len()).unwrap_or(u64::MAX));
+        insert_incremental_state(
+            &transaction,
+            snapshot_id,
+            fingerprints,
+            extractor_runs,
+            &mut progress,
+        )?;
+        insert_extractor_batches(&transaction, snapshot_id, extractor_batches, &mut progress)?;
         insert_freshness(&transaction, snapshot_id, workspace)?;
         if let Some(community_snapshot) = community_snapshot {
-            insert_community_snapshot(&transaction, community_snapshot)?;
+            insert_community_snapshot(&transaction, community_snapshot, &mut progress)?;
         }
         transaction.execute(
             "UPDATE repo_snapshots SET is_current = 1 WHERE id = ?1",
@@ -2003,29 +2009,15 @@ fn decode_optional_path(
     }
 }
 
-fn open_and_migrate(path: &Path) -> Result<(Connection, MigrationReport), StoreError> {
+fn open_exact(path: &Path) -> Result<Connection, StoreError> {
     let mut connection = Connection::open(path)?;
     configure_connection(&connection)?;
     let current = existing_schema_version(&connection)?;
-    validate_supported_schema(current)?;
-    let backup_path = if current > 0 && current < LATEST_SCHEMA_VERSION {
-        let label = format!("pre-migrate-v{current}-to-v{LATEST_SCHEMA_VERSION}");
-        let backup_path = next_backup_path(path, &label)?;
-        backup_connection(&connection, &backup_path)?;
-        Some(backup_path)
-    } else {
-        None
-    };
-    apply_migrations(&mut connection)?;
-    Ok((
-        connection,
-        MigrationReport {
-            from_version: current,
-            to_version: LATEST_SCHEMA_VERSION,
-            backup_path,
-            applied: current < LATEST_SCHEMA_VERSION,
-        },
-    ))
+    if current == 0 && database_is_empty(&connection)? {
+        initialize_empty_schema(&mut connection)?;
+    }
+    validate_exact_schema(&connection)?;
+    Ok(connection)
 }
 
 fn configure_connection(connection: &Connection) -> Result<(), StoreError> {
@@ -2048,14 +2040,47 @@ fn existing_schema_version(connection: &Connection) -> Result<i64, StoreError> {
     schema_version(connection)
 }
 
-fn validate_supported_schema(version: i64) -> Result<(), StoreError> {
-    if version > LATEST_SCHEMA_VERSION {
-        return Err(StoreError::SchemaTooNew {
-            found: version,
-            supported: LATEST_SCHEMA_VERSION,
-        });
+fn validate_exact_schema(connection: &Connection) -> Result<(), StoreError> {
+    if existing_schema_version(connection)? != LATEST_SCHEMA_VERSION {
+        return Err(StoreError::ObsoleteDevelopmentDatabase);
+    }
+    let expected = expected_schema_contract()?;
+    if schema_contract(connection)? != expected {
+        return Err(StoreError::ObsoleteDevelopmentDatabase);
     }
     Ok(())
+}
+
+type SchemaContractEntry = (String, String, String, String);
+
+fn schema_contract(connection: &Connection) -> Result<Vec<SchemaContractEntry>, StoreError> {
+    let mut statement = connection.prepare(
+        "SELECT type, name, tbl_name, COALESCE(sql, '')
+         FROM sqlite_schema
+         WHERE name NOT LIKE 'sqlite_%'
+         ORDER BY type, name, tbl_name, sql",
+    )?;
+    Ok(statement
+        .query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })?
+        .collect::<Result<_, _>>()?)
+}
+
+fn expected_schema_contract() -> Result<Vec<SchemaContractEntry>, StoreError> {
+    let connection = Connection::open_in_memory()?;
+    connection.execute_batch(INITIAL_SCHEMA)?;
+    schema_contract(&connection)
+}
+
+fn database_is_empty(connection: &Connection) -> Result<bool, StoreError> {
+    let tables = connection.query_row(
+        "SELECT COUNT(*) FROM sqlite_master
+         WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+        [],
+        |row| row.get::<_, i64>(0),
+    )?;
+    Ok(tables == 0)
 }
 
 fn backup_connection(source: &Connection, destination: &Path) -> Result<(), StoreError> {
@@ -2148,7 +2173,15 @@ fn validate_backup(connection: &Connection, path: &Path) -> Result<(), StoreErro
             reason: "schema metadata is missing".to_owned(),
         });
     }
-    validate_supported_schema(version)
+    if version != LATEST_SCHEMA_VERSION {
+        return Err(StoreError::InvalidBackup {
+            path: path.to_path_buf(),
+            reason: format!(
+                "schema version {version} is not the exact supported version {LATEST_SCHEMA_VERSION}"
+            ),
+        });
+    }
+    validate_exact_schema(connection)
 }
 
 fn validate_graph_snapshot(
@@ -2310,10 +2343,14 @@ fn validate_community_snapshot(
     Ok(())
 }
 
-fn insert_community_snapshot(
+fn insert_community_snapshot<F>(
     transaction: &rusqlite::Transaction<'_>,
     snapshot: &CommunitySnapshot,
-) -> Result<(), StoreError> {
+    progress: &mut F,
+) -> Result<(), StoreError>
+where
+    F: FnMut(u64),
+{
     let algorithm = serde_json::to_string(&snapshot.config.algorithm)?;
     ensure_community_json_bound(
         "community_snapshots.algorithm",
@@ -2336,8 +2373,10 @@ fn insert_community_snapshot(
             config_json
         ],
     )?;
+    progress(1);
     for community in &snapshot.communities {
         insert_community(transaction, &snapshot.snapshot_id, community)?;
+        progress(1);
     }
     Ok(())
 }
@@ -2904,13 +2943,17 @@ fn insert_manual_links(
     Ok(())
 }
 
-fn insert_graph(
+fn insert_graph<F>(
     transaction: &rusqlite::Transaction<'_>,
     snapshot_id: &str,
     nodes: &[Node],
     edges: &[Edge],
     evidence: &[Evidence],
-) -> Result<(), StoreError> {
+    progress: &mut F,
+) -> Result<(), StoreError>
+where
+    F: FnMut(u64),
+{
     for node in nodes {
         transaction.execute(
             "INSERT INTO nodes(
@@ -2925,11 +2968,13 @@ fn insert_graph(
                 node.label,
             ],
         )?;
+        progress(1);
         transaction.execute(
             "INSERT INTO nodes_fts(snapshot_id, node_id, label, stable_key)
              VALUES (?1, ?2, ?3, ?4)",
             params![snapshot_id, node.id.as_str(), node.label, node.stable_key],
         )?;
+        progress(1);
     }
     for item in evidence {
         transaction.execute(
@@ -2969,28 +3014,35 @@ fn insert_graph(
                 serde_json::to_string(&edge.status)?,
             ],
         )?;
+        progress(1);
         for evidence_id in &edge.evidence {
             transaction.execute(
                 "INSERT INTO edge_evidence(snapshot_id, edge_id, evidence_id)
                  VALUES (?1, ?2, ?3)",
                 params![snapshot_id, edge.id.as_str(), evidence_id.as_str()],
             )?;
+            progress(1);
         }
     }
     Ok(())
 }
 
-fn insert_extractor_batches(
+fn insert_extractor_batches<F>(
     transaction: &rusqlite::Transaction<'_>,
     snapshot_id: &str,
     batches: &[StoredExtractorBatch],
-) -> Result<(), StoreError> {
+    progress: &mut F,
+) -> Result<(), StoreError>
+where
+    F: FnMut(u64),
+{
     for batch in batches {
         transaction.execute(
             "INSERT INTO extractor_batches(
                 snapshot_id, repo_id, checkout_id, path_encoding, relative_path, path_display,
-                extractor, content_hash, size_bytes, extractor_version, output_count, payload
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                extractor, content_hash, size_bytes, extractor_version, budget_fingerprint,
+                source_was_lossy, output_count, payload
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 snapshot_id,
                 batch.source.repo_id.as_str(),
@@ -3002,20 +3054,27 @@ fn insert_extractor_batches(
                 batch.source.content_hash,
                 metric_to_i64("extractor_batches.size_bytes", batch.source.size_bytes)?,
                 batch.extractor_version,
+                batch.budget_fingerprint,
+                batch.source_was_lossy,
                 metric_to_i64("extractor_batches.output_count", batch.output_count)?,
                 batch.payload,
             ],
         )?;
+        progress(1);
     }
     Ok(())
 }
 
-fn insert_incremental_state(
+fn insert_incremental_state<F>(
     transaction: &rusqlite::Transaction<'_>,
     snapshot_id: &str,
     fingerprints: &[ArtifactFingerprint],
     extractor_runs: &[ExtractorRun],
-) -> Result<(), StoreError> {
+    progress: &mut F,
+) -> Result<(), StoreError>
+where
+    F: FnMut(u64),
+{
     for fingerprint in fingerprints {
         let size_bytes = metric_to_i64("artifact_fingerprints.size_bytes", fingerprint.size_bytes)?;
         transaction.execute(
@@ -3035,9 +3094,11 @@ fn insert_incremental_state(
                 size_bytes,
             ],
         )?;
+        progress(1);
     }
     for run in extractor_runs {
         insert_extractor_run(transaction, snapshot_id, run, fingerprints)?;
+        progress(1);
     }
     Ok(())
 }
@@ -3150,32 +3211,18 @@ fn count_to_usize(field: &'static str, value: i64) -> Result<usize, StoreError> 
     })
 }
 
-fn apply_migrations(connection: &mut Connection) -> Result<(), StoreError> {
-    connection.execute_batch(
-        "CREATE TABLE IF NOT EXISTS schema_metadata (
-            version INTEGER PRIMARY KEY,
-            applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        );",
+fn initialize_empty_schema(connection: &mut Connection) -> Result<(), StoreError> {
+    if !database_is_empty(connection)? {
+        return Err(StoreError::ObsoleteDevelopmentDatabase);
+    }
+    let transaction = connection.transaction()?;
+    transaction.execute_batch(INITIAL_SCHEMA)?;
+    transaction.execute(
+        "INSERT INTO schema_metadata(version, instance_id)
+         VALUES (?1, lower(hex(randomblob(32))))",
+        [LATEST_SCHEMA_VERSION],
     )?;
-    let current = schema_version(connection)?;
-    if current > LATEST_SCHEMA_VERSION {
-        return Err(StoreError::SchemaTooNew {
-            found: current,
-            supported: LATEST_SCHEMA_VERSION,
-        });
-    }
-    for &(version, migration) in MIGRATIONS {
-        if version <= current {
-            continue;
-        }
-        let transaction = connection.transaction()?;
-        transaction.execute_batch(migration)?;
-        transaction.execute(
-            "INSERT INTO schema_metadata(version) VALUES (?1)",
-            [version],
-        )?;
-        transaction.commit()?;
-    }
+    transaction.commit()?;
     Ok(())
 }
 
@@ -3183,6 +3230,14 @@ fn schema_version(connection: &Connection) -> Result<i64, StoreError> {
     Ok(connection.query_row(
         "SELECT COALESCE(MAX(version), 0) FROM schema_metadata",
         [],
+        |row| row.get(0),
+    )?)
+}
+
+fn database_instance_id(connection: &Connection) -> Result<String, StoreError> {
+    Ok(connection.query_row(
+        "SELECT instance_id FROM schema_metadata WHERE version = ?1",
+        [LATEST_SCHEMA_VERSION],
         |row| row.get(0),
     )?)
 }
@@ -3397,7 +3452,7 @@ mod tests {
     use rusqlite::params;
 
     use super::{
-        ManualLinkDisposition, ManualLinkRecord, ProviderCapabilityRecord, QueryCacheRecord, SnapshotBatch, SqliteStore, StoreError, StoreLock, lock_path
+        INITIAL_SCHEMA, ManualLinkDisposition, ManualLinkRecord, ProviderCapabilityRecord, QueryCacheRecord, SnapshotBatch, SqliteStore, StoreError, StoreLock, lock_path
     };
 
     const LOCK_HELPER_ENV: &str = "CODE_SYSTEM_GRAPH_LOCK_HELPER";
@@ -3609,19 +3664,27 @@ mod tests {
         };
         let (nodes, edges, evidence) = fixture();
         let workspace = workspace();
+        let mut published_rows = 0_u64;
         let result = store
-            .publish_snapshot(SnapshotBatch {
-                workspace: &workspace,
-                snapshot_id: "snapshot:1",
-                nodes: &nodes,
-                edges: &edges,
-                evidence: &evidence,
-                fingerprints: &[],
-                extractor_batches: &[],
-                extractor_runs: &[],
-                manual_links: &[],
-                community_snapshot: None,
-            })
+            .publish_snapshot_with_progress(
+                SnapshotBatch {
+                    workspace: &workspace,
+                    snapshot_id: "snapshot:1",
+                    nodes: &nodes,
+                    edges: &edges,
+                    evidence: &evidence,
+                    fingerprints: &[],
+                    extractor_batches: &[],
+                    extractor_runs: &[],
+                    manual_links: &[],
+                    community_snapshot: None,
+                },
+                |rows| {
+                    published_rows = published_rows
+                        .checked_add(rows)
+                        .expect("bounded fixture progress");
+                },
+            )
             .and_then(|()| {
                 Ok((
                     store.load_current_graph("commerce")?,
@@ -3650,6 +3713,7 @@ mod tests {
                 Some(commit)
             )) if version == "1.0.0" && commit == "0123456789abcdef"
         ));
+        assert!(published_rows >= 4);
     }
 
     #[test]
@@ -3676,6 +3740,57 @@ mod tests {
         });
 
         assert!(matches!(result, Err(StoreError::InvalidGraphSnapshot(_))));
+    }
+
+    #[test]
+    fn interrupted_publication_should_preserve_previous_snapshot() {
+        let mut store = SqliteStore::in_memory().expect("test store");
+        let workspace = workspace();
+        let (nodes, edges, evidence) = fixture();
+        store
+            .publish_snapshot(SnapshotBatch {
+                workspace: &workspace,
+                snapshot_id: "snapshot:previous",
+                nodes: &nodes,
+                edges: &edges,
+                evidence: &evidence,
+                fingerprints: &[],
+                extractor_batches: &[],
+                extractor_runs: &[],
+                manual_links: &[],
+                community_snapshot: None,
+            })
+            .expect("initial publication");
+        let mut rows = 0_u64;
+        let interrupted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = store.publish_snapshot_with_progress(
+                SnapshotBatch {
+                    workspace: &workspace,
+                    snapshot_id: "snapshot:interrupted",
+                    nodes: &nodes,
+                    edges: &edges,
+                    evidence: &evidence,
+                    fingerprints: &[],
+                    extractor_batches: &[],
+                    extractor_runs: &[],
+                    manual_links: &[],
+                    community_snapshot: None,
+                },
+                |completed| {
+                    rows = rows.saturating_add(completed);
+                    assert!(rows < 2, "injected publication interruption");
+                },
+            );
+        }));
+
+        assert!(interrupted.is_err());
+        assert_eq!(
+            store
+                .current_snapshot_summary("commerce")
+                .expect("previous snapshot remains")
+                .snapshot_id,
+            "snapshot:previous"
+        );
     }
 
     #[test]
@@ -3924,7 +4039,7 @@ mod tests {
     }
 
     #[test]
-    fn integrity_check_should_pass_after_migration() {
+    fn integrity_check_should_pass_after_initial_schema_creation() {
         let result = SqliteStore::in_memory().and_then(|store| store.integrity_check());
 
         assert!(matches!(result, Ok(true)));
@@ -3994,10 +4109,12 @@ mod tests {
     }
 
     #[test]
-    fn initial_schema_application_should_be_idempotent() -> Result<(), Box<dyn std::error::Error>> {
+    fn exact_initial_schema_validation_should_be_repeatable()
+    -> Result<(), Box<dyn std::error::Error>> {
         let mut connection = rusqlite::Connection::open_in_memory()?;
-        super::apply_migrations(&mut connection)?;
-        super::apply_migrations(&mut connection)?;
+        super::initialize_empty_schema(&mut connection)?;
+        super::validate_exact_schema(&connection)?;
+        super::validate_exact_schema(&connection)?;
 
         assert_eq!(super::schema_version(&connection)?, 1);
         Ok(())
@@ -4062,7 +4179,7 @@ mod tests {
     }
 
     #[test]
-    fn migration_should_reject_newer_schema_version() {
+    fn exact_schema_should_reject_unknown_version() {
         let connection = match rusqlite::Connection::open_in_memory() {
             Ok(connection) => connection,
             Err(error) => panic!("test connection must initialize: {error}"),
@@ -4079,15 +4196,62 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(StoreError::SchemaTooNew {
-                found: 999,
-                supported: 1
-            })
+            Err(StoreError::ObsoleteDevelopmentDatabase)
         ));
     }
 
     #[test]
-    fn read_only_open_should_reject_pending_migration() -> Result<(), Box<dyn std::error::Error>> {
+    fn exact_schema_should_reject_missing_schema_objects() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let store = SqliteStore::in_memory()?;
+        store
+            .connection
+            .execute_batch("DROP TRIGGER query_cache_bound_workspace_entries")?;
+
+        assert!(matches!(
+            super::validate_exact_schema(&store.connection),
+            Err(StoreError::ObsoleteDevelopmentDatabase)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn database_instance_identity_should_be_opaque_and_stable()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let store = SqliteStore::in_memory()?;
+        let first = store.database_instance_id()?;
+        let second = store.database_instance_id()?;
+
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 64);
+        assert!(first.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        Ok(())
+    }
+
+    #[test]
+    fn version_one_database_without_definitive_batch_columns_should_require_rebuild()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temporary = tempfile::tempdir()?;
+        let database = temporary.path().join("obsolete.db");
+        let connection = rusqlite::Connection::open(&database)?;
+        connection.execute_batch(INITIAL_SCHEMA)?;
+        connection.execute_batch(
+            "ALTER TABLE extractor_batches DROP COLUMN budget_fingerprint;
+             ALTER TABLE extractor_batches DROP COLUMN source_was_lossy;",
+        )?;
+        drop(connection);
+
+        let result = SqliteStore::open(&database);
+
+        assert!(matches!(
+            result,
+            Err(StoreError::ObsoleteDevelopmentDatabase)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn read_only_open_should_reject_non_exact_schema() -> Result<(), Box<dyn std::error::Error>> {
         let temporary = tempfile::tempdir()?;
         let database = temporary.path().join("uninitialized.db");
         let connection = rusqlite::Connection::open(&database)?;
@@ -4103,10 +4267,7 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(StoreError::MigrationRequired {
-                found: 0,
-                required: 1
-            })
+            Err(StoreError::ObsoleteDevelopmentDatabase)
         ));
         Ok(())
     }
@@ -4244,27 +4405,16 @@ mod tests {
     }
 
     #[test]
-    fn migration_should_initialize_once_without_an_upgrade_backup()
+    fn open_should_initialize_once_without_migration_state()
     -> Result<(), Box<dyn std::error::Error>> {
         let temporary = tempfile::tempdir()?;
         let database = temporary.path().join("store.db");
 
-        let initial = SqliteStore::migrate(&database)?;
-        let repeated = SqliteStore::migrate(&database)?;
-
-        assert_eq!(
-            (
-                initial.from_version,
-                initial.to_version,
-                initial.applied,
-                initial.backup_path,
-                repeated.from_version,
-                repeated.to_version,
-                repeated.applied,
-                repeated.backup_path,
-            ),
-            (0, 1, true, None, 1, 1, false, None)
-        );
+        let initial = SqliteStore::open(&database)?;
+        assert_eq!(initial.schema_version()?, 1);
+        drop(initial);
+        let repeated = SqliteStore::open(&database)?;
+        assert_eq!(repeated.schema_version()?, 1);
         Ok(())
     }
 
@@ -4522,6 +4672,8 @@ mod tests {
         let extractor_batch = StoredExtractorBatch {
             source: fingerprint.clone(),
             extractor_version: "1.0.0".to_owned(),
+            budget_fingerprint: "extraction-budgets:test".to_owned(),
+            source_was_lossy: false,
             output_count: 1,
             payload: br#"{"observations":["GET:/orders"]}"#.to_vec(),
         };
@@ -4552,6 +4704,55 @@ mod tests {
                 if fingerprints == vec![fingerprint]
                     && batches == vec![extractor_batch]
                     && runs == vec![run]
+        ));
+        assert!(
+            store
+                .load_current_extractor_batches_with_limit("commerce", 1)
+                .expect("bounded batch read")
+                .is_empty(),
+            "SQLite must omit an oversized payload before copying its BLOB"
+        );
+    }
+
+    #[test]
+    fn obsolete_development_batch_contract_should_require_full_rebuild() {
+        let mut store = SqliteStore::in_memory().expect("test store must initialize");
+        let workspace = workspace();
+        let (nodes, edges, evidence) = fixture();
+        let (fingerprint, run) = incremental_fixture();
+        let extractor_batch = StoredExtractorBatch {
+            source: fingerprint.clone(),
+            extractor_version: "1.0.0".to_owned(),
+            budget_fingerprint: "extraction-budgets:test".to_owned(),
+            source_was_lossy: false,
+            output_count: 1,
+            payload: br#"{"observations":[]}"#.to_vec(),
+        };
+        store
+            .publish_snapshot(SnapshotBatch {
+                workspace: &workspace,
+                snapshot_id: "snapshot:legacy",
+                nodes: &nodes,
+                edges: &edges,
+                evidence: &evidence,
+                fingerprints: std::slice::from_ref(&fingerprint),
+                extractor_batches: std::slice::from_ref(&extractor_batch),
+                extractor_runs: std::slice::from_ref(&run),
+                manual_links: &[],
+                community_snapshot: None,
+            })
+            .expect("fixture snapshot should publish");
+        store
+            .connection
+            .execute(
+                "UPDATE extractor_batches SET extractor_version = '1.0.0.5'",
+                [],
+            )
+            .expect("fixture contract should be replaced");
+
+        assert!(matches!(
+            store.load_current_extractor_batches_with_limit("commerce", 1),
+            Err(StoreError::ObsoleteDevelopmentDatabase)
         ));
     }
 

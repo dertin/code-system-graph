@@ -44,6 +44,7 @@ fn init_should_preserve_gitignore_and_add_generated_state_rule_once() -> anyhow:
     let workspace = temporary.path().join("existing-workspace");
     std::fs::create_dir_all(&workspace)?;
     std::fs::create_dir(workspace.join(".git"))?;
+    std::fs::write(workspace.join(".git/HEAD"), "ref: refs/heads/main\n")?;
     let gitignore_path = workspace.join(".gitignore");
     std::fs::write(&gitignore_path, b"target/")?;
 
@@ -65,6 +66,33 @@ fn init_should_preserve_gitignore_and_add_generated_state_rule_once() -> anyhow:
             false,
             b"target/\n.code-system-graph/\n".to_vec(),
             b"target/\n.code-system-graph/\n".to_vec(),
+        )
+    );
+    Ok(())
+}
+
+#[test]
+fn init_should_recognize_a_linked_worktree_marker() -> anyhow::Result<()> {
+    let temporary = tempfile::tempdir()?;
+    let workspace = temporary.path().join("linked-worktree");
+    std::fs::create_dir_all(&workspace)?;
+    std::fs::write(
+        workspace.join(".git"),
+        "gitdir: ../metadata/worktrees/linked\n",
+    )?;
+
+    let report = initialize_workspace(&workspace, Some("platform"))?;
+
+    assert_eq!(
+        (
+            report.gitignore_path,
+            report.gitignore_updated,
+            std::fs::read_to_string(workspace.join(".gitignore"))?,
+        ),
+        (
+            Some(workspace.join(".gitignore")),
+            true,
+            ".code-system-graph/\n".to_owned(),
         )
     );
     Ok(())

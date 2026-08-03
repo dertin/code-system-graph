@@ -5,6 +5,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::execution_policy::{ExecutionPolicy, ExecutionPolicyOverrides, InvalidExecutionPolicy};
+use crate::extraction_budget::{
+    ExtractionBudgetOverrides, ExtractionBudgets, InvalidExtractionBudget
+};
 use crate::ignore_policy::{IgnorePatternError, validate_excludes, validate_include_defaults};
 
 const MANUAL_ENDPOINT_MAX_BYTES: usize = 2_048;
@@ -27,6 +31,12 @@ pub struct WorkspaceManifest {
     /// Versioned exact relationship declarations and suppressions.
     #[serde(rename = "manualLinks", default)]
     pub manual_links: Vec<ManualLinkConfig>,
+    /// Optional operator-owned extraction safety limit overrides.
+    #[serde(rename = "extractionBudgets", default)]
+    pub extraction_budgets: Option<ExtractionBudgetOverrides>,
+    /// Optional operator-owned supervised-execution policy overrides.
+    #[serde(rename = "executionPolicy", default)]
+    pub execution_policy: Option<ExecutionPolicyOverrides>,
 }
 
 /// Repository registration and boundary inputs.
@@ -161,6 +171,12 @@ pub enum ManifestError {
         #[source]
         source: IgnorePatternError,
     },
+    /// An extraction budget is zero or cannot be represented internally.
+    #[error("invalid workspace manifest: {0}")]
+    InvalidExtractionBudget(#[from] InvalidExtractionBudget),
+    /// An execution policy value or relationship is invalid.
+    #[error("invalid workspace manifest: {0}")]
+    InvalidExecutionPolicy(#[from] InvalidExecutionPolicy),
     /// The workspace does not register any repositories.
     #[error("manifest field `repos` must contain at least one repository")]
     EmptyRepositories,
@@ -217,6 +233,8 @@ pub fn parse_manifest(input: &str) -> Result<WorkspaceManifest, ManifestError> {
         return Err(ManifestError::EmptyRepositories);
     }
     validate_manual_links(&manifest.manual_links)?;
+    ExtractionBudgets::resolve(manifest.extraction_budgets.as_ref())?;
+    ExecutionPolicy::resolve(manifest.execution_policy.as_ref())?;
     for (alias, repository) in &manifest.repos {
         validate_not_empty(&format!("repos.{alias}"), alias)?;
         validate_not_empty(&format!("repos.{alias}.path"), &repository.path)?;
@@ -382,7 +400,7 @@ mod tests {
     use code_system_graph_model::EdgeKind;
 
     use super::{MANUAL_REASON_MAX_BYTES, ManifestError, parse_manifest};
-    use crate::IgnorePatternError;
+    use crate::{ExecutionPolicy, ExtractionBudgets, IgnorePatternError};
 
     const VALID: &str = r"
 version: 1
@@ -401,6 +419,151 @@ repos:
         let result = parse_manifest(VALID);
 
         assert!(result.is_ok(), "unexpected manifest error: {result:?}");
+    }
+
+    #[test]
+    fn extraction_budgets_should_be_optional_and_resolve_safe_defaults() {
+        let manifest = parse_manifest(VALID).expect("manifest without advanced budgets is valid");
+        let effective = ExtractionBudgets::resolve(manifest.extraction_budgets.as_ref())
+            .expect("safe defaults are valid");
+
+        assert_eq!(effective, ExtractionBudgets::default());
+    }
+
+    #[test]
+    fn extraction_budgets_should_accept_partial_higher_and_lower_overrides() {
+        let input = VALID.replace(
+            "name: commerce",
+            "name: commerce\nextractionBudgets:\n  maxInputBytesPerArtifact: 1024\n  maxStructuralDepthPerArtifact: 128",
+        );
+        let manifest = parse_manifest(&input).expect("partial override should be valid");
+        let effective = ExtractionBudgets::resolve(manifest.extraction_budgets.as_ref())
+            .expect("partial override should resolve");
+
+        assert_eq!(effective.max_input_bytes_per_artifact, 1_024);
+        assert_eq!(effective.max_structural_depth_per_artifact, 128);
+        assert_eq!(
+            effective.max_ast_depth_per_artifact,
+            ExtractionBudgets::default().max_ast_depth_per_artifact
+        );
+    }
+
+    #[test]
+    fn extraction_budgets_should_accept_a_complete_override() {
+        let input = VALID.replace(
+            "name: commerce",
+            "name: commerce\nextractionBudgets:\n  maxInputBytesPerArtifact: 1\n  maxStructuralDepthPerArtifact: 2\n  maxAstDepthPerArtifact: 3\n  maxWorkUnitsPerArtifact: 4\n  maxTreeSitterNodesPerArtifact: 5\n  maxObservationsPerArtifact: 6\n  maxAccumulatedStringBytesPerArtifact: 7\n  maxSerializedOutputBytesPerArtifact: 8\n  maxStringBytesPerValue: 9\n  maxPortablePathBytesPerValue: 10\n  maxIdentifierBytesPerValue: 11\n  maxStructuredWallTimeMsPerArtifact: 12\n  maxTreeSitterWallTimeMsPerArtifact: 13",
+        );
+        let manifest = parse_manifest(&input).expect("complete override should be valid");
+        let effective = ExtractionBudgets::resolve(manifest.extraction_budgets.as_ref())
+            .expect("complete override should resolve");
+
+        assert_eq!(effective.max_input_bytes_per_artifact, 1);
+        assert_eq!(effective.max_structural_depth_per_artifact, 2);
+        assert_eq!(effective.max_ast_depth_per_artifact, 3);
+        assert_eq!(effective.max_work_units_per_artifact, 4);
+        assert_eq!(effective.max_tree_sitter_nodes_per_artifact, 5);
+        assert_eq!(effective.max_observations_per_artifact, 6);
+        assert_eq!(effective.max_accumulated_string_bytes_per_artifact, 7);
+        assert_eq!(effective.max_serialized_output_bytes_per_artifact, 8);
+        assert_eq!(effective.max_string_bytes_per_value, 9);
+        assert_eq!(effective.max_portable_path_bytes_per_value, 10);
+        assert_eq!(effective.max_identifier_bytes_per_value, 11);
+        assert_eq!(effective.max_structured_wall_time_ms_per_artifact, 12);
+        assert_eq!(effective.max_tree_sitter_wall_time_ms_per_artifact, 13);
+    }
+
+    #[test]
+    fn extraction_budgets_should_reject_zero_overflow_and_unknown_fields() {
+        let zero = VALID.replace(
+            "name: commerce",
+            "name: commerce\nextractionBudgets:\n  maxWorkUnitsPerArtifact: 0",
+        );
+        let overflow = VALID.replace(
+            "name: commerce",
+            "name: commerce\nextractionBudgets:\n  maxWorkUnitsPerArtifact: 18446744073709551616",
+        );
+        let unknown = VALID.replace(
+            "name: commerce",
+            "name: commerce\nextractionBudgets:\n  maxWorkUnitsPerArtifact: 1\n  maximumMagic: 2",
+        );
+
+        assert!(matches!(
+            parse_manifest(&zero),
+            Err(ManifestError::InvalidExtractionBudget(_))
+        ));
+        assert!(matches!(
+            parse_manifest(&overflow),
+            Err(ManifestError::InvalidYaml(_))
+        ));
+        assert!(matches!(
+            parse_manifest(&unknown),
+            Err(ManifestError::InvalidYaml(_))
+        ));
+    }
+
+    #[test]
+    fn execution_policy_should_resolve_defaults_and_partial_overrides() {
+        let manifest = parse_manifest(VALID).expect("manifest without execution policy is valid");
+        assert_eq!(
+            ExecutionPolicy::resolve(manifest.execution_policy.as_ref()).expect("defaults"),
+            ExecutionPolicy::default()
+        );
+
+        let input = VALID.replace(
+            "name: commerce",
+            "name: commerce\nexecutionPolicy:\n  maxScanWallTimeMs: 28800000\n  maxNoProgressTimeMs: 600000",
+        );
+        let manifest = parse_manifest(&input).expect("partial policy override is valid");
+        let effective = ExecutionPolicy::resolve(manifest.execution_policy.as_ref())
+            .expect("partial policy resolves");
+        assert_eq!(effective.max_scan_wall_time_ms, 28_800_000);
+        assert_eq!(effective.max_no_progress_time_ms, 600_000);
+        assert_eq!(
+            effective.max_worker_memory_bytes,
+            ExecutionPolicy::default().max_worker_memory_bytes
+        );
+    }
+
+    #[test]
+    fn execution_policy_should_reject_zero_overflow_unknown_and_invalid_relationships() {
+        let zero = VALID.replace(
+            "name: commerce",
+            "name: commerce\nexecutionPolicy:\n  maxWorkerMemoryBytes: 0",
+        );
+        let overflow = VALID.replace(
+            "name: commerce",
+            "name: commerce\nexecutionPolicy:\n  maxWorkerMemoryBytes: 18446744073709551616",
+        );
+        let unknown = VALID.replace(
+            "name: commerce",
+            "name: commerce\nexecutionPolicy:\n  maximumMagic: 1",
+        );
+        let invalid = VALID.replace(
+            "name: commerce",
+            "name: commerce\nexecutionPolicy:\n  maxScanWallTimeMs: 1000\n  maxNoProgressTimeMs: 1001\n  maxCodeGraphSyncWallTimeMsPerRepo: 1000\n  gracefulTerminationMs: 1",
+        );
+
+        assert!(matches!(
+            parse_manifest(&zero),
+            Err(ManifestError::InvalidExecutionPolicy(_))
+        ));
+        assert!(matches!(
+            parse_manifest(&overflow),
+            Err(ManifestError::InvalidYaml(_))
+        ));
+        assert!(matches!(
+            parse_manifest(&unknown),
+            Err(ManifestError::InvalidYaml(_))
+        ));
+        let invalid_result = parse_manifest(&invalid);
+        assert!(
+            matches!(
+                invalid_result,
+                Err(ManifestError::InvalidExecutionPolicy(_))
+            ),
+            "unexpected invalid relationship result: {invalid_result:?}"
+        );
     }
 
     #[test]
