@@ -4,6 +4,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::Context;
@@ -20,15 +21,21 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 const TEST_TOKEN: &str = "http-test-token";
+static FIXTURE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 struct Fixture {
     temporary: TempDir,
     manifest: PathBuf,
     database: PathBuf,
+    workspace_name: String,
 }
 
 impl Fixture {
     fn create() -> anyhow::Result<Self> {
+        let workspace_name = format!(
+            "http-test-{}",
+            FIXTURE_COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
         let temporary = tempfile::tempdir()?;
         let repository = temporary.path().join("api");
         std::fs::create_dir_all(&repository)?;
@@ -39,7 +46,9 @@ impl Fixture {
         let manifest = temporary.path().join("code-system-graph.yaml");
         std::fs::write(
             &manifest,
-            "version: 1\nname: http-test\nrepos:\n  api:\n    path: api\n    openapi: openapi.yaml\n",
+            format!(
+                "version: 1\nname: {workspace_name}\nrepos:\n  api:\n    path: api\n    openapi: openapi.yaml\n"
+            ),
         )?;
         let database = temporary.path().join("graph.db");
         scan_workspace(&manifest, &database)?;
@@ -47,11 +56,12 @@ impl Fixture {
             temporary,
             manifest,
             database,
+            workspace_name,
         })
     }
 
     fn server_config(&self) -> HttpServerConfig {
-        HttpServerConfig::new(&self.manifest, &self.database, "http-test")
+        HttpServerConfig::new(&self.manifest, &self.database, &self.workspace_name)
     }
 }
 
@@ -173,6 +183,23 @@ async fn response_json(response: reqwest::Response) -> anyhow::Result<(StatusCod
     Ok((status, body))
 }
 
+async fn server_serves_workspace(client: &Client, address: SocketAddr, workspace: &str) -> bool {
+    let Ok(response) = client
+        .get(format!("http://{address}/v1/status"))
+        .send()
+        .await
+    else {
+        return false;
+    };
+    if response.status() != StatusCode::OK {
+        return false;
+    }
+    let Ok((_, body)) = response_json(response).await else {
+        return false;
+    };
+    body["data"]["workspace"].as_str() == Some(workspace)
+}
+
 #[tokio::test]
 async fn loopback_should_serve_anonymous_health_and_status() -> anyhow::Result<()> {
     let server = RunningServer::start(None).await?;
@@ -210,7 +237,7 @@ async fn loopback_should_serve_anonymous_health_and_status() -> anyhow::Result<(
             Some("nosniff"),
             false,
             StatusCode::OK,
-            Some("http-test"),
+            Some(server.fixture.workspace_name.as_str()),
         )
     );
     server.stop().await
@@ -281,7 +308,11 @@ async fn configured_auth_should_accept_valid_bearer_token() -> anyhow::Result<()
             body["status"].as_str(),
             body["data"]["workspace"].as_str()
         ),
-        (StatusCode::OK, Some("ok"), Some("http-test"))
+        (
+            StatusCode::OK,
+            Some("ok"),
+            Some(server.fixture.workspace_name.as_str())
+        )
     );
     server.stop().await
 }
@@ -290,10 +321,11 @@ async fn configured_auth_should_accept_valid_bearer_token() -> anyhow::Result<()
 #[tokio::test]
 async fn explore_route_should_return_ephemeral_local_context() -> anyhow::Result<()> {
     let server = RunningServer::start_with_codegraph().await?;
+    let workspace = server.fixture.workspace_name.clone();
     let response = Client::new()
         .post(server.url("/v1/tools/explore"))
         .json(&json!({
-            "workspace": "http-test",
+            "workspace": workspace,
             "query": "orders implementation",
             "max_files": 4
         }))
@@ -310,7 +342,7 @@ async fn explore_route_should_return_ephemeral_local_context() -> anyhow::Result
         (StatusCode::OK, Some("ephemeral local context"), Some(1))
     );
     let target = SqliteStore::open_read_only(&server.fixture.database)?
-        .load_current_graph("http-test")?
+        .load_current_graph(&server.fixture.workspace_name)?
         .0
         .first()
         .ok_or_else(|| anyhow::anyhow!("impact target"))?
@@ -339,7 +371,7 @@ async fn explore_route_should_reject_disabled_codegraph_before_execution() -> an
     let response = Client::new()
         .post(server.url("/v1/tools/explore"))
         .json(&json!({
-            "workspace": "http-test",
+            "workspace": server.fixture.workspace_name,
             "query": "orders implementation",
             "max_files": 4
         }))
@@ -415,17 +447,29 @@ async fn unsupported_and_mutating_routes_should_be_rejected() -> anyhow::Result<
 async fn cancellation_should_stop_accepting_connections() -> anyhow::Result<()> {
     let server = RunningServer::start(None).await?;
     let address = server.address;
+    let workspace = server.fixture.workspace_name.clone();
+    let client = Client::builder()
+        .timeout(Duration::from_millis(500))
+        .build()?;
+
+    assert!(
+        server_serves_workspace(&client, address, &workspace).await,
+        "server should accept connections before cancellation"
+    );
+
     server.cancellation.cancel();
     tokio::time::timeout(Duration::from_secs(2), server.task)
         .await
         .context("HTTP server did not stop after cancellation")?
         .context("HTTP server task failed")??;
 
-    let connection = tokio::net::TcpStream::connect(address).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while tokio::time::Instant::now() < deadline {
+        if !server_serves_workspace(&client, address, &workspace).await {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
 
-    assert!(
-        connection.is_err(),
-        "cancelled server should stop accepting connections"
-    );
-    Ok(())
+    panic!("cancelled server should stop accepting connections");
 }
