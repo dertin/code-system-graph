@@ -15,11 +15,14 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: stable
-      - uses: taiki-e/install-action@cargo-fuzz
+          toolchain: nightly
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
       - run: cargo fuzz run parsers -- -max_total_time=120 -max_len=2097152
-        env:
-          RUSTC_BOOTSTRAP: "1"
+        working-directory: fuzz
       - run: cargo fuzz run interfaces -- -max_total_time=120 -max_len=2097152
-        env:
-          RUSTC_BOOTSTRAP: "1"
+        working-directory: fuzz
