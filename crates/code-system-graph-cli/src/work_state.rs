@@ -80,6 +80,7 @@ impl WorkState {
     pub(crate) fn open(database: &Path, database_instance_id: &str) -> Result<Self, String> {
         let path = work_path(database);
         ensure_private_file(&path)?;
+        let path = canonicalize_parent(&path)?;
         ensure_safe_sqlite_siblings(&path)?;
         match Self::open_existing(&path, database_instance_id) {
             Ok(state) => Ok(state),
@@ -1005,6 +1006,22 @@ pub(crate) fn work_path(database: &Path) -> PathBuf {
     PathBuf::from(value)
 }
 
+fn canonicalize_parent(path: &Path) -> Result<PathBuf, String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("work sidecar path `{}` has no parent", path.display()))?;
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| format!("work sidecar path `{}` has no file name", path.display()))?;
+    let canonical_parent = fs::canonicalize(parent).map_err(|error| {
+        format!(
+            "failed to canonicalize work sidecar parent `{}`: {error}",
+            parent.display()
+        )
+    })?;
+    Ok(canonical_parent.join(file_name))
+}
+
 fn classify_existing_sidecar_error(error: &rusqlite::Error) -> WorkOpenError {
     match error {
         rusqlite::Error::SqliteFailure(details, _)
@@ -1099,6 +1116,24 @@ mod tests {
     };
 
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn work_state_should_open_below_symlinked_parent() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let canonical_parent = temporary.path().join("canonical");
+        fs::create_dir(&canonical_parent).expect("canonical parent");
+        let symlinked_parent = temporary.path().join("symlinked");
+        symlink(&canonical_parent, &symlinked_parent).expect("symlinked parent");
+
+        let database = symlinked_parent.join("graph.db");
+        let state = WorkState::open(&database, "database-instance").expect("work state");
+        drop(state);
+
+        assert!(canonical_parent.join("graph.db.work-v1.db").is_file());
+    }
 
     fn fingerprint(hash: &str) -> ArtifactFingerprint {
         ArtifactFingerprint {

@@ -754,6 +754,8 @@ mod tests {
         std::fs::write(&outside, "version: 1\n")?;
         #[cfg(unix)]
         std::os::unix::fs::symlink(&outside, repository.join(".code-system-graph.yaml"))?;
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(&outside, repository.join(".code-system-graph.yaml"))?;
         let workspace = RepositoryConfig {
             path: ".".to_owned(),
             openapi: None,

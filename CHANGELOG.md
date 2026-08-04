@@ -9,6 +9,8 @@ Versioning.
 
 - Fixed the portable capability-directory reader so Windows builds preserve the diagnostic path
   without moving it before the bounded read.
+- Canonicalized work-sidecar parent directories before SQLite opens them, preserving final-file
+  `NOFOLLOW` protection while supporting the standard symlinked `/var` path on macOS.
 - Pinned the CLI and its tests to the bundled SQLite implementation so macOS and Windows use the
   same validated database engine as the persistence crate.
 - Serialized native Windows and macOS test execution to stay within platform file-descriptor and

@@ -812,6 +812,7 @@ mod tests {
         let managed = ManagedRoot::open(&root)?;
 
         for relative in [
+            #[cfg(not(windows))]
             Path::new(".code-system-graph/hooks/bad\x1bname"),
             Path::new(".code-system-graph/hooks/safe\u{202e}evil"),
         ] {
