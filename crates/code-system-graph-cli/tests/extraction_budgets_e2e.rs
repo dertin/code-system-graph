@@ -3,7 +3,7 @@
 use code_system_graph::{
     ApplicationError, ScanOverrides, scan_workspace, scan_workspace_with_overrides
 };
-use code_system_graph_core::{BatchPlanError, ExitCode, ExtractionResource};
+use code_system_graph_core::{BatchPlanError, ExitCode, ExtractionResource, encode_native_path};
 use code_system_graph_store_sqlite::SqliteStore;
 
 fn manifest(max_work: Option<u64>) -> String {
@@ -60,6 +60,8 @@ fn configured_source_value_budget_should_apply_before_focused_observations() -> 
         &config,
         "version: 1\nname: source-budget-e2e\nextractionBudgets:\n  maxIdentifierBytesPerValue: 3\nrepos:\n  api:\n    path: api\n",
     )?;
+    let expected_artifact =
+        encode_native_path(&std::path::Path::new("src").join("routes.rs")).display;
 
     let result = scan_workspace(&config, &database);
     assert!(
@@ -67,7 +69,7 @@ fn configured_source_value_budget_should_apply_before_focused_observations() -> 
             &result,
             Err(ApplicationError::ExtractionLimit(error))
                 if error.resource == ExtractionResource::IdentifierBytesPerValue
-                    && error.artifact == "src/routes.rs"
+                    && error.artifact == expected_artifact
                     && error.extractor == "code-system-graph.source.rust"
         ),
         "unexpected source budget result: {result:?}"
