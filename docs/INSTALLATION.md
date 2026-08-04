@@ -28,6 +28,9 @@ crate metadata and installs:
 cargo binstall code-system-graph code-system-graph-hooks
 ```
 
+The crate name is `code-system-graph`; the CLI you run is `csgraph`. The hooks runtime installs as
+`code-system-graph-hooks`.
+
 Cargo normally writes both binaries to `$HOME/.cargo/bin`. Add that directory to `PATH`, then
 verify:
 
