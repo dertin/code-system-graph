@@ -3,6 +3,28 @@
 All notable public changes to Code System Graph are documented in this file. Code System Graph follows Semantic
 Versioning.
 
+## [1.0.1] - 2026-08-04
+
+### Fixed
+
+- Fixed the portable capability-directory reader so Windows builds preserve the diagnostic path
+  without moving it before the bounded read.
+- Canonicalized work-sidecar parent directories before SQLite opens them, preserving final-file
+  `NOFOLLOW` protection while supporting the standard symlinked `/var` path on macOS.
+- Pinned the CLI and its tests to the bundled SQLite implementation so macOS and Windows use the
+  same validated database engine as the persistence crate.
+- Raised the `csgraph` executable stack on Windows to match the extraction workload without
+  changing process memory or execution-policy limits.
+- Serialized native Windows and macOS test execution to stay within platform file-descriptor and
+  filesystem concurrency limits while retaining the complete test suite.
+
+### Release engineering
+
+- Added full native Windows x86_64 and macOS x86_64/ARM64 build and test gates to pull-request CI.
+- Added archive smoke tests for Unix and Windows release assets before publication.
+- Made release validation and installation smoke tests derive the workspace version instead of
+  embedding `1.0.0`.
+
 ## [1.0.0] - 2026-08-04
 
 First public release of Code System Graph.

@@ -141,7 +141,12 @@ jobs:
         run: cargo build --locked --release --target ${{ matrix.target }} --bin csgraph --bin code-system-graph-hooks
 
       - name: Run target tests
+        if: runner.os == 'Linux'
         run: cargo test --workspace --exclude code-system-graph-fuzz --all-features --locked --target ${{ matrix.target }}
+
+      - name: Run target tests serially
+        if: runner.os != 'Linux'
+        run: cargo test --workspace --exclude code-system-graph-fuzz --all-features --locked --target ${{ matrix.target }} -- --test-threads=1
 
       - name: Package Unix archive
         if: runner.os != 'Windows'
@@ -160,6 +165,18 @@ jobs:
           tar -C dist -czf "dist/${asset_dir}.tgz" "${asset_dir}"
           rm -rf "dist/${asset_dir}"
 
+      - name: Smoke-test Unix archive
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          asset_dir="${PRODUCT_NAME}-${TARGET}-v${version}"
+          extracted="$(mktemp -d)"
+          trap 'rm -rf "$extracted"' EXIT
+          tar -C "$extracted" -xzf "dist/${asset_dir}.tgz"
+          scripts/smoke-install.sh "$extracted/${asset_dir}"
+
       - name: Package Windows archive
         if: runner.os == 'Windows'
         shell: pwsh
@@ -175,6 +192,23 @@ jobs:
           Copy-Item docs "$docDir\docs" -Recurse
           Compress-Archive -Path "dist\$assetDir" -DestinationPath "dist\$assetDir.zip" -Force
           Remove-Item "dist\$assetDir" -Recurse -Force
+
+      - name: Smoke-test Windows archive
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $version = $env:RELEASE_TAG -replace '^v', ''
+          $assetDir = "$env:PRODUCT_NAME-$env:TARGET-v$version"
+          $extracted = Join-Path $env:RUNNER_TEMP "code-system-graph-release-smoke"
+          Expand-Archive -Path "dist\$assetDir.zip" -DestinationPath $extracted -Force
+          $binDir = Join-Path $extracted "$assetDir\bin"
+          $actualVersion = & (Join-Path $binDir "csgraph.exe") --version
+          if ($actualVersion -ne "csgraph $version") {
+            throw "unexpected csgraph version: $actualVersion"
+          }
+          if (-not (Test-Path (Join-Path $binDir "code-system-graph-hooks.exe"))) {
+            throw "code-system-graph-hooks.exe is missing from the archive"
+          }
 
       - name: Upload release asset
         uses: actions/upload-artifact@v7

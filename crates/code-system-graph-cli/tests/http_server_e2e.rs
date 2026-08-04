@@ -23,6 +23,27 @@ use tokio_util::sync::CancellationToken;
 const TEST_TOKEN: &str = "http-test-token";
 static FIXTURE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+fn is_early_body_rejection(error: &(dyn std::error::Error + 'static)) -> bool {
+    let mut current = Some(error);
+    while let Some(source) = current {
+        if source
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io_error| {
+                matches!(
+                    io_error.kind(),
+                    std::io::ErrorKind::BrokenPipe
+                        | std::io::ErrorKind::ConnectionAborted
+                        | std::io::ErrorKind::ConnectionReset
+                )
+            })
+        {
+            return true;
+        }
+        current = source.source();
+    }
+    false
+}
+
 struct Fixture {
     temporary: TempDir,
     manifest: PathBuf,
@@ -389,7 +410,8 @@ async fn explore_route_should_reject_disabled_codegraph_before_execution() -> an
 #[tokio::test]
 async fn tool_request_should_reject_body_larger_than_one_mibibyte() -> anyhow::Result<()> {
     let server = RunningServer::start(None).await?;
-    let response = Client::new()
+    let client = Client::new();
+    let response = client
         .post(server.url("/v1/tools/query"))
         .json(&json!({
             "query": "x".repeat(1024 * 1024),
@@ -401,12 +423,27 @@ async fn tool_request_should_reject_body_larger_than_one_mibibyte() -> anyhow::R
             "limit": 1
         }))
         .send()
-        .await?;
-    let (status, body) = response_json(response).await?;
-
+        .await;
+    match response {
+        Ok(response) => {
+            let (status, body) = response_json(response).await?;
+            assert_eq!(
+                (status, body["data"]["code"].as_str()),
+                (StatusCode::PAYLOAD_TOO_LARGE, Some("payload_too_large"))
+            );
+        }
+        Err(error) => {
+            // Some kernels reset a connection when the server rejects the declared oversized body
+            // before the client finishes writing it.
+            assert!(
+                is_early_body_rejection(&error),
+                "unexpected oversized-body transport error: {error:#}"
+            );
+        }
+    }
     assert_eq!(
-        (status, body["data"]["code"].as_str()),
-        (StatusCode::PAYLOAD_TOO_LARGE, Some("payload_too_large"))
+        client.get(server.url("/health")).send().await?.status(),
+        StatusCode::OK
     );
     server.stop().await
 }
@@ -452,8 +489,17 @@ async fn cancellation_should_stop_accepting_connections() -> anyhow::Result<()> 
         .timeout(Duration::from_millis(500))
         .build()?;
 
+    let startup_deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let mut accepted_before_cancellation = false;
+    while tokio::time::Instant::now() < startup_deadline {
+        if server_serves_workspace(&client, address, &workspace).await {
+            accepted_before_cancellation = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
     assert!(
-        server_serves_workspace(&client, address, &workspace).await,
+        accepted_before_cancellation,
         "server should accept connections before cancellation"
     );
 

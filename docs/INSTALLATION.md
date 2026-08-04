@@ -5,10 +5,10 @@ for maintainers are in [Release engineering](RELEASE.md).
 
 ## Current availability
 
-Code System Graph `1.0.0` is published on [crates.io](https://crates.io/crates/code-system-graph)
-and [GitHub Releases](https://github.com/dertin/code-system-graph/releases). Linux x86_64 is the
-only platform validated locally for build, tests, package lifecycle, and uninstall. Workflows exist
-for other targets, but configured CI is not evidence that those platforms pass.
+Code System Graph `1.0.1` is published on [crates.io](https://crates.io/crates/code-system-graph)
+and [GitHub Releases](https://github.com/dertin/code-system-graph/releases). Native release CI
+validates Linux x86_64/ARM64, macOS x86_64/ARM64, and Windows x86_64 before their archives are
+published.
 
 ## Install with cargo-binstall (recommended)
 
@@ -16,7 +16,7 @@ Requirements:
 
 - Cargo;
 - [cargo-binstall](https://github.com/cargo-bins/cargo-binstall);
-- Linux x86_64 for the current prebuilt release archive.
+- a supported target: Linux x86_64/ARM64, macOS x86_64/ARM64, or Windows x86_64.
 
 No Rust compiler is required. cargo-binstall downloads the official release archive declared by the
 crate metadata and installs:
@@ -84,9 +84,17 @@ For a Linux x86_64 archive:
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-tar -xzf code-system-graph-x86_64-unknown-linux-gnu-v1.0.0.tgz
-PREFIX="$HOME/.local" ./code-system-graph-x86_64-unknown-linux-gnu-v1.0.0/install.sh
+tar -xzf code-system-graph-x86_64-unknown-linux-gnu-v1.0.1.tgz
+PREFIX="$HOME/.local" ./code-system-graph-x86_64-unknown-linux-gnu-v1.0.1/install.sh
 ```
+
+Replace the target in the archive name with `x86_64-apple-darwin`,
+`aarch64-apple-darwin`, or `aarch64-unknown-linux-gnu` as appropriate. Unix archives include the
+same installer.
+
+The Windows archive is a ZIP file. Verify `SHA256SUMS`, extract
+`code-system-graph-x86_64-pc-windows-msvc-v1.0.1.zip`, and add its `bin` directory containing
+`csgraph.exe` and `code-system-graph-hooks.exe` to `PATH`.
 
 `PREFIX` defaults to `$HOME/.local`. The installer places binaries under `$PREFIX/bin`, installed
 documentation under `$PREFIX/share/doc/code-system-graph`, and a private ownership manifest under
@@ -145,7 +153,7 @@ The package installer preserves replaced binaries under:
 $PREFIX/share/code-system-graph/backups/
 ```
 
-The 1.0.0 release supports one exact initial database schema. An incompatible local database is
+The 1.0.x release line supports one exact initial database schema. An incompatible local database is
 disposable: remove it and run a full scan. Backup and restore accept only that exact schema and
 never migrate it.
 
@@ -163,7 +171,7 @@ cargo uninstall code-system-graph-hooks
 Run `uninstall.sh` from the verified extracted package with the same prefix:
 
 ```bash
-PREFIX="$HOME/.local" ./code-system-graph-x86_64-unknown-linux-gnu-v1.0.0/uninstall.sh
+PREFIX="$HOME/.local" ./code-system-graph-x86_64-unknown-linux-gnu-v1.0.1/uninstall.sh
 ```
 
 Before uninstalling either installation type, remove any optional agent hooks:
@@ -185,10 +193,10 @@ Delete workspace data separately only after confirming that it is no longer need
 
 | Platform | Status |
 | --- | --- |
-| Linux x86_64 | Locally validated for build, tests, package lifecycle, binstall, and uninstall |
-| Linux ARM64 | Workflow configured; not validated on a release host |
-| macOS x86_64 / ARM64 | Workflow configured; not validated |
-| Windows x86_64 | Workflow configured; no validated native installer |
+| Linux x86_64 | Native CI validates build, tests, archive lifecycle, binstall, and uninstall |
+| Linux ARM64 | Native CI validates build, tests, and archive contents |
+| macOS x86_64 / ARM64 | Native CI validates build, serial tests, archive install, and uninstall |
+| Windows x86_64 | Native CI validates build, serial tests, ZIP contents, and binary startup |
 | Windows ARM64 | Not in the current release workflow |
 
 See [Release engineering](RELEASE.md) for the evidence and publication requirements behind this

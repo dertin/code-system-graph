@@ -1,7 +1,9 @@
 //! Capability-scoped directory access that never follows symbolic links.
 
 use std::ffi::OsStr;
-use std::fs::{self, File};
+use std::fs;
+#[cfg(unix)]
+use std::fs::File;
 use std::io::{Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
@@ -636,7 +638,10 @@ fn read_file_bounded_portable(
             limit: max_bytes,
         });
     }
-    let mut file = fs::File::open(&path).map_err(|source| CapabilityError::Io { path, source })?;
+    let file = fs::File::open(&path).map_err(|source| CapabilityError::Io {
+        path: path.clone(),
+        source,
+    })?;
     read_file_to_end_bounded(file, &path, max_bytes)
 }
 

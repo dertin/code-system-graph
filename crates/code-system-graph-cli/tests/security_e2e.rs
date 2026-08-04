@@ -81,12 +81,17 @@ fn non_utf8_artifact_should_degrade_without_aborting_workspace_scan() -> anyhow:
 
     let first = scan_workspace(&manifest, &database)?;
     let second = scan_workspace(&manifest, &database)?;
+    let expected_artifact = ["db", "schema.sql"]
+        .iter()
+        .collect::<std::path::PathBuf>()
+        .display()
+        .to_string();
 
     assert!(!first.reused_snapshot);
     assert!(second.reused_snapshot);
     assert_eq!(first.discovered_input_count, 1);
     assert!(first.degradations.iter().any(|message| {
-        message.contains("db/schema.sql")
+        message.contains(&expected_artifact)
             && message.contains("invalid UTF-8")
             && message.contains("incomplete")
     }));

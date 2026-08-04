@@ -7,9 +7,9 @@
 Understand what connects your repositories and what a change could break before you ship it.
 
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-![Source version](https://img.shields.io/badge/source-v1.0.0-orange.svg)
+![Source version](https://img.shields.io/badge/source-v1.0.1-orange.svg)
 [![crates.io](https://img.shields.io/crates/v/code-system-graph.svg)](https://crates.io/crates/code-system-graph)
-![Platform](https://img.shields.io/badge/validated-Linux%20x86__64-1793d1.svg)
+![Platforms](https://img.shields.io/badge/validated-Linux%20%7C%20macOS%20%7C%20Windows-1793d1.svg)
 ![Privacy](https://img.shields.io/badge/privacy-local%20%7C%20no%20telemetry-2ea44f.svg)
 ![Agents](https://img.shields.io/badge/agents-5%20supported-7c3aed.svg)
 
@@ -122,8 +122,9 @@ validation matrix remains in [Extractor coverage](docs/EXTRACTOR_COVERAGE.md).
 
 ### 1. Install
 
-Linux x86_64 is the validated installation target for prebuilt binaries and release archives. See
-[Installation](docs/INSTALLATION.md) for platform status, verification, upgrades, and uninstall.
+Prebuilt binaries are available for Linux x86_64/ARM64, macOS x86_64/ARM64, and Windows x86_64.
+See [Installation](docs/INSTALLATION.md) for platform status, verification, upgrades, and
+uninstall.
 
 **Recommended: prebuilt binaries with cargo-binstall** (no Rust compiler required):
 
@@ -311,7 +312,7 @@ Where is coverage incomplete or stale?
 - one or more local repository directories;
 - a `code-system-graph.yaml` manifest with a workspace name and repository paths;
 - a writable path for the embedded SQLite database;
-- Linux x86_64 for the currently validated installation path.
+- Linux x86_64/ARM64, macOS x86_64/ARM64, or Windows x86_64 for a prebuilt installation.
 
 ### Optional
 

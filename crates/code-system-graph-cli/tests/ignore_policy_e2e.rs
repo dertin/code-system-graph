@@ -1,6 +1,7 @@
 //! Acceptance coverage for configurable native discovery exclusions.
 
 use code_system_graph::scan_workspace;
+use code_system_graph_core::encode_native_path;
 use code_system_graph_store_sqlite::SqliteStore;
 
 #[test]
@@ -41,17 +42,19 @@ fn scan_should_apply_excludes_reopen_defaults_and_keep_explicit_artifacts() -> a
     let paths = SqliteStore::open_read_only(&database)?
         .load_current_artifact_fingerprints("ignored")?
         .into_iter()
-        .map(|fingerprint| fingerprint.path.display)
+        .map(|fingerprint| fingerprint.path)
         .collect::<Vec<_>>();
+    let native_path =
+        |relative: &str| encode_native_path(&relative.split('/').collect::<std::path::PathBuf>());
 
     assert_eq!(
         (
-            paths.contains(&"src/lib.rs".to_owned()),
-            paths.contains(&"coverage/missed.rs".to_owned()),
-            paths.contains(&"generated/output/hidden.rs".to_owned()),
-            paths.contains(&"vendor/internal-sdk/src/lib.rs".to_owned()),
-            paths.contains(&"vendor/external/src/lib.rs".to_owned()),
-            paths.contains(&"vendor/contracts/openapi.yaml".to_owned()),
+            paths.contains(&native_path("src/lib.rs")),
+            paths.contains(&native_path("coverage/missed.rs")),
+            paths.contains(&native_path("generated/output/hidden.rs")),
+            paths.contains(&native_path("vendor/internal-sdk/src/lib.rs")),
+            paths.contains(&native_path("vendor/external/src/lib.rs")),
+            paths.contains(&native_path("vendor/contracts/openapi.yaml")),
         ),
         (true, false, false, true, false, true)
     );

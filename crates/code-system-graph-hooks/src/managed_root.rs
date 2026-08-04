@@ -1,7 +1,9 @@
 //! Capability-scoped repository root used for marker-owned host file installation.
 
 use std::ffi::OsStr;
-use std::fs::{self, File};
+use std::fs;
+#[cfg(unix)]
+use std::fs::File;
 use std::io::{Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
@@ -810,6 +812,7 @@ mod tests {
         let managed = ManagedRoot::open(&root)?;
 
         for relative in [
+            #[cfg(not(windows))]
             Path::new(".code-system-graph/hooks/bad\x1bname"),
             Path::new(".code-system-graph/hooks/safe\u{202e}evil"),
         ] {

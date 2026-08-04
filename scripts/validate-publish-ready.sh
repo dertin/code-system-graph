@@ -3,7 +3,8 @@ set -euo pipefail
 
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 TARGET="$(rustc -vV | awk '/^host:/ { print $2 }')"
-PACKAGE_DIR="$ROOT/dist/code-system-graph-$TARGET-v1.0.0"
+VERSION="$(awk -F '"' '/^version = / { print $2; exit }' "$ROOT/Cargo.toml")"
+PACKAGE_DIR="$ROOT/dist/code-system-graph-$TARGET-v$VERSION"
 
 cd "$ROOT"
 
@@ -50,4 +51,4 @@ then
   exit 1
 fi
 
-printf 'Code System Graph 1.0.0 publish-readiness validation passed\n'
+printf 'Code System Graph %s publish-readiness validation passed\n' "$VERSION"
