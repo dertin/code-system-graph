@@ -263,7 +263,7 @@ fn staging_directory_should_be_owner_only_before_sqlite_writes()
     use std::os::unix::fs::PermissionsExt;
 
     let temporary = tempfile::tempdir()?;
-    let destination = temporary.path().join("backup.db");
+    let destination = fs::canonicalize(temporary.path())?.join("backup.db");
 
     let (staging, connection) = StagedDatabase::create(&destination)?;
     let mode = fs::metadata(staging.directory.path())?.permissions().mode() & 0o777;
