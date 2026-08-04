@@ -12,7 +12,8 @@ license = "Apache-2.0"
 repository = "https://github.com/dertin/code-system-graph"
 homepage = "https://github.com/dertin/code-system-graph"
 readme = "README.md"
-keywords = ["code-intelligence", "static-analysis", "graphql", "sqlite", "mcp"]
+keywords = ["code-intelligence", "static-analysis", "impact-analysis", "mcp", "monorepo"]
+categories = ["development-tools"]
 
 [workspace.lints.rust]
 future_incompatible = { level = "warn", priority = -1 }
