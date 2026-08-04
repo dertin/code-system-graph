@@ -55,6 +55,26 @@ enum LogFormat {
     Json,
 }
 
+#[cfg(windows)]
+const WINDOWS_WORKER_STACK_BYTES: usize = 8 * 1024 * 1024;
+
+fn run_worker_process() -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        return std::thread::Builder::new()
+            .name("code-system-graph-worker".to_owned())
+            .stack_size(WINDOWS_WORKER_STACK_BYTES)
+            .spawn(run_worker_from_stdio)
+            .map_err(|error| format!("failed to start worker thread: {error}"))?
+            .join()
+            .map_err(|_| "worker thread panicked".to_owned())?;
+    }
+    #[cfg(not(windows))]
+    {
+        run_worker_from_stdio()
+    }
+}
+
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Internal supervised worker protocol.
@@ -1503,7 +1523,7 @@ fn log_command_event(
 )]
 async fn dispatch(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
-        Command::WorkerV1 => run_worker_from_stdio().map_err(anyhow::Error::msg)?,
+        Command::WorkerV1 => run_worker_process().map_err(anyhow::Error::msg)?,
         Command::WatchEventsV1 {
             config,
             database,
