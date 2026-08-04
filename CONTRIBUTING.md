@@ -76,7 +76,9 @@ work. CI and release validation continue to use plain Cargo with the committed `
 The fuzz crate is a workspace member and shares the repository `Cargo.lock`, but routine CI excludes
 it with `--exclude code-system-graph-fuzz`. Fuzzing runs only in the weekly `.github/workflows/fuzz.yml`
 job (and via manual `workflow_dispatch`). That workflow runs
-`scripts/validate-lockfile-cooldown.sh` with `COOLDOWN_LOCKFILE_BASELINE=ignore` before `cargo fuzz`.
+`scripts/validate-lockfile-cooldown.sh` before `cargo fuzz`. The check uses
+`lockfile-baseline = "floor"` so the committed `Cargo.lock` is the minimum; cooldown still
+blocks freshly published registry releases during `cargo cooldown update`.
 
 Add focused tests for relevant success and failure paths. For graph and provider behavior, cover
 stale, incomplete, ambiguous, bounded, timeout, or cancellation outcomes when applicable.

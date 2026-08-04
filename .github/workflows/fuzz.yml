@@ -28,8 +28,6 @@ jobs:
           fallback: cargo-install
       - uses: Swatinem/rust-cache@v2
       - name: Enforce dependency cooldown policy
-        env:
-          COOLDOWN_LOCKFILE_BASELINE: ignore
         run: scripts/validate-lockfile-cooldown.sh fuzz/Cargo.toml
       - run: cargo check --manifest-path fuzz/Cargo.toml --locked
       - run: cargo fuzz run parsers --target x86_64-unknown-linux-gnu -- -max_total_time=120 -max_len=2097152

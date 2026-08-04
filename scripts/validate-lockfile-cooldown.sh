@@ -11,6 +11,6 @@ repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 
 cd "$repo_root"
 
-export COOLDOWN_LOCKFILE_BASELINE="${COOLDOWN_LOCKFILE_BASELINE:-ignore}"
+export COOLDOWN_LOCKFILE_BASELINE="${COOLDOWN_LOCKFILE_BASELINE:-floor}"
 
 cargo cooldown check --manifest-path "$manifest" --locked
