@@ -47,12 +47,15 @@ github_repo_from_remote() {
 
 github_repo="$(github_repo_from_remote)"
 workspace_metadata="$(cargo metadata --locked --no-deps --format-version 1)"
+publishable_crates_json='["code-system-graph-model","code-system-graph-hooks","code-system-graph-store-sqlite","code-system-graph-core","code-system-graph"]'
 manifest_version="$(
-  jq -er '[.packages[].version] | unique | if length == 1 then .[0] else error("workspace versions differ") end' \
+  jq -er --argjson publishable "$publishable_crates_json" \
+    '[.packages[] | select(.name as $n | $publishable | index($n)) | .version] | unique | if length == 1 then .[0] else error("publishable crate versions differ") end' \
     <<<"$workspace_metadata"
 )"
 manifest_repo="$(
-  jq -er '[.packages[].repository] | unique | if length == 1 then .[0] else error("workspace repositories differ") end' \
+  jq -er --argjson publishable "$publishable_crates_json" \
+    '[.packages[] | select(.name as $n | $publishable | index($n)) | .repository] | unique | if length == 1 then .[0] else error("publishable crate repositories differ") end' \
     <<<"$workspace_metadata"
 )"
 
