@@ -590,6 +590,28 @@ fn backup_validation_should_use_read_only_untrusted_schema_connection()
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn backup_validation_should_allow_symlinked_parent_components()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::fs::symlink;
+
+    let temporary = tempfile::tempdir()?;
+    let real = temporary.path().join("real");
+    let alias = temporary.path().join("alias");
+    fs::create_dir(&real)?;
+    symlink(&real, &alias)?;
+    let database = real.join("store.db");
+    let backup = real.join("backup.db");
+    seed_backup(&database, &backup, "snapshot:0")?;
+
+    let connection = open_backup_source(&alias.join("backup.db"))?;
+    let query_only = connection.query_row("PRAGMA query_only", [], |row| row.get::<_, i64>(0))?;
+
+    assert_eq!(query_only, 1);
+    Ok(())
+}
+
 #[test]
 fn restore_should_reject_backup_with_extra_trigger() -> Result<(), Box<dyn std::error::Error>> {
     let temporary = tempfile::tempdir()?;

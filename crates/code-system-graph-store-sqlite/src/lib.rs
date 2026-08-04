@@ -2054,18 +2054,22 @@ fn open_read_only_connection(
     path: &Path,
     configure: impl Fn(&Connection) -> Result<(), StoreError>,
 ) -> Result<Connection, StoreError> {
+    let path = fs::canonicalize(path).map_err(|source| StoreError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
     let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
         | OpenFlags::SQLITE_OPEN_NO_MUTEX
         | OpenFlags::SQLITE_OPEN_NOFOLLOW;
-    let connection = Connection::open_with_flags(path, flags)?;
+    let connection = Connection::open_with_flags(&path, flags)?;
     match configure(&connection) {
         Ok(()) => Ok(connection),
         Err(error) if is_read_only_directory_error(&error) => {
             drop(connection);
-            if immutable_fallback_has_sidecars(path)? {
+            if immutable_fallback_has_sidecars(&path)? {
                 return Err(error);
             }
-            let uri = immutable_database_uri(path)?;
+            let uri = immutable_database_uri(&path)?;
             let connection = Connection::open_with_flags(uri, flags | OpenFlags::SQLITE_OPEN_URI)?;
             configure(&connection)?;
             Ok(connection)
