@@ -49,9 +49,11 @@ jobs:
             echo "Checked-out commit ${head_commit} does not match tag ${RELEASE_TAG} (${tag_commit})" >&2
             exit 1
           fi
+          publishable_crates_json='["code-system-graph-model","code-system-graph-hooks","code-system-graph-store-sqlite","code-system-graph-core","code-system-graph"]'
           manifest_version="$(
             cargo metadata --locked --no-deps --format-version 1 |
-              jq -er '[.packages[].version] | unique | if length == 1 then .[0] else error("workspace versions differ") end'
+              jq -er --argjson publishable "$publishable_crates_json" \
+                '[.packages[] | select(.name as $n | $publishable | index($n)) | .version] | unique | if length == 1 then .[0] else error("publishable crate versions differ") end'
           )"
           tag_version="${RELEASE_TAG#v}"
           if [ "$manifest_version" != "$tag_version" ]; then
