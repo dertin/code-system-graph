@@ -1,4 +1,4 @@
-#[cfg(any(target_os = "linux", target_os = "android", windows))]
+#[cfg(any(unix, windows))]
 use std::cell::Cell;
 use std::fs;
 use std::path::Path;
@@ -307,6 +307,56 @@ fn restore_should_preserve_replaced_database_as_safety_backup()
 }
 
 #[test]
+fn restore_should_refuse_while_read_only_store_is_open() -> Result<(), Box<dyn std::error::Error>> {
+    let temporary = tempfile::tempdir()?;
+    let database = temporary.path().join("store.db");
+    let backup = temporary.path().join("selected-backup.db");
+    {
+        let mut store = seeded_store(&database, "snapshot:before")?;
+        store.backup_to(&backup)?;
+        seed_snapshot(&mut store, "snapshot:after")?;
+    }
+    let stale = SqliteStore::open_read_only(&database)?;
+
+    let blocked = SqliteStore::restore_from(&database, &backup);
+    let stale_snapshot = stale.current_snapshot_summary("commerce")?;
+    drop(stale);
+    let report = SqliteStore::restore_from(&database, &backup)?;
+    let restored = SqliteStore::open_read_only(&database)?.current_snapshot_summary("commerce")?;
+
+    assert!(matches!(blocked, Err(StoreError::LockHeld(_))));
+    assert_eq!(stale_snapshot.snapshot_id, "snapshot:after");
+    assert_eq!(restored.snapshot_id, "snapshot:before");
+    assert!(report.safety_backup_path.is_some());
+    Ok(())
+}
+
+#[test]
+fn open_should_reject_hard_link_aliases() -> Result<(), Box<dyn std::error::Error>> {
+    let temporary = tempfile::tempdir()?;
+    let database = temporary.path().join("store.db");
+    let alias = temporary.path().join("store-alias.db");
+    let backup = temporary.path().join("selected-backup.db");
+    {
+        let mut store = seeded_store(&database, "snapshot:before")?;
+        store.backup_to(&backup)?;
+        seed_snapshot(&mut store, "snapshot:after")?;
+    }
+    fs::hard_link(&database, &alias)?;
+    let aliased = SqliteStore::open_read_only(&alias);
+    fs::remove_file(&alias)?;
+    let restored = SqliteStore::restore_from(&database, &backup)?;
+
+    assert!(matches!(
+        aliased,
+        Err(StoreError::Io { source, .. })
+            if source.kind() == std::io::ErrorKind::InvalidInput
+    ));
+    assert!(restored.safety_backup_path.is_some());
+    Ok(())
+}
+
+#[test]
 fn restore_should_replace_invalid_schema_and_preserve_it_as_safety_backup()
 -> Result<(), Box<dyn std::error::Error>> {
     let temporary = tempfile::tempdir()?;
@@ -390,7 +440,7 @@ fn corrupt_restore_should_reject_sidecars_created_before_publication()
     Ok(())
 }
 
-#[cfg(any(target_os = "linux", target_os = "android", windows))]
+#[cfg(any(unix, windows))]
 #[test]
 fn restore_should_lock_destination_before_safety_backup_is_reported()
 -> Result<(), Box<dyn std::error::Error>> {

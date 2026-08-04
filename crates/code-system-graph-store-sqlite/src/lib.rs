@@ -3,6 +3,7 @@
 //! Durable database files are supported on Unix and Windows because the store
 //! requires enforceable owner-only file permissions.
 
+mod access_lock;
 mod backup_restore;
 mod file_permissions;
 mod schema_contract;
@@ -13,6 +14,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use access_lock::StoreAccessLock;
 use backup_restore::{backup_connection, restore_database};
 use code_system_graph_model::{
     ArtifactFingerprint, CheckoutId, Community, CommunityAlgorithm, CommunityConfig, CommunityId, CommunityMetrics, CommunitySnapshot, Edge, EdgeId, EdgeKind, EpistemicStatus, Evidence, EvidenceId, ExtractorRun, LinkDecision, LinkStatus, NativePath, Node, NodeId, NodeKind, RepoFreshness, RepoFreshnessState, RepoId, RepositoryRecord, StoredExtractorBatch, WorkspaceId, WorkspaceRecord, contains_unsafe_metadata_characters, stable_id
@@ -61,6 +63,7 @@ const QUERY_CACHE_RESULT_MAX_BYTES: usize = 1_048_576;
 /// Embedded `SQLite` store with transactional snapshot publication.
 pub struct SqliteStore {
     connection: Connection,
+    _access_lock: Option<StoreAccessLock>,
 }
 
 /// Exclusive writer lock represented by a restrictive sidecar file.
@@ -463,14 +466,25 @@ impl Drop for StoreLock {
 }
 
 impl SqliteStore {
+    /// Returns whether [`Self::restore_from`] can replace an existing on-disk database.
+    #[must_use]
+    pub const fn supports_inplace_restore() -> bool {
+        cfg!(any(unix, windows))
+    }
+
     /// Opens an exact 1.0.0 store or initializes a new empty database.
     ///
     /// # Errors
     ///
     /// Returns [`StoreError`] if `SQLite` cannot open, initialize, or validate the database.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
-        let connection = open_exact(path.as_ref())?;
-        Ok(Self { connection })
+        let path = path.as_ref();
+        let access_lock = StoreAccessLock::shared(path)?;
+        let connection = open_exact(access_lock.database_path())?;
+        Ok(Self {
+            connection,
+            _access_lock: Some(access_lock),
+        })
     }
 
     /// Creates a validated online backup of the exact 1.0.0 schema.
@@ -479,12 +493,15 @@ impl SqliteStore {
     ///
     /// Returns [`StoreError`] when the source is invalid or the destination already exists.
     pub fn backup_file(database_path: &Path, destination: &Path) -> Result<(), StoreError> {
-        backup_restore::backup_file(database_path, destination)
+        let access_lock = StoreAccessLock::shared(database_path)?;
+        backup_restore::backup_file(access_lock.database_path(), destination)
     }
 
     /// Restores a validated backup with the exact 1.0.0 schema.
     ///
     /// The existing destination is first preserved as a non-overwriting safety backup.
+    /// Restore is refused while another [`SqliteStore`] has the destination open.
+    /// In-place replacement is supported on Unix (including macOS) and Windows.
     ///
     /// # Errors
     ///
@@ -493,8 +510,19 @@ impl SqliteStore {
         database_path: &Path,
         backup_path: &Path,
     ) -> Result<RestoreReport, StoreError> {
+        if database_path.exists() && !Self::supports_inplace_restore() {
+            return Err(StoreError::Io {
+                path: database_path.to_path_buf(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "safe in-place restore is unsupported on this platform; \
+                     back up the database, remove it, then restore or reinitialize",
+                ),
+            });
+        }
+        let access_lock = StoreAccessLock::exclusive(database_path)?;
         restore_database(
-            database_path,
+            access_lock.database_path(),
             backup_path,
             || {},
             |_| {},
@@ -509,14 +537,19 @@ impl SqliteStore {
     ///
     /// Returns [`StoreError`] if the database is absent, corrupt, or not the exact 1.0.0 schema.
     pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self, StoreError> {
+        let path = path.as_ref();
+        let access_lock = StoreAccessLock::shared(path)?;
         let connection = Connection::open_with_flags(
-            path,
+            access_lock.database_path(),
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
         connection.pragma_update(None, "foreign_keys", true)?;
         connection.busy_timeout(Duration::from_secs(5))?;
         validate_exact_schema(&connection)?;
-        Ok(Self { connection })
+        Ok(Self {
+            connection,
+            _access_lock: Some(access_lock),
+        })
     }
 
     /// Creates an in-memory store for isolated tests and ephemeral operations.
@@ -534,7 +567,10 @@ impl SqliteStore {
             initialize_empty_schema(&mut connection)?;
         }
         validate_exact_schema(&connection)?;
-        Ok(Self { connection })
+        Ok(Self {
+            connection,
+            _access_lock: None,
+        })
     }
 
     /// Returns the exact initial schema version recorded by this store.

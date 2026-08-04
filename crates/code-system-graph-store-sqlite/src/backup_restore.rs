@@ -414,7 +414,7 @@ fn canonical_destination_path(path: &Path) -> Result<PathBuf, StoreError> {
     Ok(parent.join(file_name))
 }
 
-#[cfg(any(target_os = "linux", target_os = "android"))]
+#[cfg(target_os = "linux")]
 #[allow(unsafe_code)]
 fn replace_database_file_if_same(
     replacement: &Path,
@@ -618,7 +618,85 @@ fn replace_database_file_if_same(
     ))
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "android", windows)))]
+#[cfg(all(unix, not(target_os = "linux")))]
+fn remove_sqlite_sidecars(database_path: &Path) -> std::io::Result<()> {
+    for suffix in &SQLITE_ARTIFACT_SUFFIXES[1..] {
+        let sidecar = artifact_path(database_path, suffix);
+        match fs::remove_file(&sidecar) {
+            Ok(()) => {}
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => return Err(source),
+        }
+    }
+    Ok(())
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn replace_database_file_if_same(
+    replacement: &Path,
+    destination: &Path,
+    expected: &DestinationSnapshot,
+    displaced: &Path,
+) -> std::io::Result<()> {
+    if !expected.matches(destination)? {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "database destination changed before atomic replacement",
+        ));
+    }
+    if displaced.exists() {
+        fs::remove_file(displaced)?;
+    }
+    remove_sqlite_sidecars(destination)?;
+    if let Err(error) = fs::rename(destination, displaced) {
+        return Err(error);
+    }
+    if let Err(error) = publish_new_database_file(replacement, destination) {
+        let rollback = fs::rename(displaced, destination);
+        return Err(match rollback {
+            Ok(()) => error,
+            Err(rollback) => std::io::Error::new(
+                rollback.kind(),
+                format!(
+                    "failed to publish restored database: {error}; \
+                     rollback also failed: {rollback}"
+                ),
+            ),
+        });
+    }
+    let displaced_snapshot = match DestinationSnapshot::capture(displaced) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            remove_sqlite_sidecars(destination)?;
+            let removed = fs::remove_file(destination);
+            let rollback = fs::rename(displaced, destination);
+            return Err(std::io::Error::new(
+                error.kind(),
+                format!(
+                    "failed to inspect displaced database: {error}; \
+                     rollback remove={removed:?}, rename={rollback:?}"
+                ),
+            ));
+        }
+    };
+    if expected.same_as(&displaced_snapshot) {
+        return Ok(());
+    }
+    remove_sqlite_sidecars(destination)?;
+    fs::remove_file(destination)?;
+    fs::rename(displaced, destination)?;
+    if !displaced_snapshot.matches(destination)? {
+        return Err(std::io::Error::other(
+            "atomic replacement rollback did not restore the displaced database",
+        ));
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "database destination changed during atomic replacement",
+    ))
+}
+
+#[cfg(not(any(unix, windows)))]
 fn replace_database_file_if_same(
     _replacement: &Path,
     _destination: &Path,
@@ -683,16 +761,6 @@ pub(super) fn restore_database(
     source_ready();
 
     let database_existed = database_path.exists();
-    #[cfg(not(any(target_os = "linux", target_os = "android", windows)))]
-    if database_existed {
-        return Err(StoreError::Io {
-            path: database_path,
-            source: std::io::Error::new(
-                std::io::ErrorKind::Unsupported,
-                "safe replacement restore is unsupported on this platform",
-            ),
-        });
-    }
     let (safety_backup_path, mut existing_guard, original_snapshot, unlocked_corruption) =
         if database_existed {
             let (safety_path, existing, snapshot, unlocked_corruption) =
@@ -833,12 +901,12 @@ fn is_database_corruption(error: &rusqlite::Error) -> bool {
     )
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, all(unix, not(target_os = "linux"))))]
 fn release_destination_lock_for_publish(guard: &mut Option<Connection>) {
     drop(guard.take());
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
 fn release_destination_lock_for_publish(_guard: &mut Option<Connection>) {}
 
 fn configure_staged_restore(connection: &Connection) -> Result<(), StoreError> {
