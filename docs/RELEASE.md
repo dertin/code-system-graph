@@ -113,16 +113,25 @@ See `INSTALLATION.md` for verification, installation, upgrade, rollback, and uni
 
 The release entry point follows the same tag-first process used by `cargo-cooldown`. It requires a
 clean `main` branch aligned with `origin/main`, Cargo credentials for crates.io, authenticated `gh`,
-`jq`, and a configured Git signing key:
+`jq`, and a configured Git signing key. Run the safe preparation mode first; omitting the mode also
+selects `prepare`:
 
 ```text
-.github/workflows/release.sh 1.0.0
+.github/workflows/release.sh 1.0.0 prepare
 ```
 
-The script verifies that the workspace repository matches `origin`, creates and pushes the signed
-tag, publishes the five crates in dependency order, waits for each dependency to become available
-on crates.io, and dispatches `release.yml` with the existing tag. Rerunning the script is safe after
-a partial crates.io publication because versions already present are skipped.
+Preparation runs the complete publish-readiness suite and dry-runs all five packages without
+creating a tag, publishing a crate, or dispatching a workflow. To perform the irreversible release,
+pass `publish` explicitly:
+
+```text
+.github/workflows/release.sh 1.0.0 publish
+```
+
+Publish mode verifies that the workspace repository matches `origin`, creates and pushes the
+signed tag, publishes the five crates in dependency order, waits for each dependency to become
+available on crates.io, and dispatches `release.yml` with the existing tag. Rerunning the command
+is safe after a partial crates.io publication because versions already present are skipped.
 
 The workflow can also be dispatched manually from GitHub Actions with an existing `vX.Y.Z` tag. It
 validates the tag and workspace version, runs the release tests and policy gates, builds native

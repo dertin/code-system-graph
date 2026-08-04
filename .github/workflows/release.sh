@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   echo "Usage: $0 <version> [prepare|publish]" >&2
-  echo "  prepare  Run publish preflight and dry-run all workspace crates (default)." >&2
+  echo "  prepare  Run publish-readiness gates and dry-run all workspace crates (default)." >&2
   echo "  publish  Push a signed tag, publish crates, and dispatch the GitHub release workflow." >&2
   exit 2
 }
@@ -98,10 +98,37 @@ wait_for_crate() {
   return 1
 }
 
+dry_run_crate() {
+  local crate_name="$1"
+  local manifest="$2"
+  local patch_args=()
+
+  # First publication cannot resolve unpublished workspace crates from crates.io. Patch only the
+  # dry-run verification graph to the local packages; real publication remains registry-backed.
+  case "$crate_name" in
+    code-system-graph-store-sqlite | code-system-graph-core)
+      patch_args=(
+        --config 'patch.crates-io.code-system-graph-model.path="crates/code-system-graph-model"'
+      )
+      ;;
+    code-system-graph)
+      patch_args=(
+        --config 'patch.crates-io.code-system-graph-model.path="crates/code-system-graph-model"'
+        --config 'patch.crates-io.code-system-graph-hooks.path="crates/code-system-graph-hooks"'
+        --config 'patch.crates-io.code-system-graph-store-sqlite.path="crates/code-system-graph-store-sqlite"'
+        --config 'patch.crates-io.code-system-graph-core.path="crates/code-system-graph-core"'
+      )
+      ;;
+  esac
+
+  cargo publish --locked --dry-run --manifest-path "$manifest" "${patch_args[@]}"
+}
+
 preflight_publish_readiness() {
+  local index
   git diff --check
-  for manifest in "${crate_manifests[@]}"; do
-    cargo publish --locked --dry-run --manifest-path "$manifest"
+  for index in "${!crate_manifests[@]}"; do
+    dry_run_crate "${crate_names[$index]}" "${crate_manifests[$index]}"
   done
 }
 

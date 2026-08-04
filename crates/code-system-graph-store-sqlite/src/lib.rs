@@ -28,7 +28,7 @@ use schema_contract::validate_exact_schema;
 use sysinfo::{Pid, ProcessesToUpdate, System};
 use thiserror::Error;
 
-const INITIAL_SCHEMA: &str = include_str!("../../../migrations/0001_initial.sql");
+const INITIAL_SCHEMA: &str = include_str!("../migrations/0001_initial.sql");
 const LATEST_SCHEMA_VERSION: i64 = 1;
 
 /// Returns the newest on-disk schema version supported by this binary.
