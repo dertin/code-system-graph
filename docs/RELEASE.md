@@ -1,11 +1,12 @@
 # Code System Graph 1.0.0 Release
 
 Code System Graph 1.0.0 is the first public release line. The source tree and package version are `1.0.0`.
-Release validation has completed locally on native Linux x86_64.
+Release validation has completed locally on native Linux x86_64. Continuous integration runs on
+GitHub at `https://github.com/dertin/code-system-graph`.
 
-The repository does not currently have a GitHub remote, so no GitHub-hosted build, test, tag, or
-release result exists. Platform claims below distinguish completed local evidence from configured
-but unexecuted automation.
+Platform claims below distinguish completed local evidence from configured but not yet validated
+targets. Linux x86_64 is the only target with native build, test, packaging, and lifecycle evidence
+today.
 
 ## Platform validation
 
@@ -154,9 +155,10 @@ Before publishing artifacts:
 1. reproduce the validation commands from a clean checkout;
 2. retain the package, SBOM, checksums, and validation output;
 3. establish publisher authentication and signing procedures;
-4. create and verify the intended GitHub remote before relying on hosted workflows;
+4. confirm GitHub Actions release workflows succeed on `main` for the candidate commit;
 5. complete native macOS and Windows validation before advertising support for those platforms.
 6. publish the binary crates and verify their Binstall metadata against the attached release
    archives before changing the installation command.
 
-Tagging, hosted artifacts, and release pages can only be verified after a remote exists.
+Tags, crates.io packages, and GitHub Release assets are created only through the controlled
+release script after the candidate commit passes the publication gates.

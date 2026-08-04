@@ -3,9 +3,10 @@ name = "code-system-graph-core"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description.workspace = true
+description = "Core extraction, linking, and query engine for Code System Graph."
 license.workspace = true
 repository.workspace = true
+readme.workspace = true
 
 [dependencies]
 async-trait = "0.1.91"

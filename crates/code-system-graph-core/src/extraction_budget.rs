@@ -1041,6 +1041,50 @@ mod tests {
     }
 
     #[test]
+    fn sampling_should_check_time_on_first_work_and_at_1024_unit_interval() {
+        let budgets = ExtractionBudgets {
+            max_work_units_per_artifact: 10_000,
+            max_structured_wall_time_ms_per_artifact: 5,
+            ..ExtractionBudgets::default()
+        };
+        let millis = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let mut tracker = ExtractionTracker::with_clock(
+            "a",
+            "structured",
+            &budgets,
+            Box::new(SteppedClock {
+                millis: std::sync::Arc::clone(&millis),
+            }),
+        );
+        for _ in 0..1023 {
+            tracker
+                .charge_work(1)
+                .expect("work below the sampling interval should not re-check wall time");
+        }
+        millis.store(6, std::sync::atomic::Ordering::Relaxed);
+        assert!(matches!(
+            tracker.charge_work(1),
+            Err(ExtractionLimitExceeded {
+                resource: ExtractionResource::StructuredWallTimeMs,
+                observed: 6,
+                maximum: 5,
+                ..
+            })
+        ));
+    }
+
+    #[derive(Debug)]
+    struct SteppedClock {
+        millis: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    }
+
+    impl ExtractionClock for SteppedClock {
+        fn elapsed(&self) -> Duration {
+            Duration::from_millis(self.millis.load(std::sync::atomic::Ordering::Relaxed))
+        }
+    }
+
+    #[test]
     fn trackers_should_reset_between_files_and_extractors() {
         let budgets = ExtractionBudgets {
             max_work_units_per_artifact: 1,

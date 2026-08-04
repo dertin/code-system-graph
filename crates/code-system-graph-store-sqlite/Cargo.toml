@@ -3,9 +3,10 @@ name = "code-system-graph-store-sqlite"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description.workspace = true
+description = "Exact-schema SQLite persistence for Code System Graph."
 license.workspace = true
 repository.workspace = true
+readme.workspace = true
 
 [dependencies]
 blake3 = "1.8.5"

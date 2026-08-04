@@ -816,6 +816,24 @@ fn restore_should_reject_backup_with_altered_trigger_sql() -> Result<(), Box<dyn
 }
 
 #[test]
+fn restore_should_reject_backup_with_missing_required_table()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temporary = tempfile::tempdir()?;
+    let database = temporary.path().join("store.db");
+    let backup = temporary.path().join("backup.db");
+    seed_backup(&database, &backup, "snapshot:0")?;
+    let connection = Connection::open(&backup)?;
+    connection.execute("DROP TABLE workspaces", [])?;
+
+    let result = SqliteStore::restore_from(&database, &backup);
+
+    assert!(matches!(result, Err(StoreError::InvalidBackup { .. })));
+    let unchanged = SqliteStore::open_read_only(&database)?.current_snapshot_summary("commerce")?;
+    assert_eq!(unchanged.snapshot_id, "snapshot:0");
+    Ok(())
+}
+
+#[test]
 fn restore_should_reject_corrupt_backup() -> Result<(), Box<dyn std::error::Error>> {
     let temporary = tempfile::tempdir()?;
     let database = temporary.path().join("store.db");

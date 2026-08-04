@@ -96,6 +96,7 @@ includes discovery, fingerprinting, linking, community analysis, and SQLite publ
 - Re-run after changes to discovery, persistence, graph construction, query, traversal, impact, or
   community algorithms.
 
-The repository does not currently have a GitHub remote, so cross-platform workflow results are not
-available. No performance result is claimed for Linux ARM64, macOS, or Windows. Native validation
-is required before publishing performance or support claims for macOS or Windows.
+The canonical repository is `https://github.com/dertin/code-system-graph`. Linux x86_64 has native
+workload evidence; cross-platform workflow jobs are configured but macOS, Windows, and Linux ARM64
+lack native release validation. No performance result is claimed for those targets until native
+validation completes.

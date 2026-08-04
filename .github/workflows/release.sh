@@ -1,18 +1,28 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [ "$#" -ne 1 ]; then
-  echo "Usage: $0 <version>" >&2
-  echo "Example: $0 1.0.0" >&2
+usage() {
+  echo "Usage: $0 <version> [prepare|publish]" >&2
+  echo "  prepare  Run publish preflight and dry-run all workspace crates (default)." >&2
+  echo "  publish  Push a signed tag, publish crates, and dispatch the GitHub release workflow." >&2
   exit 2
+}
+
+if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
+  usage
 fi
 
 version="$1"
+mode="${2:-prepare}"
 tag="v${version}"
 
 if [[ ! "$version" =~ ^[0-9]+[.][0-9]+[.][0-9]+$ ]]; then
   echo "Version must look like X.Y.Z; got ${version}" >&2
   exit 2
+fi
+
+if [ "$mode" != "prepare" ] && [ "$mode" != "publish" ]; then
+  usage
 fi
 
 repo_root="$(git rev-parse --show-toplevel)"
@@ -56,26 +66,6 @@ if [ "$manifest_repo" != "https://github.com/${github_repo}" ]; then
   exit 1
 fi
 
-current_branch="$(git branch --show-current)"
-if [ "$current_branch" != "main" ]; then
-  echo "Release must run from main; current branch is ${current_branch}" >&2
-  exit 1
-fi
-
-git fetch origin main --tags
-
-local_head="$(git rev-parse HEAD)"
-remote_head="$(git rev-parse origin/main)"
-if [ "$local_head" != "$remote_head" ]; then
-  echo "Local main is not aligned with origin/main" >&2
-  exit 1
-fi
-
-if [ -n "$(git status --porcelain)" ]; then
-  echo "Working tree must be clean before release" >&2
-  exit 1
-fi
-
 crate_manifests=(
   crates/code-system-graph-model/Cargo.toml
   crates/code-system-graph-hooks/Cargo.toml
@@ -108,6 +98,13 @@ wait_for_crate() {
   return 1
 }
 
+preflight_publish_readiness() {
+  git diff --check
+  for manifest in "${crate_manifests[@]}"; do
+    cargo publish --locked --dry-run --manifest-path "$manifest"
+  done
+}
+
 publish_workspace() {
   local index crate_name manifest
   for index in "${!crate_manifests[@]}"; do
@@ -123,6 +120,7 @@ publish_workspace() {
 }
 
 trigger_github_release() {
+  local remote_head="$1"
   gh workflow run release.yml -R "$github_repo" --ref main -f "tag=${tag}"
 
   local run_id=""
@@ -153,6 +151,39 @@ trigger_github_release() {
   gh run watch "$run_id" -R "$github_repo" --exit-status
 }
 
+if [ "$mode" = "prepare" ]; then
+  if [ -n "$(git status --porcelain)" ]; then
+    echo "Working tree must be clean before prepare" >&2
+    exit 1
+  fi
+  "$repo_root/scripts/validate-publish-ready.sh"
+  preflight_publish_readiness
+  echo "Prepare mode complete for ${tag}. No tag, push, publish, or release dispatch was performed."
+  exit 0
+fi
+
+current_branch="$(git branch --show-current)"
+if [ "$current_branch" != "main" ]; then
+  echo "Release must run from main; current branch is ${current_branch}" >&2
+  exit 1
+fi
+
+git fetch origin main --tags
+
+local_head="$(git rev-parse HEAD)"
+remote_head="$(git rev-parse origin/main)"
+if [ "$local_head" != "$remote_head" ]; then
+  echo "Local main is not aligned with origin/main" >&2
+  exit 1
+fi
+
+if [ -n "$(git status --porcelain)" ]; then
+  echo "Working tree must be clean before release" >&2
+  exit 1
+fi
+
+preflight_publish_readiness
+
 if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
   tag_commit="$(git rev-list -n 1 "$tag")"
   if [ "$tag_commit" != "$remote_head" ]; then
@@ -164,7 +195,7 @@ if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; t
     echo "Release ${tag} is already complete on GitHub."
     exit 0
   fi
-  trigger_github_release
+  trigger_github_release "$remote_head"
   exit 0
 fi
 
@@ -172,9 +203,6 @@ if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
   echo "Tag ${tag} exists locally but not on origin; push it or delete it first." >&2
   exit 1
 fi
-
-cargo publish --locked --dry-run --manifest-path "${crate_manifests[0]}"
-cargo publish --locked --dry-run --manifest-path "${crate_manifests[1]}"
 
 git tag -s "$tag" -m "Code System Graph ${tag}"
 if ! git push origin "$tag"; then
@@ -184,4 +212,4 @@ if ! git push origin "$tag"; then
 fi
 
 publish_workspace
-trigger_github_release
+trigger_github_release "$remote_head"

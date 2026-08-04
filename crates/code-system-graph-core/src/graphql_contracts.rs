@@ -113,6 +113,7 @@ impl GraphqlTypeRef {
 
 /// Argument, variable, or input-field definition.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GraphqlArgumentDefinition {
     /// Argument or variable name without a leading dollar sign.
     pub name: String,
@@ -3086,6 +3087,8 @@ fn usize_to_u32(value: usize) -> u32 {
 
 #[cfg(test)]
 mod tests {
+    use graphql_parser::query;
+
     use super::*;
     use crate::ExtractionResource;
 
@@ -3210,6 +3213,194 @@ mod tests {
             operation.consumed_field_paths,
             vec!["viewer", "viewer.id", "viewer.name"]
         );
+    }
+
+    #[test]
+    fn legacy_default_value_field_should_be_rejected_on_deserialize() {
+        let payload = r#"{
+            "name": "id",
+            "type_ref": { "kind": "named", "name": "ID", "non_null": true },
+            "default_value": "legacy-secret",
+            "directives": [],
+            "lines": { "start": 1, "end": 1 }
+        }"#;
+
+        let result = serde_json::from_str::<GraphqlArgumentDefinition>(payload);
+
+        assert!(
+            result.is_err(),
+            "legacy default_value must not be ignored by Serde"
+        );
+    }
+
+    #[test]
+    fn memoized_fragment_expansion_should_match_reference_algorithm_on_golden_inputs() {
+        let cases: &[(&str, &str, &[&str])] = &[
+            (
+                "dag",
+                r"
+                    query Viewer {
+                      viewer { ...Identity ...Profile ...Identity }
+                    }
+                    fragment Identity on User { id ...Shared }
+                    fragment Profile on User { profile { name } ...Shared }
+                    fragment Shared on User { tenant { id } }
+                ",
+                &[
+                    "viewer",
+                    "viewer.id",
+                    "viewer.profile",
+                    "viewer.profile.name",
+                    "viewer.tenant",
+                    "viewer.tenant.id",
+                ],
+            ),
+            (
+                "cycles",
+                r"
+                    query Viewer { viewer { ...A ...Missing } }
+                    fragment A on User { id ...B }
+                    fragment B on User { name ...A }
+                ",
+                &["viewer", "viewer.id", "viewer.name"],
+            ),
+            (
+                "missing",
+                r"
+                    query Viewer { viewer { ...Absent } }
+                ",
+                &["viewer"],
+            ),
+        ];
+
+        for (name, input, expected_paths) in cases {
+            let document = extract_graphql_document(&format!("{name}.graphql"), input)
+                .expect("golden GraphQL input should extract");
+            let reference = reference_consumed_paths(input).expect("reference expansion");
+            let memoized = document.operations[0].consumed_field_paths.clone();
+
+            assert_eq!(
+                memoized, reference,
+                "memoized expansion diverged from the reference algorithm for {name}"
+            );
+            let expected = expected_paths
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+            assert_eq!(memoized, expected, "golden paths diverged for {name}");
+        }
+    }
+
+    fn reference_consumed_paths(input: &str) -> Result<Vec<String>, String> {
+        use graphql_parser::query;
+
+        let document = query::parse_query::<String>(input).map_err(|error| error.to_string())?;
+        let mut fragments = BTreeMap::new();
+        let mut selection_set = None;
+        for definition in document.definitions {
+            match definition {
+                query::Definition::Fragment(fragment) => {
+                    fragments.insert(fragment.name.clone(), fragment);
+                }
+                query::Definition::Operation(operation) => {
+                    selection_set = Some(match operation {
+                        query::OperationDefinition::SelectionSet(set) => set,
+                        query::OperationDefinition::Query(query) => query.selection_set,
+                        query::OperationDefinition::Mutation(mutation) => mutation.selection_set,
+                        query::OperationDefinition::Subscription(subscription) => {
+                            subscription.selection_set
+                        }
+                    });
+                }
+            }
+        }
+        let selection_set = selection_set.expect("golden input must declare one operation");
+        let expansion =
+            reference_expand_selection_set(&selection_set, None, &fragments, &mut BTreeSet::new());
+        Ok(expansion.paths.into_iter().collect())
+    }
+
+    #[derive(Debug, Clone, Default)]
+    struct ReferenceExpansion {
+        paths: BTreeSet<String>,
+        spreads: BTreeSet<String>,
+        missing: BTreeSet<String>,
+    }
+
+    fn reference_expand_fragment(
+        name: &str,
+        fragments: &BTreeMap<String, query::FragmentDefinition<'_, String>>,
+        visiting: &mut BTreeSet<String>,
+    ) -> ReferenceExpansion {
+        if visiting.contains(name) {
+            return ReferenceExpansion {
+                missing: [format!("cycle:{name}")].into_iter().collect(),
+                ..ReferenceExpansion::default()
+            };
+        }
+        let Some(fragment) = fragments.get(name) else {
+            return ReferenceExpansion {
+                missing: [name.to_owned()].into_iter().collect(),
+                ..ReferenceExpansion::default()
+            };
+        };
+        visiting.insert(name.to_owned());
+        let expansion =
+            reference_expand_selection_set(&fragment.selection_set, None, fragments, visiting);
+        visiting.remove(name);
+        expansion
+    }
+
+    fn reference_expand_selection_set(
+        selection_set: &query::SelectionSet<'_, String>,
+        parent: Option<&str>,
+        fragments: &BTreeMap<String, query::FragmentDefinition<'_, String>>,
+        visiting: &mut BTreeSet<String>,
+    ) -> ReferenceExpansion {
+        let mut expansion = ReferenceExpansion::default();
+        for selection in &selection_set.items {
+            match selection {
+                query::Selection::Field(field) => {
+                    let path = join_field_path(parent, &field.name);
+                    expansion.paths.insert(path.clone());
+                    let nested = reference_expand_selection_set(
+                        &field.selection_set,
+                        Some(&path),
+                        fragments,
+                        visiting,
+                    );
+                    merge_reference_expansion(&mut expansion, nested);
+                }
+                query::Selection::InlineFragment(fragment) => {
+                    let nested = reference_expand_selection_set(
+                        &fragment.selection_set,
+                        parent,
+                        fragments,
+                        visiting,
+                    );
+                    merge_reference_expansion(&mut expansion, nested);
+                }
+                query::Selection::FragmentSpread(spread) => {
+                    expansion.spreads.insert(spread.fragment_name.clone());
+                    let nested =
+                        reference_expand_fragment(&spread.fragment_name, fragments, visiting);
+                    expansion.spreads.extend(nested.spreads);
+                    expansion.missing.extend(nested.missing);
+                    for relative in nested.paths {
+                        let materialized = parent
+                            .map_or(relative.clone(), |prefix| format!("{prefix}.{relative}"));
+                        expansion.paths.insert(materialized);
+                    }
+                }
+            }
+        }
+        expansion
+    }
+
+    fn merge_reference_expansion(target: &mut ReferenceExpansion, source: ReferenceExpansion) {
+        target.paths.extend(source.paths);
+        target.spreads.extend(source.spreads);
+        target.missing.extend(source.missing);
     }
 
     #[test]

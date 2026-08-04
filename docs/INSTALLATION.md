@@ -100,7 +100,7 @@ $PREFIX/share/code-system-graph/backups/
 ```
 
 The unpublished 1.0.0 build supports one exact initial database schema. An incompatible
-development database is disposable: remove it and run a full scan. Backup and restore accept only
+local database is disposable: remove it and run a full scan. Backup and restore accept only
 that exact schema and never migrate it.
 
 ## Uninstall

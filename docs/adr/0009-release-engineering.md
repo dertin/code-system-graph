@@ -13,8 +13,8 @@ must remain source-free.
 
 Local development has produced native Linux x86_64 evidence. Linux ARM64, macOS, and Windows
 require equivalent target-specific validation before they can carry public support claims. The
-repository currently has no GitHub remote, so configured workflows have not produced hosted
-evidence.
+canonical repository is `https://github.com/dertin/code-system-graph`; hosted CI provides
+continuous validation on `main`, while release artifacts remain gated behind explicit publication.
 
 ## Decision
 

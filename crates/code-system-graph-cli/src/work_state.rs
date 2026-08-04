@@ -1015,8 +1015,7 @@ fn classify_existing_sidecar_error(error: &rusqlite::Error) -> WorkOpenError {
         {
             WorkOpenError::Recreate
         }
-        // SQL shape errors can only come from an obsolete development sidecar because
-        // all statements above are fixed by this binary's single v1 schema.
+        // SQL shape errors indicate an incompatible work sidecar schema for this binary.
         rusqlite::Error::SqlInputError { .. } => WorkOpenError::Recreate,
         _ => WorkOpenError::Fatal(error.to_string()),
     }
