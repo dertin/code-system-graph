@@ -20,7 +20,9 @@ use code_system_graph_model::{
     ArtifactFingerprint, CheckoutId, Community, CommunityAlgorithm, CommunityConfig, CommunityId, CommunityMetrics, CommunitySnapshot, Edge, EdgeId, EdgeKind, EpistemicStatus, Evidence, EvidenceId, ExtractorRun, LinkDecision, LinkStatus, NativePath, Node, NodeId, NodeKind, RepoFreshness, RepoFreshnessState, RepoId, RepositoryRecord, StoredExtractorBatch, WorkspaceId, WorkspaceRecord, contains_unsafe_metadata_characters, stable_id
 };
 pub use file_permissions::set_owner_only_file;
-use file_permissions::{prepare_database_file, restrict_store_permissions};
+use file_permissions::{
+    SQLITE_ARTIFACT_SUFFIXES, artifact_path, prepare_database_file, restrict_store_permissions
+};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use schema_contract::validate_exact_schema;
 use sysinfo::{Pid, ProcessesToUpdate, System};
@@ -469,7 +471,7 @@ impl SqliteStore {
     /// Returns whether [`Self::restore_from`] can replace an existing on-disk database.
     #[must_use]
     pub const fn supports_inplace_restore() -> bool {
-        cfg!(any(unix, windows))
+        cfg!(any(target_os = "linux", target_os = "macos", windows))
     }
 
     /// Opens an exact 1.0.0 store or initializes a new empty database.
@@ -489,6 +491,8 @@ impl SqliteStore {
 
     /// Creates a validated online backup of the exact 1.0.0 schema.
     ///
+    /// A source on read-only media is treated as immutable only when no `SQLite` sidecars exist.
+    ///
     /// # Errors
     ///
     /// Returns [`StoreError`] when the source is invalid or the destination already exists.
@@ -501,7 +505,7 @@ impl SqliteStore {
     ///
     /// The existing destination is first preserved as a non-overwriting safety backup.
     /// Restore is refused while another [`SqliteStore`] has the destination open.
-    /// In-place replacement is supported on Unix (including macOS) and Windows.
+    /// In-place replacement is supported on Linux, macOS, and Windows.
     ///
     /// # Errors
     ///
@@ -533,19 +537,19 @@ impl SqliteStore {
 
     /// Opens an existing store without writes or implicit schema changes.
     ///
+    /// A database on read-only media is treated as immutable only when no `SQLite` sidecars exist.
+    ///
     /// # Errors
     ///
     /// Returns [`StoreError`] if the database is absent, corrupt, or not the exact 1.0.0 schema.
     pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let path = path.as_ref();
         let access_lock = StoreAccessLock::shared(path)?;
-        let connection = Connection::open_with_flags(
-            access_lock.database_path(),
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )?;
-        connection.pragma_update(None, "foreign_keys", true)?;
-        connection.busy_timeout(Duration::from_secs(5))?;
-        validate_exact_schema(&connection)?;
+        let connection = open_read_only_connection(access_lock.database_path(), |connection| {
+            connection.pragma_update(None, "foreign_keys", true)?;
+            connection.busy_timeout(Duration::from_secs(5))?;
+            validate_exact_schema(connection)
+        })?;
         Ok(Self {
             connection,
             _access_lock: Some(access_lock),
@@ -2044,6 +2048,95 @@ fn open_exact(path: &Path) -> Result<Connection, StoreError> {
     restrict_store_permissions(path)?;
     validate_exact_schema(&connection)?;
     Ok(connection)
+}
+
+fn open_read_only_connection(
+    path: &Path,
+    configure: impl Fn(&Connection) -> Result<(), StoreError>,
+) -> Result<Connection, StoreError> {
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
+        | OpenFlags::SQLITE_OPEN_NO_MUTEX
+        | OpenFlags::SQLITE_OPEN_NOFOLLOW;
+    let connection = Connection::open_with_flags(path, flags)?;
+    match configure(&connection) {
+        Ok(()) => Ok(connection),
+        Err(error) if is_read_only_directory_error(&error) => {
+            drop(connection);
+            if immutable_fallback_has_sidecars(path)? {
+                return Err(error);
+            }
+            let uri = immutable_database_uri(path)?;
+            let connection = Connection::open_with_flags(uri, flags | OpenFlags::SQLITE_OPEN_URI)?;
+            configure(&connection)?;
+            Ok(connection)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn is_read_only_directory_error(error: &StoreError) -> bool {
+    matches!(
+        error,
+        StoreError::Sqlite(rusqlite::Error::SqliteFailure(details, _))
+            if details.extended_code == rusqlite::ffi::SQLITE_READONLY_DIRECTORY
+    )
+}
+
+fn immutable_fallback_has_sidecars(path: &Path) -> Result<bool, StoreError> {
+    for suffix in &SQLITE_ARTIFACT_SUFFIXES[1..] {
+        let sidecar = artifact_path(path, suffix);
+        match fs::symlink_metadata(&sidecar) {
+            Ok(_) => return Ok(true),
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(StoreError::Io {
+                    path: sidecar,
+                    source,
+                });
+            }
+        }
+    }
+    Ok(false)
+}
+
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "non-Unix database paths can be non-Unicode"
+)]
+fn immutable_database_uri(path: &Path) -> Result<String, StoreError> {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+
+    #[cfg(unix)]
+    let bytes = {
+        use std::os::unix::ffi::OsStrExt;
+
+        path.as_os_str().as_bytes()
+    };
+    #[cfg(not(unix))]
+    let bytes = path
+        .to_str()
+        .ok_or_else(|| StoreError::Io {
+            path: path.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "database path is not valid Unicode",
+            ),
+        })?
+        .as_bytes();
+
+    let mut uri = String::with_capacity(bytes.len() + 24);
+    uri.push_str("file:");
+    for &byte in bytes {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'/' | b':') {
+            uri.push(char::from(byte));
+        } else {
+            uri.push('%');
+            uri.push(char::from(HEX[usize::from(byte >> 4)]));
+            uri.push(char::from(HEX[usize::from(byte & 0x0f)]));
+        }
+    }
+    uri.push_str("?immutable=1");
+    Ok(uri)
 }
 
 fn configure_connection(connection: &Connection) -> Result<(), StoreError> {

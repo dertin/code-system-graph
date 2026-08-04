@@ -8,7 +8,7 @@ use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension};
 use same_file::Handle;
 
 use super::{
-    LATEST_SCHEMA_VERSION, RestoreReport, StoreError, StoreLock, schema_version, validate_exact_schema
+    LATEST_SCHEMA_VERSION, RestoreReport, StoreError, StoreLock, open_read_only_connection, schema_version, validate_exact_schema
 };
 #[cfg(windows)]
 use crate::file_permissions::current_user_sid_string;
@@ -618,7 +618,7 @@ fn replace_database_file_if_same(
     ))
 }
 
-#[cfg(all(unix, not(target_os = "linux")))]
+#[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
 fn replace_database_file_if_same(
     replacement: &Path,
@@ -679,6 +679,19 @@ fn replace_database_file_if_same(
     Err(std::io::Error::new(
         std::io::ErrorKind::AlreadyExists,
         "database destination changed during atomic replacement",
+    ))
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+fn replace_database_file_if_same(
+    _replacement: &Path,
+    _destination: &Path,
+    _expected: &DestinationSnapshot,
+    _displaced: &Path,
+) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "atomic in-place database replacement is unsupported on this Unix platform",
     ))
 }
 
@@ -908,9 +921,11 @@ struct ValidatedBackupSource {
 
 impl ValidatedBackupSource {
     fn open(path: &Path) -> Result<Self, StoreError> {
-        let connection = open_backup_source(path)?;
-        connection.execute_batch("BEGIN DEFERRED")?;
-        validate_backup(&connection, path)?;
+        let connection = open_read_only_connection(path, |connection| {
+            configure_backup_source(connection)?;
+            connection.execute_batch("BEGIN DEFERRED")?;
+            validate_backup(connection, path)
+        })?;
         Ok(Self { connection })
     }
 
@@ -1004,17 +1019,16 @@ pub(super) fn ensure_distinct_paths(database: &Path, backup: &Path) -> Result<()
     Ok(())
 }
 
+#[cfg(test)]
 pub(super) fn open_backup_source(path: &Path) -> Result<Connection, StoreError> {
-    let connection = Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY
-            | OpenFlags::SQLITE_OPEN_NO_MUTEX
-            | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-    )?;
+    open_read_only_connection(path, configure_backup_source)
+}
+
+fn configure_backup_source(connection: &Connection) -> Result<(), StoreError> {
     connection.pragma_update(None, "query_only", true)?;
     connection.pragma_update(None, "trusted_schema", false)?;
     connection.pragma_update(None, "foreign_keys", true)?;
-    Ok(connection)
+    Ok(())
 }
 
 fn open_writable_database(path: &Path) -> Result<Connection, StoreError> {

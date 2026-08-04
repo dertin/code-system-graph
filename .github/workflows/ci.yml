@@ -39,6 +39,19 @@ jobs:
       - run: cargo +stable test --workspace --exclude code-system-graph-fuzz --all-targets --all-features --locked
       - run: RUSTDOCFLAGS="-D warnings" cargo +stable doc --workspace --exclude code-system-graph-fuzz --all-features --no-deps --locked
 
+  macos-sqlite:
+    name: macOS SQLite tests
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: macos-sqlite
+      - run: cargo +stable test -p code-system-graph-store-sqlite --all-targets --locked
+
   msrv:
     name: Rust 1.97.1 MSRV
     runs-on: ubuntu-latest

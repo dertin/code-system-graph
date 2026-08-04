@@ -401,26 +401,76 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[test]
-    fn shared_access_lock_should_not_require_database_directory_write_access()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn read_only_database_fixture()
+    -> Result<(tempfile::TempDir, PathBuf, PathBuf), Box<dyn std::error::Error>> {
         use std::os::unix::fs::PermissionsExt;
 
         let temporary = tempfile::tempdir()?;
-        let readonly = temporary.path().join("readonly");
+        let readonly = temporary.path().join("read only?#%");
         fs::create_dir(&readonly)?;
         let database = readonly.join("store.db");
         drop(SqliteStore::open(&database)?);
+        fs::set_permissions(&database, fs::Permissions::from_mode(0o444))?;
+        fs::set_permissions(&readonly, fs::Permissions::from_mode(0o555))?;
+        Ok((temporary, readonly, database))
+    }
+
+    #[cfg(unix)]
+    fn restore_fixture_permissions(readonly: &Path, database: &Path) -> std::io::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::set_permissions(readonly, fs::Permissions::from_mode(0o755))?;
+        fs::set_permissions(database, fs::Permissions::from_mode(0o600))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_read_only_should_support_read_only_database_media()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (_temporary, readonly, database) = read_only_database_fixture()?;
+
+        let opened = SqliteStore::open_read_only(&database);
+        restore_fixture_permissions(&readonly, &database)?;
+
+        let store = opened?;
+        assert!(store.integrity_check()?);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn backup_file_should_support_read_only_source_media() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let (temporary, readonly, database) = read_only_database_fixture()?;
+        let backup = temporary.path().join("backup.db");
+
+        let result = SqliteStore::backup_file(&database, &backup);
+        restore_fixture_permissions(&readonly, &database)?;
+        result?;
+
+        let store = SqliteStore::open_read_only(&backup)?;
+        assert!(store.integrity_check()?);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn immutable_fallback_should_reject_database_with_wal_sidecar()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_temporary, readonly, database) = read_only_database_fixture()?;
+        restore_fixture_permissions(&readonly, &database)?;
+        let wal = crate::file_permissions::artifact_path(&database, "-wal");
+        fs::write(&wal, b"uncheckpointed WAL")?;
+        fs::set_permissions(&wal, fs::Permissions::from_mode(0o444))?;
+        fs::set_permissions(&database, fs::Permissions::from_mode(0o444))?;
         fs::set_permissions(&readonly, fs::Permissions::from_mode(0o555))?;
 
-        let lock = StoreAccessLock::shared(&database);
-        fs::set_permissions(&readonly, fs::Permissions::from_mode(0o755))?;
+        let opened = SqliteStore::open_read_only(&database);
+        restore_fixture_permissions(&readonly, &database)?;
 
-        assert!(
-            lock.is_ok(),
-            "expected shared access lock to succeed: {:?}",
-            lock.err()
-        );
+        assert!(opened.is_err());
         Ok(())
     }
 

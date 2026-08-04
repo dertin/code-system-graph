@@ -473,6 +473,38 @@ fn restore_should_lock_destination_before_safety_backup_is_reported()
     Ok(())
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn restore_should_keep_destination_locked_through_publication()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temporary = tempfile::tempdir()?;
+    let database = temporary.path().join("store.db");
+    let backup = temporary.path().join("backup.db");
+    seed_backup(&database, &backup, "snapshot:0")?;
+
+    let competing_writer_was_blocked = Cell::new(false);
+    restore_database(
+        &database,
+        &backup,
+        || {},
+        |_| {},
+        |_| Ok(()),
+        || {
+            let contender = Connection::open(&database)?;
+            contender.busy_timeout(Duration::ZERO)?;
+            let write = contender.execute_batch("BEGIN IMMEDIATE");
+            competing_writer_was_blocked.set(write.is_err());
+            Ok(())
+        },
+    )?;
+
+    assert!(
+        competing_writer_was_blocked.get(),
+        "another SQLite writer must remain blocked through publication"
+    );
+    Ok(())
+}
+
 #[cfg(windows)]
 #[test]
 fn restore_should_reject_destination_changes_after_lock_release()
