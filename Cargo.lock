@@ -507,12 +507,16 @@ dependencies = [
 name = "code-system-graph-store-sqlite"
 version = "1.0.0"
 dependencies = [
+ "blake3",
  "code-system-graph-model",
+ "libc",
  "rusqlite",
+ "same-file",
  "serde_json",
  "sysinfo",
  "tempfile",
  "thiserror 2.0.19",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -1,4 +1,12 @@
 //! `SQLite` persistence adapter for `Code System Graph` snapshots.
+//!
+//! Durable database files are supported on Unix and Windows because the store
+//! requires enforceable owner-only file permissions.
+
+mod access_lock;
+mod backup_restore;
+mod file_permissions;
+mod schema_contract;
 
 use std::collections::BTreeSet;
 use std::fs::{self, OpenOptions};
@@ -6,11 +14,17 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use access_lock::StoreAccessLock;
+use backup_restore::{backup_connection, restore_database};
 use code_system_graph_model::{
     ArtifactFingerprint, CheckoutId, Community, CommunityAlgorithm, CommunityConfig, CommunityId, CommunityMetrics, CommunitySnapshot, Edge, EdgeId, EdgeKind, EpistemicStatus, Evidence, EvidenceId, ExtractorRun, LinkDecision, LinkStatus, NativePath, Node, NodeId, NodeKind, RepoFreshness, RepoFreshnessState, RepoId, RepositoryRecord, StoredExtractorBatch, WorkspaceId, WorkspaceRecord, contains_unsafe_metadata_characters, stable_id
 };
-use rusqlite::backup::Backup;
+pub use file_permissions::set_owner_only_file;
+use file_permissions::{
+    SQLITE_ARTIFACT_SUFFIXES, artifact_path, prepare_database_file, restrict_store_permissions
+};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
+use schema_contract::validate_exact_schema;
 use sysinfo::{Pid, ProcessesToUpdate, System};
 use thiserror::Error;
 
@@ -51,6 +65,7 @@ const QUERY_CACHE_RESULT_MAX_BYTES: usize = 1_048_576;
 /// Embedded `SQLite` store with transactional snapshot publication.
 pub struct SqliteStore {
     connection: Connection,
+    _access_lock: Option<StoreAccessLock>,
 }
 
 /// Exclusive writer lock represented by a restrictive sidecar file.
@@ -268,11 +283,9 @@ pub enum StoreError {
         /// Underlying operating-system error.
         source: std::io::Error,
     },
-    /// A database uses anything other than the definitive unpublished 1.0.0 schema.
-    #[error(
-        "database is incompatible with the definitive 1.0.0 schema; remove it and run a full scan to rebuild"
-    )]
-    ObsoleteDevelopmentDatabase,
+    /// A database does not match the only schema supported by this binary.
+    #[error("database does not match the current schema")]
+    InvalidSchema,
     /// Another writer owns a non-stale lock.
     #[error("store writer lock is already held at `{0}`")]
     LockHeld(PathBuf),
@@ -291,6 +304,14 @@ pub enum StoreError {
         path: PathBuf,
         /// Actionable validation reason.
         reason: String,
+    },
+    /// An operation failed and its partial database artifacts could not be removed.
+    #[error("operation failed ({operation}); cleanup also failed ({cleanup})")]
+    OperationCleanupFailed {
+        /// Error that interrupted the operation.
+        operation: Box<StoreError>,
+        /// Error that prevented cleanup of partial artifacts.
+        cleanup: Box<StoreError>,
     },
     /// Bounded FTS query is empty or has an invalid limit.
     #[error("invalid node search query: {0}")]
@@ -447,34 +468,44 @@ impl Drop for StoreLock {
 }
 
 impl SqliteStore {
+    /// Returns whether [`Self::restore_from`] can replace an existing on-disk database.
+    #[must_use]
+    pub const fn supports_inplace_restore() -> bool {
+        cfg!(any(target_os = "linux", target_os = "macos", windows))
+    }
+
     /// Opens an exact 1.0.0 store or initializes a new empty database.
     ///
     /// # Errors
     ///
     /// Returns [`StoreError`] if `SQLite` cannot open, initialize, or validate the database.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
-        let connection = open_exact(path.as_ref())?;
-        Ok(Self { connection })
+        let path = path.as_ref();
+        let access_lock = StoreAccessLock::shared(path)?;
+        let connection = open_exact(access_lock.database_path())?;
+        Ok(Self {
+            connection,
+            _access_lock: Some(access_lock),
+        })
     }
 
     /// Creates a validated online backup of the exact 1.0.0 schema.
+    ///
+    /// A source on read-only media is treated as immutable only when no `SQLite` sidecars exist.
     ///
     /// # Errors
     ///
     /// Returns [`StoreError`] when the source is invalid or the destination already exists.
     pub fn backup_file(database_path: &Path, destination: &Path) -> Result<(), StoreError> {
-        ensure_distinct_paths(database_path, destination)?;
-        let source = Connection::open_with_flags(
-            database_path,
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )?;
-        validate_backup(&source, database_path)?;
-        backup_connection(&source, destination)
+        let access_lock = StoreAccessLock::shared(database_path)?;
+        backup_restore::backup_file(access_lock.database_path(), destination)
     }
 
     /// Restores a validated backup with the exact 1.0.0 schema.
     ///
     /// The existing destination is first preserved as a non-overwriting safety backup.
+    /// Restore is refused while another [`SqliteStore`] has the destination open.
+    /// In-place replacement is supported on Linux, macOS, and Windows.
     ///
     /// # Errors
     ///
@@ -483,47 +514,46 @@ impl SqliteStore {
         database_path: &Path,
         backup_path: &Path,
     ) -> Result<RestoreReport, StoreError> {
-        ensure_distinct_paths(database_path, backup_path)?;
-        let _lock = StoreLock::acquire(database_path, Duration::from_mins(5))?;
-        let source = Connection::open_with_flags(
+        if database_path.exists() && !Self::supports_inplace_restore() {
+            return Err(StoreError::Io {
+                path: database_path.to_path_buf(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "safe in-place restore is unsupported on this platform; \
+                     back up the database, remove it, then restore or reinitialize",
+                ),
+            });
+        }
+        let access_lock = StoreAccessLock::exclusive(database_path)?;
+        restore_database(
+            access_lock.database_path(),
             backup_path,
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )?;
-        validate_backup(&source, backup_path)?;
-        let safety_backup_path = if database_path.exists() {
-            let existing = Connection::open(database_path)?;
-            let safety_path = next_backup_path(database_path, "pre-restore")?;
-            backup_connection(&existing, &safety_path)?;
-            Some(safety_path)
-        } else {
-            None
-        };
-        let mut destination = Connection::open(database_path)?;
-        backup_connection_to(&source, &mut destination)?;
-        configure_connection(&destination)?;
-        validate_exact_schema(&destination)?;
-        destination.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
-        Ok(RestoreReport {
-            source_path: backup_path.to_path_buf(),
-            safety_backup_path,
-            schema_version: schema_version(&destination)?,
-        })
+            || {},
+            |_| {},
+            |_| Ok(()),
+            || Ok(()),
+        )
     }
 
     /// Opens an existing store without writes or implicit schema changes.
+    ///
+    /// A database on read-only media is treated as immutable only when no `SQLite` sidecars exist.
     ///
     /// # Errors
     ///
     /// Returns [`StoreError`] if the database is absent, corrupt, or not the exact 1.0.0 schema.
     pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self, StoreError> {
-        let connection = Connection::open_with_flags(
-            path,
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )?;
-        connection.pragma_update(None, "foreign_keys", true)?;
-        connection.busy_timeout(Duration::from_secs(5))?;
-        validate_exact_schema(&connection)?;
-        Ok(Self { connection })
+        let path = path.as_ref();
+        let access_lock = StoreAccessLock::shared(path)?;
+        let connection = open_read_only_connection(access_lock.database_path(), |connection| {
+            connection.pragma_update(None, "foreign_keys", true)?;
+            connection.busy_timeout(Duration::from_secs(5))?;
+            validate_exact_schema(connection)
+        })?;
+        Ok(Self {
+            connection,
+            _access_lock: Some(access_lock),
+        })
     }
 
     /// Creates an in-memory store for isolated tests and ephemeral operations.
@@ -537,9 +567,14 @@ impl SqliteStore {
 
     fn from_connection(mut connection: Connection) -> Result<Self, StoreError> {
         configure_connection(&connection)?;
-        initialize_empty_schema(&mut connection)?;
+        if database_is_empty(&connection)? {
+            initialize_empty_schema(&mut connection)?;
+        }
         validate_exact_schema(&connection)?;
-        Ok(Self { connection })
+        Ok(Self {
+            connection,
+            _access_lock: None,
+        })
     }
 
     /// Returns the exact initial schema version recorded by this store.
@@ -837,19 +872,6 @@ impl SqliteStore {
     ) -> Result<Vec<StoredExtractorBatch>, StoreError> {
         let snapshot_id = self.current_snapshot_id(workspace)?;
         let maximum_payload_bytes = i64::try_from(maximum_payload_bytes).unwrap_or(i64::MAX);
-        let has_obsolete_contract = self.connection.query_row(
-            "SELECT EXISTS(
-                SELECT 1
-                FROM extractor_batches
-                WHERE snapshot_id = ?1
-                  AND (extractor_version <> '1.0.0' OR budget_fingerprint = '')
-             )",
-            [&snapshot_id],
-            |row| row.get::<_, bool>(0),
-        )?;
-        if has_obsolete_contract {
-            return Err(StoreError::ObsoleteDevelopmentDatabase);
-        }
         let mut statement = self.connection.prepare(
             "SELECT
                 repo_id, checkout_id, path_encoding, relative_path, path_display,
@@ -2011,14 +2033,114 @@ fn decode_optional_path(
 }
 
 fn open_exact(path: &Path) -> Result<Connection, StoreError> {
-    let mut connection = Connection::open(path)?;
+    prepare_database_file(path)?;
+    let mut connection = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE
+            | OpenFlags::SQLITE_OPEN_CREATE
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )?;
     configure_connection(&connection)?;
-    let current = existing_schema_version(&connection)?;
-    if current == 0 && database_is_empty(&connection)? {
+    if database_is_empty(&connection)? {
         initialize_empty_schema(&mut connection)?;
     }
+    restrict_store_permissions(path)?;
     validate_exact_schema(&connection)?;
     Ok(connection)
+}
+
+fn open_read_only_connection(
+    path: &Path,
+    configure: impl Fn(&Connection) -> Result<(), StoreError>,
+) -> Result<Connection, StoreError> {
+    let path = fs::canonicalize(path).map_err(|source| StoreError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
+        | OpenFlags::SQLITE_OPEN_NO_MUTEX
+        | OpenFlags::SQLITE_OPEN_NOFOLLOW;
+    let connection = Connection::open_with_flags(&path, flags)?;
+    match configure(&connection) {
+        Ok(()) => Ok(connection),
+        Err(error) if is_read_only_directory_error(&error) => {
+            drop(connection);
+            if immutable_fallback_has_sidecars(&path)? {
+                return Err(error);
+            }
+            let uri = immutable_database_uri(&path)?;
+            let connection = Connection::open_with_flags(uri, flags | OpenFlags::SQLITE_OPEN_URI)?;
+            configure(&connection)?;
+            Ok(connection)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn is_read_only_directory_error(error: &StoreError) -> bool {
+    matches!(
+        error,
+        StoreError::Sqlite(rusqlite::Error::SqliteFailure(details, _))
+            if details.extended_code == rusqlite::ffi::SQLITE_READONLY_DIRECTORY
+    )
+}
+
+fn immutable_fallback_has_sidecars(path: &Path) -> Result<bool, StoreError> {
+    for suffix in &SQLITE_ARTIFACT_SUFFIXES[1..] {
+        let sidecar = artifact_path(path, suffix);
+        match fs::symlink_metadata(&sidecar) {
+            Ok(_) => return Ok(true),
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(StoreError::Io {
+                    path: sidecar,
+                    source,
+                });
+            }
+        }
+    }
+    Ok(false)
+}
+
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "non-Unix database paths can be non-Unicode"
+)]
+fn immutable_database_uri(path: &Path) -> Result<String, StoreError> {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+
+    #[cfg(unix)]
+    let bytes = {
+        use std::os::unix::ffi::OsStrExt;
+
+        path.as_os_str().as_bytes()
+    };
+    #[cfg(not(unix))]
+    let bytes = path
+        .to_str()
+        .ok_or_else(|| StoreError::Io {
+            path: path.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "database path is not valid Unicode",
+            ),
+        })?
+        .as_bytes();
+
+    let mut uri = String::with_capacity(bytes.len() + 24);
+    uri.push_str("file:");
+    for &byte in bytes {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'/' | b':') {
+            uri.push(char::from(byte));
+        } else {
+            uri.push('%');
+            uri.push(char::from(HEX[usize::from(byte >> 4)]));
+            uri.push(char::from(HEX[usize::from(byte & 0x0f)]));
+        }
+    }
+    uri.push_str("?immutable=1");
+    Ok(uri)
 }
 
 fn configure_connection(connection: &Connection) -> Result<(), StoreError> {
@@ -2026,52 +2148,6 @@ fn configure_connection(connection: &Connection) -> Result<(), StoreError> {
     connection.pragma_update(None, "journal_mode", "WAL")?;
     connection.busy_timeout(Duration::from_secs(5))?;
     Ok(())
-}
-
-fn existing_schema_version(connection: &Connection) -> Result<i64, StoreError> {
-    let metadata_exists = connection.query_row(
-        "SELECT COUNT(*) FROM sqlite_master
-         WHERE type = 'table' AND name = 'schema_metadata'",
-        [],
-        |row| row.get::<_, i64>(0),
-    )?;
-    if metadata_exists == 0 {
-        return Ok(0);
-    }
-    schema_version(connection)
-}
-
-fn validate_exact_schema(connection: &Connection) -> Result<(), StoreError> {
-    if existing_schema_version(connection)? != LATEST_SCHEMA_VERSION {
-        return Err(StoreError::ObsoleteDevelopmentDatabase);
-    }
-    let expected = expected_schema_contract()?;
-    if schema_contract(connection)? != expected {
-        return Err(StoreError::ObsoleteDevelopmentDatabase);
-    }
-    Ok(())
-}
-
-type SchemaContractEntry = (String, String, String, String);
-
-fn schema_contract(connection: &Connection) -> Result<Vec<SchemaContractEntry>, StoreError> {
-    let mut statement = connection.prepare(
-        "SELECT type, name, tbl_name, COALESCE(sql, '')
-         FROM sqlite_schema
-         WHERE name NOT LIKE 'sqlite_%'
-         ORDER BY type, name, tbl_name, sql",
-    )?;
-    Ok(statement
-        .query_map([], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-        })?
-        .collect::<Result<_, _>>()?)
-}
-
-fn expected_schema_contract() -> Result<Vec<SchemaContractEntry>, StoreError> {
-    let connection = Connection::open_in_memory()?;
-    connection.execute_batch(INITIAL_SCHEMA)?;
-    schema_contract(&connection)
 }
 
 fn database_is_empty(connection: &Connection) -> Result<bool, StoreError> {
@@ -2082,107 +2158,6 @@ fn database_is_empty(connection: &Connection) -> Result<bool, StoreError> {
         |row| row.get::<_, i64>(0),
     )?;
     Ok(tables == 0)
-}
-
-fn backup_connection(source: &Connection, destination: &Path) -> Result<(), StoreError> {
-    if destination.exists() {
-        return Err(StoreError::Io {
-            path: destination.to_path_buf(),
-            source: std::io::Error::new(
-                std::io::ErrorKind::AlreadyExists,
-                "backup destination already exists",
-            ),
-        });
-    }
-    let mut destination_connection = Connection::open(destination)?;
-    backup_connection_to(source, &mut destination_connection)
-}
-
-fn backup_connection_to(
-    source: &Connection,
-    destination: &mut Connection,
-) -> Result<(), StoreError> {
-    let backup = Backup::new(source, destination)?;
-    backup.run_to_completion(128, Duration::from_millis(5), None)?;
-    Ok(())
-}
-
-fn next_backup_path(database: &Path, label: &str) -> Result<PathBuf, StoreError> {
-    let original_extension = database
-        .extension()
-        .map(|extension| extension.to_string_lossy().into_owned());
-    for sequence in 0..10_000_u32 {
-        let suffix = if sequence == 0 {
-            format!("{label}.backup")
-        } else {
-            format!("{label}.{sequence}.backup")
-        };
-        let extension = original_extension
-            .as_ref()
-            .map_or_else(|| suffix.clone(), |original| format!("{original}.{suffix}"));
-        let mut candidate = database.to_path_buf();
-        candidate.set_extension(extension);
-        if !candidate.exists() {
-            return Ok(candidate);
-        }
-    }
-    Err(StoreError::Io {
-        path: database.to_path_buf(),
-        source: std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
-            "no available backup filename",
-        ),
-    })
-}
-
-fn ensure_distinct_paths(database: &Path, backup: &Path) -> Result<(), StoreError> {
-    let same_path = if database.exists() && backup.exists() {
-        let database = fs::canonicalize(database).map_err(|source| StoreError::Io {
-            path: database.to_path_buf(),
-            source,
-        })?;
-        let backup = fs::canonicalize(backup).map_err(|source| StoreError::Io {
-            path: backup.to_path_buf(),
-            source,
-        })?;
-        database == backup
-    } else {
-        database == backup
-    };
-    if same_path {
-        return Err(StoreError::InvalidBackup {
-            path: backup.to_path_buf(),
-            reason: "backup and destination resolve to the same path".to_owned(),
-        });
-    }
-    Ok(())
-}
-
-fn validate_backup(connection: &Connection, path: &Path) -> Result<(), StoreError> {
-    let integrity =
-        connection.query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0))?;
-    if integrity != "ok" {
-        return Err(StoreError::InvalidBackup {
-            path: path.to_path_buf(),
-            reason: format!("integrity check returned `{integrity}`"),
-        });
-    }
-    let version = existing_schema_version(connection)?;
-    if version == 0 {
-        return Err(StoreError::InvalidBackup {
-            path: path.to_path_buf(),
-            reason: "schema metadata is missing".to_owned(),
-        });
-    }
-    if version != LATEST_SCHEMA_VERSION {
-        return Err(StoreError::InvalidBackup {
-            path: path.to_path_buf(),
-            reason: format!(
-                "schema version {version} is not the exact supported version {LATEST_SCHEMA_VERSION}"
-            ),
-        });
-    }
-    validate_exact_schema(connection)
 }
 
 fn validate_artifact_fingerprints(fingerprints: &[ArtifactFingerprint]) -> Result<(), StoreError> {
@@ -3229,9 +3204,6 @@ fn count_to_usize(field: &'static str, value: i64) -> Result<usize, StoreError> 
 }
 
 fn initialize_empty_schema(connection: &mut Connection) -> Result<(), StoreError> {
-    if !database_is_empty(connection)? {
-        return Err(StoreError::ObsoleteDevelopmentDatabase);
-    }
     let transaction = connection.transaction()?;
     transaction.execute_batch(INITIAL_SCHEMA)?;
     transaction.execute(
@@ -4211,10 +4183,7 @@ mod tests {
         assert!(setup.is_ok(), "newer schema fixture failed: {setup:?}");
         let result = SqliteStore::from_connection(connection);
 
-        assert!(matches!(
-            result,
-            Err(StoreError::ObsoleteDevelopmentDatabase)
-        ));
+        assert!(matches!(result, Err(StoreError::InvalidSchema)));
     }
 
     #[test]
@@ -4227,7 +4196,7 @@ mod tests {
 
         assert!(matches!(
             super::validate_exact_schema(&store.connection),
-            Err(StoreError::ObsoleteDevelopmentDatabase)
+            Err(StoreError::InvalidSchema)
         ));
         Ok(())
     }
@@ -4246,10 +4215,10 @@ mod tests {
     }
 
     #[test]
-    fn version_one_database_without_definitive_batch_columns_should_require_rebuild()
+    fn database_with_incomplete_current_schema_should_be_rejected()
     -> Result<(), Box<dyn std::error::Error>> {
         let temporary = tempfile::tempdir()?;
-        let database = temporary.path().join("obsolete.db");
+        let database = temporary.path().join("invalid.db");
         let connection = rusqlite::Connection::open(&database)?;
         connection.execute_batch(INITIAL_SCHEMA)?;
         connection.execute_batch(
@@ -4260,10 +4229,7 @@ mod tests {
 
         let result = SqliteStore::open(&database);
 
-        assert!(matches!(
-            result,
-            Err(StoreError::ObsoleteDevelopmentDatabase)
-        ));
+        assert!(matches!(result, Err(StoreError::InvalidSchema)));
         Ok(())
     }
 
@@ -4282,10 +4248,7 @@ mod tests {
 
         let result = SqliteStore::open_read_only(&database);
 
-        assert!(matches!(
-            result,
-            Err(StoreError::ObsoleteDevelopmentDatabase)
-        ));
+        assert!(matches!(result, Err(StoreError::InvalidSchema)));
         Ok(())
     }
 
@@ -4392,38 +4355,7 @@ mod tests {
     }
 
     #[test]
-    fn online_backup_should_preserve_current_snapshot() -> Result<(), Box<dyn std::error::Error>> {
-        let temporary = tempfile::tempdir()?;
-        let database = temporary.path().join("source.db");
-        let backup = temporary.path().join("backup.db");
-        let mut store = SqliteStore::open(&database)?;
-        let workspace = workspace();
-        let (nodes, edges, evidence) = fixture();
-        store.publish_snapshot(SnapshotBatch {
-            workspace: &workspace,
-            snapshot_id: "snapshot:1",
-            nodes: &nodes,
-            edges: &edges,
-            evidence: &evidence,
-            fingerprints: &[],
-            extractor_batches: &[],
-            extractor_runs: &[],
-            manual_links: &[],
-            community_snapshot: None,
-        })?;
-        store.backup_to(&backup)?;
-        let backup_store = SqliteStore::open(&backup)?;
-        let result = backup_store
-            .load_current_graph("commerce")
-            .map(|(stored_nodes, stored_edges)| (stored_nodes.len(), stored_edges.len()));
-
-        assert!(matches!(result, Ok((2, 1))));
-        Ok(())
-    }
-
-    #[test]
-    fn open_should_initialize_once_without_migration_state()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn open_should_initialize_schema_only_once() -> Result<(), Box<dyn std::error::Error>> {
         let temporary = tempfile::tempdir()?;
         let database = temporary.path().join("store.db");
 
@@ -4432,64 +4364,6 @@ mod tests {
         drop(initial);
         let repeated = SqliteStore::open(&database)?;
         assert_eq!(repeated.schema_version()?, 1);
-        Ok(())
-    }
-
-    #[test]
-    fn restore_should_preserve_replaced_database_as_safety_backup()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let temporary = tempfile::tempdir()?;
-        let database = temporary.path().join("store.db");
-        let backup = temporary.path().join("selected-backup.db");
-        let workspace = workspace();
-        let (nodes, edges, evidence) = fixture();
-        {
-            let mut store = SqliteStore::open(&database)?;
-            store.publish_snapshot(SnapshotBatch {
-                workspace: &workspace,
-                snapshot_id: "snapshot:before",
-                nodes: &nodes,
-                edges: &edges,
-                evidence: &evidence,
-                fingerprints: &[],
-                extractor_batches: &[],
-                extractor_runs: &[],
-                manual_links: &[],
-                community_snapshot: None,
-            })?;
-            store.backup_to(&backup)?;
-            store.publish_snapshot(SnapshotBatch {
-                workspace: &workspace,
-                snapshot_id: "snapshot:after",
-                nodes: &nodes,
-                edges: &edges,
-                evidence: &evidence,
-                fingerprints: &[],
-                extractor_batches: &[],
-                extractor_runs: &[],
-                manual_links: &[],
-                community_snapshot: None,
-            })?;
-        }
-
-        let report = SqliteStore::restore_from(&database, &backup)?;
-        let restored =
-            SqliteStore::open_read_only(&database)?.current_snapshot_summary("commerce")?;
-        let safety_path = report
-            .safety_backup_path
-            .as_ref()
-            .ok_or_else(|| std::io::Error::other("restore safety backup missing"))?;
-        let replaced =
-            SqliteStore::open_read_only(safety_path)?.current_snapshot_summary("commerce")?;
-
-        assert_eq!(
-            (
-                restored.snapshot_id,
-                replaced.snapshot_id,
-                report.schema_version,
-            ),
-            ("snapshot:before".to_owned(), "snapshot:after".to_owned(), 1)
-        );
         Ok(())
     }
 
@@ -4729,48 +4603,6 @@ mod tests {
                 .is_empty(),
             "SQLite must omit an oversized payload before copying its BLOB"
         );
-    }
-
-    #[test]
-    fn obsolete_development_batch_contract_should_require_full_rebuild() {
-        let mut store = SqliteStore::in_memory().expect("test store must initialize");
-        let workspace = workspace();
-        let (nodes, edges, evidence) = fixture();
-        let (fingerprint, run) = incremental_fixture();
-        let extractor_batch = StoredExtractorBatch {
-            source: fingerprint.clone(),
-            extractor_version: "1.0.0".to_owned(),
-            budget_fingerprint: "extraction-budgets:test".to_owned(),
-            source_was_lossy: false,
-            output_count: 1,
-            payload: br#"{"observations":[]}"#.to_vec(),
-        };
-        store
-            .publish_snapshot(SnapshotBatch {
-                workspace: &workspace,
-                snapshot_id: "snapshot:legacy",
-                nodes: &nodes,
-                edges: &edges,
-                evidence: &evidence,
-                fingerprints: std::slice::from_ref(&fingerprint),
-                extractor_batches: std::slice::from_ref(&extractor_batch),
-                extractor_runs: std::slice::from_ref(&run),
-                manual_links: &[],
-                community_snapshot: None,
-            })
-            .expect("fixture snapshot should publish");
-        store
-            .connection
-            .execute(
-                "UPDATE extractor_batches SET extractor_version = '1.0.0.5'",
-                [],
-            )
-            .expect("fixture contract should be replaced");
-
-        assert!(matches!(
-            store.load_current_extractor_batches_with_limit("commerce", 1),
-            Err(StoreError::ObsoleteDevelopmentDatabase)
-        ));
     }
 
     #[test]

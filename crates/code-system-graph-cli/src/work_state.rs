@@ -7,12 +7,15 @@ use code_system_graph_core::ExecutionSummary;
 use code_system_graph_model::{
     ArtifactFingerprint, CommunitySnapshot, Edge, Evidence, ExtractorRun, LinkDecision, Node, NodeId, StoredExtractorBatch, stable_id_bytes
 };
-use code_system_graph_store_sqlite::{ManualLinkDisposition, ManualLinkRecord};
+use code_system_graph_store_sqlite::{
+    ManualLinkDisposition, ManualLinkRecord, set_owner_only_file
+};
 use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 const WORK_SCHEMA_VERSION: &str = "1.0.0";
+const SQLITE_ARTIFACT_SUFFIXES: [&str; 4] = ["", "-wal", "-shm", "-journal"];
 
 enum WorkOpenError {
     Recreate,
@@ -1028,7 +1031,7 @@ fn ensure_private_file(path: &Path) -> Result<(), String> {
         if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
             return Err(format!("unsafe work sidecar path `{}`", path.display()));
         }
-        set_owner_only(path)?;
+        set_owner_only_file(path).map_err(|error| error.to_string())?;
         return Ok(());
     }
     let mut options = OpenOptions::new();
@@ -1039,14 +1042,12 @@ fn ensure_private_file(path: &Path) -> Result<(), String> {
         options.mode(0o600);
     }
     options.open(path).map_err(|error| error.to_string())?;
-    set_owner_only(path)
+    set_owner_only_file(path).map_err(|error| error.to_string())
 }
 
 fn ensure_safe_sqlite_siblings(path: &Path) -> Result<(), String> {
-    for suffix in ["-wal", "-shm", "-journal"] {
-        let mut value = path.as_os_str().to_os_string();
-        value.push(suffix);
-        let candidate = PathBuf::from(value);
+    for suffix in &SQLITE_ARTIFACT_SUFFIXES[1..] {
+        let candidate = sqlite_artifact_path(path, suffix);
         let metadata = match fs::symlink_metadata(&candidate) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
@@ -1058,108 +1059,38 @@ fn ensure_safe_sqlite_siblings(path: &Path) -> Result<(), String> {
                 candidate.display()
             ));
         }
-        set_owner_only(&candidate)?;
+        set_owner_only_file(&candidate).map_err(|error| error.to_string())?;
     }
     Ok(())
-}
-
-#[cfg(unix)]
-fn set_owner_only(path: &Path) -> Result<(), String> {
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .custom_flags(nix::fcntl::OFlag::O_NOFOLLOW.bits())
-        .open(path)
-        .map_err(|error| error.to_string())?;
-    file.set_permissions(fs::Permissions::from_mode(0o600))
-        .map_err(|error| error.to_string())
-}
-
-#[cfg(windows)]
-#[allow(unsafe_code)]
-fn set_owner_only(path: &Path) -> Result<(), String> {
-    use std::ffi::c_void;
-    use std::os::windows::ffi::OsStrExt;
-    use std::ptr;
-
-    use windows_sys::Win32::Foundation::LocalFree;
-    use windows_sys::Win32::Security::Authorization::{
-        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1
-    };
-    use windows_sys::Win32::Security::{
-        DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SetFileSecurityW
-    };
-
-    let mut path_wide = path.as_os_str().encode_wide().collect::<Vec<_>>();
-    if path_wide.contains(&0) {
-        return Err("work sidecar path contains a NUL code unit".to_owned());
-    }
-    path_wide.push(0);
-    // Protected DACL with one full-control ACE for the object owner. `OW` is the Windows
-    // Owner-Rights SID, avoiding localized account names and inherited broad principals.
-    let descriptor_sddl = "D:P(A;;FA;;;OW)\0".encode_utf16().collect::<Vec<_>>();
-    let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
-    // SAFETY: both UTF-16 inputs are NUL-terminated, `descriptor` is a valid out-pointer, and the
-    // returned LocalAlloc allocation is released exactly once below.
-    let converted = unsafe {
-        ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            descriptor_sddl.as_ptr(),
-            SDDL_REVISION_1,
-            &mut descriptor,
-            ptr::null_mut(),
-        )
-    };
-    if converted == 0 {
-        return Err(format!(
-            "failed to build owner-only work sidecar ACL: {}",
-            std::io::Error::last_os_error()
-        ));
-    }
-    // SAFETY: `path_wide` is NUL-terminated and `descriptor` was initialized successfully above.
-    let applied = unsafe {
-        SetFileSecurityW(
-            path_wide.as_ptr(),
-            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-            descriptor,
-        )
-    };
-    // SAFETY: the descriptor was allocated by LocalAlloc inside the conversion API.
-    let _released = unsafe { LocalFree(descriptor.cast::<c_void>()) };
-    if applied == 0 {
-        return Err(format!(
-            "failed to apply owner-only work sidecar ACL: {}",
-            std::io::Error::last_os_error()
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(not(any(unix, windows)))]
-fn set_owner_only(_path: &Path) -> Result<(), String> {
-    Err("owner-only work sidecar permissions are unsupported on this platform".to_owned())
 }
 
 fn remove_sidecar_files(path: &Path) -> Result<(), String> {
-    for suffix in ["", "-wal", "-shm"] {
-        let candidate = if suffix.is_empty() {
-            path.to_path_buf()
-        } else {
-            let mut value = path.as_os_str().to_os_string();
-            value.push(suffix);
-            PathBuf::from(value)
-        };
-        if candidate.exists() {
-            fs::remove_file(&candidate).map_err(|error| {
-                format!(
-                    "failed to recreate incompatible work sidecar `{}`: {error}",
-                    candidate.display()
-                )
-            })?;
+    let mut first_error = None;
+    for suffix in SQLITE_ARTIFACT_SUFFIXES {
+        let candidate = sqlite_artifact_path(path, suffix);
+        match fs::remove_file(&candidate) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                first_error.get_or_insert_with(|| {
+                    format!(
+                        "failed to recreate incompatible work sidecar `{}`: {error}",
+                        candidate.display()
+                    )
+                });
+            }
         }
     }
-    Ok(())
+    first_error.map_or(Ok(()), Err)
+}
+
+fn sqlite_artifact_path(path: &Path, suffix: &str) -> PathBuf {
+    if suffix.is_empty() {
+        return path.to_path_buf();
+    }
+    let mut value = path.as_os_str().to_os_string();
+    value.push(suffix);
+    PathBuf::from(value)
 }
 
 #[cfg(test)]
@@ -1228,6 +1159,22 @@ mod tests {
             .expect("corrupt version");
         drop(state);
         WorkState::open(&database, "database-instance").expect("sidecar should be recreated");
+    }
+
+    #[test]
+    fn sidecar_cleanup_should_remove_every_sqlite_artifact() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let sidecar = temporary.path().join("graph.db.work-v1.db");
+        for suffix in SQLITE_ARTIFACT_SUFFIXES {
+            fs::write(sqlite_artifact_path(&sidecar, suffix), b"stale")
+                .expect("create stale SQLite artifact");
+        }
+
+        remove_sidecar_files(&sidecar).expect("remove SQLite artifacts");
+
+        for suffix in SQLITE_ARTIFACT_SUFFIXES {
+            assert!(!sqlite_artifact_path(&sidecar, suffix).exists());
+        }
     }
 
     #[test]
@@ -1441,8 +1388,8 @@ mod tests {
             .expect("sidecar write");
         ensure_safe_sqlite_siblings(&sidecar).expect("restrict live companions");
 
-        for suffix in ["", "-wal", "-shm"] {
-            let candidate = PathBuf::from(format!("{}{}", sidecar.display(), suffix));
+        for suffix in SQLITE_ARTIFACT_SUFFIXES {
+            let candidate = sqlite_artifact_path(&sidecar, suffix);
             if candidate.exists() {
                 let mode = std::fs::metadata(&candidate)
                     .expect("sidecar metadata")
