@@ -50,9 +50,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: macos-sqlite
-      - run: cargo +stable test -p code-system-graph-store-sqlite backup_validation_should_use_read_only_untrusted_schema_connection --locked -- --exact --nocapture
-      - run: cargo +stable test -p code-system-graph-store-sqlite restore_should_preserve_replaced_database_as_safety_backup --locked -- --exact --nocapture
-      - run: cargo +stable test -p code-system-graph-store-sqlite restore_should_keep_destination_locked_through_publication --locked -- --exact --nocapture
+      - run: cargo +stable test -p code-system-graph-store-sqlite backup_validation_should_use_read_only_untrusted_schema_connection --locked -- --nocapture
+      - run: cargo +stable test -p code-system-graph-store-sqlite restore_should_preserve_replaced_database_as_safety_backup --locked -- --nocapture
+      - run: cargo +stable test -p code-system-graph-store-sqlite restore_should_keep_destination_locked_through_publication --locked -- --nocapture
       - run: cargo +stable test -p code-system-graph-store-sqlite --all-targets --locked -- --test-threads=1
 
   msrv:
