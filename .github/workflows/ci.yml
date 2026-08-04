@@ -29,6 +29,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      - run: git diff --check
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: stable
@@ -106,3 +107,16 @@ jobs:
       - uses: anchore/sbom-action/download-syft@v0
       - run: scripts/package-release.sh
       - run: scripts/smoke-install.sh "dist/code-system-graph-x86_64-unknown-linux-gnu-v1.0.0"
+
+  release-workloads:
+    name: Linux release workloads
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-workloads
+      - run: cargo +stable test -p code-system-graph --test extraction_scale_e2e --release --locked -- --ignored --test-threads=1

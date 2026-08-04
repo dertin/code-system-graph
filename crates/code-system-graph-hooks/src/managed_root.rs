@@ -486,7 +486,7 @@ fn read_bytes_bounded_unix(
     })?;
     let _parent_path = root.join(parent);
     let parent_dir = descend_unix(directory, root, parent, false)?;
-    let flags = OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC;
+    let flags = OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC | OFlag::O_NONBLOCK;
     let fd = openat(parent_dir, file_name, flags, Mode::empty()).map_err(|source| {
         CapabilityIoError::Io {
             source: source.into(),
@@ -775,5 +775,106 @@ mod tests {
             result,
             Err(super::CapabilityIoError::TooLarge { .. })
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_should_reject_fifo_without_blocking() -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::FileTypeExt;
+        use std::process::Command;
+
+        let temporary = tempfile::tempdir()?;
+        let root = temporary.path().join("repo");
+        std::fs::create_dir_all(root.join(".code-system-graph/hooks"))?;
+        let fifo = root.join(".code-system-graph/hooks/state.fifo");
+        Command::new("mkfifo").arg(&fifo).status()?;
+
+        let managed = ManagedRoot::open(&root)?;
+        let result =
+            managed.read_utf8_bounded(Path::new(".code-system-graph/hooks/state.fifo"), 64);
+
+        assert!(matches!(
+            result,
+            Err(crate::HookError::InvalidConfiguration { .. })
+        ));
+        assert!(!fifo.exists() || std::fs::metadata(&fifo)?.file_type().is_fifo());
+        Ok(())
+    }
+
+    #[test]
+    fn atomic_write_should_accept_files_with_control_and_bidi_path_components()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temporary = tempfile::tempdir()?;
+        let root = temporary.path().join("repo");
+        std::fs::create_dir_all(&root)?;
+        let managed = ManagedRoot::open(&root)?;
+
+        for relative in [
+            Path::new(".code-system-graph/hooks/bad\x1bname"),
+            Path::new(".code-system-graph/hooks/safe\u{202e}evil"),
+        ] {
+            let result = managed.atomic_write(relative, b"payload");
+            assert!(
+                result.is_ok(),
+                "filesystem boundary paths should remain writable: {relative:?}"
+            );
+            assert!(managed.regular_file_exists(relative)?);
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_root_should_survive_parent_replacement_without_touching_external_sentinel()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::symlink;
+        use std::sync::{Arc, Condvar, Mutex};
+        use std::thread;
+
+        let temporary = tempfile::tempdir()?;
+        let outside = temporary.path().join("outside");
+        let real = temporary.path().join("real");
+        let wrapper = temporary.path().join("wrapper");
+        let evil = temporary.path().join("evil");
+        std::fs::create_dir_all(&outside)?;
+        std::fs::create_dir_all(&real)?;
+        std::fs::create_dir_all(&evil)?;
+        symlink(&real, &wrapper)?;
+
+        let sentinel = outside.join("sentinel");
+        std::fs::write(&sentinel, b"untouched")?;
+
+        let wrapper_path = wrapper;
+        let managed = ManagedRoot::open(&wrapper_path)?;
+        let coordination = Arc::new((Mutex::new(false), Condvar::new()));
+        let coordination_for_replacer = Arc::clone(&coordination);
+        let wrapper_for_replacer = wrapper_path;
+        let evil_for_replacer = evil.clone();
+        let replacer = thread::spawn(move || {
+            let (lock, cv) = &*coordination_for_replacer;
+            let mut ready = lock.lock().expect("coordination lock");
+            *ready = true;
+            cv.notify_one();
+            std::fs::remove_file(&wrapper_for_replacer).expect("remove wrapper symlink");
+            symlink(&evil_for_replacer, &wrapper_for_replacer).expect("replace wrapper parent");
+        });
+
+        let (lock, cv) = &*coordination;
+        let mut ready = lock.lock().expect("coordination lock");
+        while !*ready {
+            ready = cv.wait(ready).expect("coordination wait should not fail");
+        }
+        replacer.join().expect("replacer thread panicked");
+
+        managed
+            .atomic_write(
+                Path::new(".code-system-graph/hooks/state.json"),
+                b"{\"hooks\":{}}\n",
+            )
+            .expect("writes must remain bound to the opened canonical root");
+        assert_eq!(std::fs::read(&sentinel)?, b"untouched");
+        assert!(real.join(".code-system-graph/hooks/state.json").exists());
+        assert!(!evil.join(".code-system-graph/hooks/state.json").exists());
+        Ok(())
     }
 }

@@ -3,9 +3,13 @@ name = "code-system-graph-model"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description.workspace = true
+description = "Shared identities, graph entities, and extraction envelopes for Code System Graph."
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 blake3 = "1.8.5"

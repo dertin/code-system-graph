@@ -3,10 +3,9 @@
 All notable public changes to Code System Graph are documented in this file. Code System Graph follows Semantic
 Versioning.
 
-## [1.0.0] - 2026-07-30
+## [1.0.0] - 2026-08-04
 
-The source for the planned first public release of Code System Graph. No public artifact or Git tag
-has been published yet.
+First public release of Code System Graph.
 
 ### CodeGraph delivery
 
@@ -30,8 +29,9 @@ has been published yet.
   excluded, default dependency and build directories can be selectively reopened, explicit
   artifacts are retained, configured patterns are canonicalized under a strict portable glob
   grammar, and policy changes invalidate incremental scan fingerprints.
-- Added atomic SQLite snapshots, online backup and restore, explicit migrations, integrity checks,
-  writer locks, historical snapshots, and per-checkout freshness.
+- Added atomic SQLite snapshots, online backup and restore, exact-schema validation with
+  fail-closed rejection of incompatible databases, integrity checks, writer locks, historical
+  snapshots, and per-checkout freshness.
 - Added deterministic evidence-backed linking with explicit ambiguity, coverage, provenance, and
   freshness reporting.
 - Added versioned manual relationship additions and exact suppressions with required reasons,
@@ -137,9 +137,18 @@ has been published yet.
 
 - Added validation for unsafe control characters, bidirectional metadata, duplicate graph
   identities, invalid references, malformed numeric evidence, and oversized metadata.
+- Added GraphQL extraction payload strictness: legacy `default_value` fields are rejected and
+  structural default categories use `default_value_kind` only.
+- Added backup-restore validation for missing or altered schema objects, foreign-key integrity,
+  and pinned read-only backup sources.
+- Added host hook filesystem boundaries that reject FIFO reads without blocking, resist parent
+  symlink replacement after root open, and tolerate control-character and bidirectional path
+  components at the filesystem edge.
 - Added source-free diagnostic bundles, private Unix file permissions, non-overwriting output, and
   conservative health reporting.
 - Added cancellation, deadlines, output limits, process concurrency limits, and deterministic
   child-process cleanup for external operations.
 - Added self-contained release archives with `csgraph` and `code-system-graph-hooks`, documentation,
   notices, install/uninstall scripts, CycloneDX SBOMs, and SHA-256 checksums.
+- Added crates.io publication for the workspace crates and cargo-binstall metadata aligned with
+  GitHub Release archives for Linux x86_64.

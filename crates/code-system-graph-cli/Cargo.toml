@@ -3,9 +3,13 @@ name = "code-system-graph"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description.workspace = true
+description = "CLI, MCP, and HTTP delivery for local multi-repository code intelligence."
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories = ["development-tools", "command-line-utilities"]
 
 [package.metadata.binstall]
 pkg-url = "{ repo }/releases/download/v{ version }/code-system-graph-{ target }-v{ version }{ archive-suffix }"

@@ -25,7 +25,7 @@ SQLite and CodeGraph are outbound adapters implementing application-owned ports.
 The initial slice starts with only crates that enforce a real boundary:
 
 - `code-system-graph-model`: identities, graph entities, evidence, freshness, and public envelopes.
-- `code-system-graph-store-sqlite`: embedded migrations and transactional persistence.
+- `code-system-graph-store-sqlite`: exact-schema initialization, fail-closed validation, and transactional persistence.
 - `code-system-graph-core`: strict manifest loading, HTTP boundary extraction, deterministic linking,
   trace application service, and provider ports.
 - `code-system-graph-cli`: process entry point and delivery adapters, including MCP stdio.

@@ -25,7 +25,7 @@ indexes user-facing labels and descriptions.
 
 Repository and checkout paths use a platform tag plus lossless native bytes; lossy display paths
 are diagnostic-only. Before the first public release, only the definitive 1.0.0 schema is accepted;
-incompatible development databases are rebuilt. Online backups use SQLite's backup API and do not
+incompatible local databases are rebuilt. Online backups use SQLite's backup API and do not
 overwrite an existing destination. A restrictive sidecar lock provides single-writer ownership and
 bounded stale-lock recovery.
 

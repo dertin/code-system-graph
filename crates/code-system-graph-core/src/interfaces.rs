@@ -1675,16 +1675,12 @@ fn append_schema_checks(inputs: &[SchemaDoctorInput], checks: &mut Vec<DoctorChe
                     "Schema version {actual} does not match expected version {}.",
                     input.expected_version
                 ),
-                Some(
-                    "Remove the incompatible development database and run a full scan.".to_owned(),
-                ),
+                Some("Remove the incompatible local database and run a full scan.".to_owned()),
             ),
             (Some(_), Some(false)) => (
                 DoctorStatus::Failed,
                 "Schema metadata is inconsistent.".to_owned(),
-                Some(
-                    "Restore an exact 1.0.0 backup or rebuild the development database.".to_owned(),
-                ),
+                Some("Restore an exact 1.0.0 backup or rebuild the local database.".to_owned()),
             ),
             _ => (
                 DoctorStatus::Unknown,

@@ -28,7 +28,7 @@ use schema_contract::validate_exact_schema;
 use sysinfo::{Pid, ProcessesToUpdate, System};
 use thiserror::Error;
 
-const INITIAL_SCHEMA: &str = include_str!("../../../migrations/0001_initial.sql");
+const INITIAL_SCHEMA: &str = include_str!("../migrations/0001_initial.sql");
 const LATEST_SCHEMA_VERSION: i64 = 1;
 
 /// Returns the newest on-disk schema version supported by this binary.
@@ -3806,6 +3806,46 @@ mod tests {
         });
 
         assert!(matches!(result, Err(StoreError::InvalidGraphSnapshot(_))));
+    }
+
+    #[test]
+    fn publish_snapshot_should_reject_control_chars_in_path_display() {
+        let mut store = match SqliteStore::in_memory() {
+            Ok(store) => store,
+            Err(error) => panic!("test store must initialize: {error}"),
+        };
+        let workspace = workspace();
+        let (nodes, edges, evidence) = fixture();
+        let fingerprint = ArtifactFingerprint {
+            repo_id: RepoId::new("repo:web"),
+            checkout_id: CheckoutId::new("checkout:web"),
+            path: NativePath {
+                encoding: NativePathEncoding::Utf8,
+                bytes: b"src/bad\x1bname.ts".to_vec(),
+                display: "src/bad\x1bname.ts".to_owned(),
+            },
+            extractor: "test".to_owned(),
+            content_hash: "hash".to_owned(),
+            size_bytes: 1,
+        };
+
+        let result = store.publish_snapshot(SnapshotBatch {
+            workspace: &workspace,
+            snapshot_id: "snapshot:control-path",
+            nodes: &nodes,
+            edges: &edges,
+            evidence: &evidence,
+            fingerprints: &[fingerprint],
+            extractor_batches: &[],
+            extractor_runs: &[],
+            manual_links: &[],
+            community_snapshot: None,
+        });
+
+        assert!(matches!(
+            result,
+            Err(StoreError::InvalidPersistenceRecord(_))
+        ));
     }
 
     #[test]

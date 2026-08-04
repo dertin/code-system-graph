@@ -114,6 +114,52 @@ fn representative_workspace_should_scan_5000_files_with_bounded_resources() -> a
     Ok(())
 }
 
+const EIGHT_MIB: usize = 8 * 1024 * 1024;
+
+#[test]
+#[ignore = "run explicitly with --release for the ~8 MiB GraphQL artifact workload"]
+fn large_graphql_artifact_should_extract_with_bounded_resources() -> anyhow::Result<()> {
+    if cfg!(debug_assertions) {
+        anyhow::bail!("run this acceptance test with --release");
+    }
+    let temporary = tempfile::tempdir()?;
+    let repository = temporary.path().join("repository");
+    std::fs::create_dir(&repository)?;
+    let graphql = graphql_with_exact_bytes(EIGHT_MIB);
+    std::fs::write(repository.join("schema.graphql"), &graphql)?;
+
+    let manifest = temporary.path().join("code-system-graph.yaml");
+    let database = temporary.path().join("code-system-graph.db");
+    std::fs::write(
+        &manifest,
+        "version: 1\nname: extraction-eight-mib\nrepos:\n  representative:\n    path: repository\n",
+    )?;
+
+    let artifact_duration =
+        measure(|| extract_graphql_document("schema.graphql", &graphql).map(|_| ()))?;
+    let started = Instant::now();
+    let summary = scan_workspace(&manifest, &database)?;
+    let total = started.elapsed();
+    let peak_memory_kib = linux_peak_memory_kib();
+
+    eprintln!(
+        "extraction_eight_mib bytes={EIGHT_MIB} discovered_invocations={} total_ms={} \
+         artifact_us={} peak_memory_kib={}",
+        summary.discovered_input_count,
+        total.as_millis(),
+        artifact_duration.as_micros(),
+        peak_memory_kib.map_or_else(|| "unavailable".to_owned(), |value| value.to_string()),
+    );
+    assert!(summary.discovered_input_count >= 1);
+    Ok(())
+}
+
+fn graphql_with_exact_bytes(size: usize) -> String {
+    let prefix = "type Query { viewer: String }\n#";
+    assert!(size > prefix.len());
+    format!("{prefix}{}", "x".repeat(size - prefix.len()))
+}
+
 fn measure<E>(operation: impl FnOnce() -> Result<(), E>) -> Result<Duration, E> {
     let started = Instant::now();
     operation()?;

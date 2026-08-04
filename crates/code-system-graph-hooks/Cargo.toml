@@ -3,9 +3,13 @@ name = "code-system-graph-hooks"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description.workspace = true
+description = "Repository host hook installation and lifecycle for Code System Graph."
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories = ["development-tools", "command-line-utilities"]
 
 [package.metadata.binstall]
 pkg-url = "{ repo }/releases/download/v{ version }/code-system-graph-{ target }-v{ version }{ archive-suffix }"

@@ -3,7 +3,7 @@
 use code_system_graph::{
     ApplicationError, ScanOverrides, scan_workspace, scan_workspace_with_overrides
 };
-use code_system_graph_core::ExtractionResource;
+use code_system_graph_core::{BatchPlanError, ExitCode, ExtractionResource};
 use code_system_graph_store_sqlite::SqliteStore;
 
 fn manifest(max_work: Option<u64>) -> String {
@@ -251,6 +251,70 @@ fn complete_batches_should_resume_from_sidecar_after_failed_pass() -> anyhow::Re
         SqliteStore::open_read_only(&database)?
             .current_snapshot_summary("resume-e2e")
             .is_ok()
+    );
+    Ok(())
+}
+
+#[test]
+fn legacy_graphql_payload_should_fail_without_partial_publication() -> anyhow::Result<()> {
+    let temporary = tempfile::tempdir()?;
+    let repository = temporary.path().join("api");
+    std::fs::create_dir_all(&repository)?;
+    std::fs::write(
+        repository.join("schema.graphql"),
+        r#"
+            type User @key(fields: "id") {
+              lookup(token: String = "legacy-default"): String
+            }
+            type Query { viewer: User }
+        "#,
+    )?;
+    let config = temporary.path().join("code-system-graph.yaml");
+    let database = temporary.path().join("code-system-graph.db");
+    std::fs::write(&config, manifest(None))?;
+
+    let initial = scan_workspace(&config, &database)?;
+    let connection = rusqlite::Connection::open(&database)?;
+    let (snapshot_id, payload): (String, Vec<u8>) = connection.query_row(
+        "SELECT snapshot_id, payload
+         FROM extractor_batches
+         WHERE extractor = 'code-system-graph.graphql.document'
+         ORDER BY rowid DESC
+         LIMIT 1",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let tampered = String::from_utf8_lossy(&payload).replace("default_value_kind", "default_value");
+    assert!(
+        tampered.contains("default_value"),
+        "tampered payload must contain the legacy field name"
+    );
+    connection.execute(
+        "UPDATE extractor_batches
+         SET payload = ?1
+         WHERE snapshot_id = ?2 AND extractor = 'code-system-graph.graphql.document'",
+        rusqlite::params![tampered, snapshot_id],
+    )?;
+
+    let rejected = scan_workspace(&config, &database);
+    assert!(
+        matches!(
+            rejected,
+            Err(
+                ApplicationError::BatchPlan(BatchPlanError::InvalidPayload(_))
+                    | ApplicationError::SupervisedApplication {
+                        exit_code: ExitCode::Internal,
+                        ..
+                    }
+            )
+        ),
+        "unexpected rejection: {rejected:?}"
+    );
+    assert_eq!(
+        SqliteStore::open_read_only(&database)?
+            .current_snapshot_summary("extraction-budget-e2e")?
+            .snapshot_id,
+        initial.snapshot_id
     );
     Ok(())
 }
