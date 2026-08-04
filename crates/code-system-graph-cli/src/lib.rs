@@ -5995,6 +5995,7 @@ mod budget_regression_tests {
             "version: 1\nname: source-budget-unit\nextractionBudgets:\n  maxIdentifierBytesPerValue: 3\nrepos:\n  api:\n    path: api\n",
         )
         .expect("manifest fixture");
+        let expected_artifact = encode_native_path(&Path::new("src").join("routes.rs")).display;
 
         let result = scan_workspace_direct(&config, &database, &ScanOverrides::default());
         assert!(
@@ -6002,7 +6003,7 @@ mod budget_regression_tests {
                 &result,
                 Err(ApplicationError::ExtractionLimit(error))
                     if error.resource == code_system_graph_core::ExtractionResource::IdentifierBytesPerValue
-                        && error.artifact == "src/routes.rs"
+                        && error.artifact == expected_artifact
                         && error.extractor == "code-system-graph.source.rust"
             ),
             "unexpected direct source budget result: {result:?}"
