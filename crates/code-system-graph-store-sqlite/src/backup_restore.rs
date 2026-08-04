@@ -619,73 +619,59 @@ fn replace_database_file_if_same(
 }
 
 #[cfg(all(unix, not(target_os = "linux")))]
-fn remove_sqlite_sidecars(database_path: &Path) -> std::io::Result<()> {
-    for suffix in &SQLITE_ARTIFACT_SUFFIXES[1..] {
-        let sidecar = artifact_path(database_path, suffix);
-        match fs::remove_file(&sidecar) {
-            Ok(()) => {}
-            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
-            Err(source) => return Err(source),
-        }
-    }
-    Ok(())
-}
-
-#[cfg(all(unix, not(target_os = "linux")))]
+#[allow(unsafe_code)]
 fn replace_database_file_if_same(
     replacement: &Path,
     destination: &Path,
     expected: &DestinationSnapshot,
-    displaced: &Path,
+    _displaced: &Path,
 ) -> std::io::Result<()> {
-    if !expected.matches(destination)? {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
-            "database destination changed before atomic replacement",
-        ));
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    fn exchange(left: &Path, right: &Path) -> std::io::Result<()> {
+        let left = CString::new(left.as_os_str().as_bytes()).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "database path contains a NUL byte",
+            )
+        })?;
+        let right = CString::new(right.as_os_str().as_bytes()).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "database path contains a NUL byte",
+            )
+        })?;
+        // SAFETY: both C strings are NUL-terminated and remain valid for the syscall.
+        let result = unsafe { libc::renamex_np(left.as_ptr(), right.as_ptr(), libc::RENAME_SWAP) };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
     }
-    if displaced.exists() {
-        fs::remove_file(displaced)?;
-    }
-    remove_sqlite_sidecars(destination)?;
-    if let Err(error) = fs::rename(destination, displaced) {
-        return Err(error);
-    }
-    if let Err(error) = publish_new_database_file(replacement, destination) {
-        let rollback = fs::rename(displaced, destination);
-        return Err(match rollback {
-            Ok(()) => error,
-            Err(rollback) => std::io::Error::new(
-                rollback.kind(),
-                format!(
-                    "failed to publish restored database: {error}; \
-                     rollback also failed: {rollback}"
-                ),
-            ),
-        });
-    }
-    let displaced_snapshot = match DestinationSnapshot::capture(displaced) {
+
+    exchange(replacement, destination)?;
+    let displaced = match DestinationSnapshot::capture(replacement) {
         Ok(snapshot) => snapshot,
         Err(error) => {
-            remove_sqlite_sidecars(destination)?;
-            let removed = fs::remove_file(destination);
-            let rollback = fs::rename(displaced, destination);
-            return Err(std::io::Error::new(
-                error.kind(),
-                format!(
-                    "failed to inspect displaced database: {error}; \
-                     rollback remove={removed:?}, rename={rollback:?}"
-                ),
-            ));
+            return match exchange(replacement, destination) {
+                Ok(()) => Err(error),
+                Err(rollback) => Err(std::io::Error::new(
+                    rollback.kind(),
+                    format!(
+                        "failed to inspect displaced database: {error}; \
+                         atomic replacement rollback also failed: {rollback}"
+                    ),
+                )),
+            };
         }
     };
-    if expected.same_as(&displaced_snapshot) {
+    if expected.same_as(&displaced) {
         return Ok(());
     }
-    remove_sqlite_sidecars(destination)?;
-    fs::remove_file(destination)?;
-    fs::rename(displaced, destination)?;
-    if !displaced_snapshot.matches(destination)? {
+    exchange(replacement, destination)?;
+    if !displaced.matches(destination)? {
         return Err(std::io::Error::other(
             "atomic replacement rollback did not restore the displaced database",
         ));
@@ -901,12 +887,12 @@ fn is_database_corruption(error: &rusqlite::Error) -> bool {
     )
 }
 
-#[cfg(any(windows, all(unix, not(target_os = "linux"))))]
+#[cfg(windows)]
 fn release_destination_lock_for_publish(guard: &mut Option<Connection>) {
     drop(guard.take());
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(not(windows))]
 fn release_destination_lock_for_publish(_guard: &mut Option<Connection>) {}
 
 fn configure_staged_restore(connection: &Connection) -> Result<(), StoreError> {

@@ -64,10 +64,12 @@ fn canonical_access_path(database_path: &Path) -> Result<PathBuf, StoreError> {
         ),
     })?;
     let parent = database_path.parent().unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(parent).map_err(|source| StoreError::Io {
-        path: parent.to_path_buf(),
-        source,
-    })?;
+    if fs::symlink_metadata(database_path).is_err() {
+        fs::create_dir_all(parent).map_err(|source| StoreError::Io {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
     let parent = fs::canonicalize(parent).map_err(|source| StoreError::Io {
         path: parent.to_path_buf(),
         source,
@@ -80,17 +82,22 @@ fn canonical_access_path(database_path: &Path) -> Result<PathBuf, StoreError> {
     }
 }
 
-fn access_lock_path(database_path: &Path) -> Result<PathBuf, StoreError> {
-    let parent = database_path.parent().unwrap_or_else(|| Path::new("."));
-    let directory_name = access_lock_directory_name().map_err(|source| StoreError::Io {
-        path: parent.to_path_buf(),
-        source,
-    })?;
-    let directory = parent.join(directory_name);
+fn access_lock_root() -> Result<PathBuf, StoreError> {
+    let directory = std::env::temp_dir().join(access_lock_directory_name().map_err(|source| {
+        StoreError::Io {
+            path: std::env::temp_dir(),
+            source,
+        }
+    })?);
     create_access_lock_directory(&directory).map_err(|source| StoreError::Io {
         path: directory.clone(),
         source,
     })?;
+    Ok(directory)
+}
+
+fn access_lock_path(database_path: &Path) -> Result<PathBuf, StoreError> {
+    let directory = access_lock_root()?;
     let mut hasher = blake3::Hasher::new();
     hash_path_bytes(&mut hasher, database_path);
     Ok(directory.join(format!("{}.lock", hasher.finalize().to_hex())))
@@ -375,6 +382,44 @@ mod tests {
         assert_eq!(
             access_lock.database_path(),
             fs::canonicalize(&first)?.as_path()
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn access_lock_path_should_live_under_runtime_directory()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temporary = tempfile::tempdir()?;
+        let database = temporary.path().join("store.db");
+        let lock_path = access_lock_path(&database)?;
+        let expected_root = access_lock_root()?;
+
+        assert!(lock_path.starts_with(&expected_root));
+        assert_ne!(lock_path.parent(), database.parent());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shared_access_lock_should_not_require_database_directory_write_access()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temporary = tempfile::tempdir()?;
+        let readonly = temporary.path().join("readonly");
+        fs::create_dir(&readonly)?;
+        let database = readonly.join("store.db");
+        drop(SqliteStore::open(&database)?);
+        fs::set_permissions(&readonly, fs::Permissions::from_mode(0o555))?;
+
+        let lock = StoreAccessLock::shared(&database);
+        fs::set_permissions(&readonly, fs::Permissions::from_mode(0o755))?;
+
+        assert!(
+            lock.is_ok(),
+            "expected shared access lock to succeed: {:?}",
+            lock.err()
         );
         Ok(())
     }
