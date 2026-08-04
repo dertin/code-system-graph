@@ -1,31 +1,29 @@
-# Code System Graph 1.0.0 Release
+# Code System Graph 1.0.1 Release
 
-Code System Graph 1.0.0 is the first public release line. The source tree and package version are `1.0.0`.
-Release validation has completed locally on native Linux x86_64. Continuous integration runs on
-GitHub at `https://github.com/dertin/code-system-graph`.
+Code System Graph 1.0.1 is the first cross-platform maintenance release. The source tree and
+package version are `1.0.1`. Continuous integration runs on GitHub at
+`https://github.com/dertin/code-system-graph`.
 
-Platform claims below distinguish completed local evidence from configured but not yet validated
-targets. Linux x86_64 is the only target with native build, test, packaging, and lifecycle evidence
-today.
+Platform claims below require native build, test, packaging, and archive-smoke evidence from the
+release workflow.
 
 ## Platform validation
 
 - Linux x86_64 (`x86_64-unknown-linux-gnu`): locally validated for build, test, scale workloads,
   package creation, checksum and SBOM generation, installation, repeated installation, and
   uninstall.
-- Linux ARM64 (`aarch64-unknown-linux-gnu`): workflow coverage is configured but has not been
-  executed on a native release host.
-- macOS x86_64 and ARM64: workflow coverage is configured but has not been executed. Native macOS
-  build, test, package, and lifecycle validation must pass before macOS support is published.
-- Windows x86_64: workflow coverage is configured but has not been executed. Native Windows build,
-  test, packaging, and installation validation must pass before Windows support is published. The
-  POSIX shell installer is not a native Windows installer.
+- Linux ARM64 (`aarch64-unknown-linux-gnu`): native CI validates build, tests, and archive contents.
+- macOS x86_64 and ARM64: native CI validates build, serial tests, archive installation, repeated
+  installation, and uninstall.
+- Windows x86_64: native CI validates build, serial tests, ZIP contents, and binary startup.
+  `cargo-binstall` installs the ZIP directly; the POSIX shell installer is not a Windows installer.
 
-Linux x86_64 evidence does not imply support or performance characteristics on another target.
+Performance evidence remains Linux x86_64-specific and does not imply characteristics on another
+target.
 
 ## Included capabilities
 
-Code System Graph 1.0.0 includes:
+Code System Graph 1.0.x includes:
 
 - multi-repository workspace registration with lossless native-path identity;
 - incremental, source-free extraction for package, HTTP, event, GraphQL, RPC, data,
@@ -83,8 +81,8 @@ GNU tar, and SHA-256 tooling. The workspace MSRV remains 1.97.1 and is validated
 
 ```text
 SOURCE_DATE_EPOCH=0 scripts/package-release.sh x86_64-unknown-linux-gnu
-scripts/smoke-install.sh dist/code-system-graph-x86_64-unknown-linux-gnu-v1.0.0
-sha256sum --check dist/code-system-graph-x86_64-unknown-linux-gnu-v1.0.0.sha256
+scripts/smoke-install.sh dist/code-system-graph-x86_64-unknown-linux-gnu-v1.0.1
+sha256sum --check dist/code-system-graph-x86_64-unknown-linux-gnu-v1.0.1.sha256
 ```
 
 The package contains `csgraph`, `code-system-graph-hooks`, public documentation, license and notice files,
@@ -117,7 +115,7 @@ clean `main` branch aligned with `origin/main`, Cargo credentials for crates.io,
 selects `prepare`:
 
 ```text
-.github/workflows/release.sh 1.0.0 prepare
+.github/workflows/release.sh 1.0.1 prepare
 ```
 
 Preparation runs the complete publish-readiness suite and dry-runs all five packages without
@@ -125,7 +123,7 @@ creating a tag, publishing a crate, or dispatching a workflow. To perform the ir
 pass `publish` explicitly:
 
 ```text
-.github/workflows/release.sh 1.0.0 publish
+.github/workflows/release.sh 1.0.1 publish
 ```
 
 Publish mode verifies that the workspace repository matches `origin`, creates and pushes the

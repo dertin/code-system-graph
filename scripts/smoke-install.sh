@@ -6,6 +6,8 @@ if [[ $# -ne 1 ]]; then
   exit 2
 fi
 
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+VERSION="$(awk -F '"' '/^version = / { print $2; exit }' "$ROOT/Cargo.toml")"
 SOURCE="$(cd -- "$1" && pwd)"
 PREFIX="$(mktemp -d)"
 trap 'rm -rf -- "$PREFIX"' EXIT
@@ -15,7 +17,7 @@ FIRST="$("$PREFIX/bin/csgraph" --version)"
 PREFIX="$PREFIX" "$SOURCE/install.sh"
 SECOND="$("$PREFIX/bin/csgraph" --version)"
 
-[[ "$FIRST" == "csgraph 1.0.0" ]]
+[[ "$FIRST" == "csgraph $VERSION" ]]
 [[ "$SECOND" == "$FIRST" ]]
 [[ -x "$PREFIX/bin/code-system-graph-hooks" ]]
 [[ -f "$PREFIX/share/code-system-graph/install-manifest-v1.txt" ]]

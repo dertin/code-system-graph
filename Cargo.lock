@@ -398,7 +398,7 @@ dependencies = [
 
 [[package]]
 name = "code-system-graph"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "anyhow",
  "atomic-write-file",
@@ -431,7 +431,7 @@ dependencies = [
 
 [[package]]
 name = "code-system-graph-core"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "async-trait",
  "atomic-write-file",
@@ -478,7 +478,7 @@ dependencies = [
 
 [[package]]
 name = "code-system-graph-hooks"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "atomic-write-file",
  "blake3",
@@ -493,7 +493,7 @@ dependencies = [
 
 [[package]]
 name = "code-system-graph-model"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "blake3",
  "camino",
@@ -505,7 +505,7 @@ dependencies = [
 
 [[package]]
 name = "code-system-graph-store-sqlite"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "blake3",
  "code-system-graph-model",
