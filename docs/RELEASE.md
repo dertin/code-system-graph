@@ -93,11 +93,11 @@ checksum file covering the archive and SBOM.
 
 Both binary crates declare `cargo-binstall` metadata for this archive layout. The configuration
 accepts only the official release archive and disables both QuickInstall and source-compilation
-fallbacks. Before recommending Binstall, publish both crates, attach the archive at the exact URL
-declared by their metadata, and verify installation of both binaries from the public release.
+fallbacks. Publish both crates, attach the archive at the exact URL declared by their metadata,
+and verify installation of both binaries from the public release before announcing the release.
 
-Until that public verification succeeds, the user documentation must continue to recommend
-installation from a trusted checkout. Afterward, replace that command with:
+The README and [Installation](INSTALLATION.md) recommend `cargo binstall` for prebuilt Linux
+x86_64 binaries and `cargo install` from crates.io as the public installation paths:
 
 ```text
 cargo binstall code-system-graph code-system-graph-hooks

@@ -5,30 +5,28 @@ for maintainers are in [Release engineering](RELEASE.md).
 
 ## Current availability
 
-The source version is `1.0.0`, but no public GitHub release or signed artifact has been published.
-Linux x86_64 is the only installation path validated locally. Workflows exist for other targets,
-but configured CI is not evidence that those platforms pass.
+Code System Graph `1.0.0` is published on [crates.io](https://crates.io/crates/code-system-graph)
+and [GitHub Releases](https://github.com/dertin/code-system-graph/releases). Linux x86_64 is the
+only platform validated locally for build, tests, package lifecycle, and uninstall. Workflows exist
+for other targets, but configured CI is not evidence that those platforms pass.
 
-Until a release is published, install only from a checkout you trust.
-
-## Install from source in one line
+## Install with cargo-binstall (recommended)
 
 Requirements:
 
-- the latest stable Rust toolchain; the minimum supported Rust version (MSRV) is 1.97.1;
-- Cargo and Git;
-- a trusted checkout of this repository.
+- Cargo;
+- [cargo-binstall](https://github.com/cargo-bins/cargo-binstall);
+- Linux x86_64 for the current prebuilt release archive.
 
-From the repository root:
-
-```bash
-cargo +stable install --locked --path crates/code-system-graph-cli && cargo +stable install --locked --path crates/code-system-graph-hooks
-```
-
-This builds and installs:
+No Rust compiler is required. cargo-binstall downloads the official release archive declared by the
+crate metadata and installs:
 
 - `csgraph`, the CLI and MCP server;
 - `code-system-graph-hooks`, the optional agent-routing runtime.
+
+```bash
+cargo binstall code-system-graph code-system-graph-hooks
+```
 
 Cargo normally writes both binaries to `$HOME/.cargo/bin`. Add that directory to `PATH`, then
 verify:
@@ -42,11 +40,42 @@ The second binary is an internal runtime, not a user-facing CLI. It is required 
 agent routing hooks, but installing both avoids a later partial setup. Manage it through
 `csgraph hooks ...`.
 
+Do not substitute an unofficial download URL or third-party binary mirror.
+
+## Install from crates.io
+
+Requirements:
+
+- the latest stable Rust toolchain; the minimum supported Rust version (MSRV) is 1.97.1;
+- Cargo.
+
+```bash
+cargo install code-system-graph code-system-graph-hooks
+```
+
+This builds and installs the same binaries as the binstall path. Verify with the commands above.
+
+## Install from a trusted checkout
+
+Requirements:
+
+- the latest stable Rust toolchain; MSRV is 1.97.1;
+- Cargo and Git;
+- a trusted checkout of this repository.
+
+From the repository root:
+
+```bash
+cargo +stable install --locked --path crates/code-system-graph-cli && cargo +stable install --locked --path crates/code-system-graph-hooks
+```
+
+Use this path for unreleased changes or local development.
+
 ## Install a prebuilt release archive
 
-This path becomes available only after an official release is published. Download the archive for
-your exact target, the release CycloneDX SBOM, and `SHA256SUMS` from the official release page. Keep
-all three files in one directory.
+Download the archive for your exact target, the release CycloneDX SBOM, and `SHA256SUMS` from the
+[official release page](https://github.com/dertin/code-system-graph/releases). Keep all three files
+in one directory.
 
 For a Linux x86_64 archive:
 
@@ -85,6 +114,20 @@ implementation context afterward, follow [Use CodeGraph with a workspace](CODEGR
 
 ## Upgrade
 
+### cargo-binstall installation
+
+```bash
+cargo binstall --force code-system-graph code-system-graph-hooks
+```
+
+### crates.io installation
+
+```bash
+cargo install code-system-graph code-system-graph-hooks
+```
+
+Cargo replaces the installed binaries when a newer version is available on crates.io.
+
 ### Source installation
 
 Update the trusted checkout, inspect the changes, and rerun the one-line source installation. Cargo
@@ -99,13 +142,13 @@ The package installer preserves replaced binaries under:
 $PREFIX/share/code-system-graph/backups/
 ```
 
-The unpublished 1.0.0 build supports one exact initial database schema. An incompatible
-local database is disposable: remove it and run a full scan. Backup and restore accept only
-that exact schema and never migrate it.
+The 1.0.0 release supports one exact initial database schema. An incompatible local database is
+disposable: remove it and run a full scan. Backup and restore accept only that exact schema and
+never migrate it.
 
 ## Uninstall
 
-### Cargo installation
+### Cargo or cargo-binstall installation
 
 ```bash
 cargo uninstall code-system-graph
@@ -139,7 +182,7 @@ Delete workspace data separately only after confirming that it is no longer need
 
 | Platform | Status |
 | --- | --- |
-| Linux x86_64 | Locally validated for build, tests, package lifecycle, and uninstall |
+| Linux x86_64 | Locally validated for build, tests, package lifecycle, binstall, and uninstall |
 | Linux ARM64 | Workflow configured; not validated on a release host |
 | macOS x86_64 / ARM64 | Workflow configured; not validated |
 | Windows x86_64 | Workflow configured; no validated native installer |

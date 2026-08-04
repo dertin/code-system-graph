@@ -8,6 +8,7 @@ Understand what connects your repositories and what a change could break before 
 
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 ![Source version](https://img.shields.io/badge/source-v1.0.0-orange.svg)
+[![crates.io](https://img.shields.io/crates/v/code-system-graph.svg)](https://crates.io/crates/code-system-graph)
 ![Platform](https://img.shields.io/badge/validated-Linux%20x86__64-1793d1.svg)
 ![Privacy](https://img.shields.io/badge/privacy-local%20%7C%20no%20telemetry-2ea44f.svg)
 ![Agents](https://img.shields.io/badge/agents-5%20supported-7c3aed.svg)
@@ -25,11 +26,6 @@ Code System Graph builds a local, evidence-backed map of the boundaries between 
 APIs, events, schemas, packages, databases, deployments, tests, owners, and documentation. Your
 coding agent can then answer system-level questions that are difficult to solve by searching one
 repository at a time.
-
-> **Release status:** the source is at version `1.0.0`, but no public release artifact has been
-> published yet. Linux x86_64 is the only platform validated locally. The installation command
-> below works from a trusted checkout; see [Installation](docs/INSTALLATION.md) for the exact
-> support status.
 
 ## What problem does it solve?
 
@@ -124,20 +120,41 @@ validation matrix remains in [Extractor coverage](docs/EXTRACTOR_COVERAGE.md).
 
 ## Get started
 
-### 1. Install in one line
+### 1. Install
 
-From a trusted checkout, with the latest stable Rust toolchain available:
+Linux x86_64 is the validated installation target for prebuilt binaries and release archives. See
+[Installation](docs/INSTALLATION.md) for platform status, verification, upgrades, and uninstall.
+
+**Recommended: prebuilt binaries with cargo-binstall** (no Rust compiler required):
+
+```bash
+cargo binstall code-system-graph code-system-graph-hooks
+```
+
+Requires Cargo and [cargo-binstall](https://github.com/cargo-bins/cargo-binstall). Both binaries are
+installed to Cargo's binary directory, normally `$HOME/.cargo/bin`.
+
+**From crates.io** (builds locally; requires Rust 1.97.1 or newer):
+
+```bash
+cargo install code-system-graph code-system-graph-hooks
+```
+
+**From a trusted checkout** (for development or unreleased changes):
 
 ```bash
 cargo +stable install --locked --path crates/code-system-graph-cli && cargo +stable install --locked --path crates/code-system-graph-hooks
 ```
 
-This installs `csgraph` and its optional agent-hook runtime in Cargo's binary directory, normally
-`$HOME/.cargo/bin`. The workspace's minimum supported Rust version (MSRV) is 1.97.1.
+Verify either path:
 
-No Rust toolchain is needed when installing a prebuilt release archive, but no public archive
-exists yet. Do not use an unverified third-party download. See [Installation](docs/INSTALLATION.md)
-for package verification, upgrades, and uninstall.
+```bash
+csgraph --version
+command -v code-system-graph-hooks
+```
+
+`code-system-graph-hooks` is an internal runtime for optional agent routing hooks, not a
+user-facing CLI. Installing both avoids a later partial setup.
 
 ### 2. Describe the repositories in your system
 
