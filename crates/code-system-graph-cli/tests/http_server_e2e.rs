@@ -489,8 +489,17 @@ async fn cancellation_should_stop_accepting_connections() -> anyhow::Result<()> 
         .timeout(Duration::from_millis(500))
         .build()?;
 
+    let startup_deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let mut accepted_before_cancellation = false;
+    while tokio::time::Instant::now() < startup_deadline {
+        if server_serves_workspace(&client, address, &workspace).await {
+            accepted_before_cancellation = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
     assert!(
-        server_serves_workspace(&client, address, &workspace).await,
+        accepted_before_cancellation,
         "server should accept connections before cancellation"
     );
 
