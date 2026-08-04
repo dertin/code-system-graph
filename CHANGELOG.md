@@ -13,7 +13,7 @@ Versioning.
   `NOFOLLOW` protection while supporting the standard symlinked `/var` path on macOS.
 - Pinned the CLI and its tests to the bundled SQLite implementation so macOS and Windows use the
   same validated database engine as the persistence crate.
-- Raised the supervised worker thread stack on Windows to match the extraction workload without
+- Raised the `csgraph` executable stack on Windows to match the extraction workload without
   changing process memory or execution-policy limits.
 - Serialized native Windows and macOS test execution to stay within platform file-descriptor and
   filesystem concurrency limits while retaining the complete test suite.
