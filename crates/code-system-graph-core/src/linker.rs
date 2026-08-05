@@ -46,6 +46,20 @@ pub struct HttpLinkResolution {
     pub ambiguities: Vec<HttpLinkAmbiguity>,
 }
 
+impl HttpLinkResolution {
+    pub(crate) fn into_legacy_result(self) -> Result<Vec<Edge>, LinkError> {
+        let Self { edges, ambiguities } = self;
+        let Some(ambiguity) = ambiguities.into_iter().next() else {
+            return Ok(edges);
+        };
+        Err(LinkError::AmbiguousProvider {
+            method: ambiguity.method,
+            path: ambiguity.path,
+            candidates: ambiguity.candidates,
+        })
+    }
+}
+
 /// Endpoint field being resolved for a manual relationship.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ManualLinkEndpoint {
@@ -152,15 +166,15 @@ pub struct ManualLinkResolution {
 /// Consumers without an observed provider remain unlinked. Callers must represent that as a
 /// coverage gap rather than concluding that no dependency exists.
 ///
-/// Duplicate providers are omitted without selecting an arbitrary target. Use
-/// [`link_http_boundaries_with_ambiguities`] when the caller must report those decisions.
+/// Duplicate providers remain fail-closed for compatibility. Use
+/// [`link_http_boundaries_with_ambiguities`] to preserve ambiguities as data while continuing with
+/// unrelated contracts.
 ///
 /// # Errors
 ///
-/// The compatibility wrapper currently returns `Ok`; the result shape is retained so existing
-/// callers do not require an API migration in the patch release.
+/// Returns [`LinkError::AmbiguousProvider`] instead of silently omitting an ambiguous relationship.
 pub fn link_http_boundaries(boundaries: &[HttpBoundary]) -> Result<Vec<Edge>, LinkError> {
-    Ok(link_http_boundaries_with_ambiguities(boundaries).edges)
+    link_http_boundaries_with_ambiguities(boundaries).into_legacy_result()
 }
 
 /// Links exact HTTP boundaries while preserving duplicate-provider decisions.
@@ -558,7 +572,7 @@ mod tests {
     };
 
     use super::{
-        ManualLinkEndpoint, ManualLinkError, link_http_boundaries, link_http_boundaries_with_ambiguities, merge_affected_link_neighborhoods, resolve_manual_links
+        LinkError, ManualLinkEndpoint, ManualLinkError, link_http_boundaries, link_http_boundaries_with_ambiguities, merge_affected_link_neighborhoods, resolve_manual_links
     };
     use crate::{HttpConsumerConfig, ManualLinkConfig, extract_openapi};
 
@@ -642,6 +656,14 @@ paths:
         assert_eq!(result.ambiguities[0].method, "POST");
         assert_eq!(result.ambiguities[0].path, "/api/orders");
         assert_eq!(result.ambiguities[0].candidates.len(), 2);
+    }
+
+    #[test]
+    fn link_http_boundaries_compatibility_wrapper_should_reject_duplicate_providers() {
+        let result =
+            link_http_boundaries(&[consumer(), provider("repo:api-a"), provider("repo:api-b")]);
+
+        assert!(matches!(result, Err(LinkError::AmbiguousProvider { .. })));
     }
 
     #[test]

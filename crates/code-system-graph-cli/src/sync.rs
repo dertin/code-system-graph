@@ -297,27 +297,22 @@ pub(crate) fn sync_workspace_direct(
     let targets = workspace_sync_targets(config_path, overrides)?;
     persist_watch_targets(database_path, &workspace, &targets)?;
     let binary = codegraph_binary(overrides);
+    let codegraph_timeout = Duration::from_millis(policy.max_codegraph_sync_wall_time_ms_per_repo);
     let codegraph = synchronize_codegraph_targets(
         &targets,
         synchronize_codegraph,
-        |target| {
-            run_codegraph_status(
-                &binary,
-                target,
-                Duration::from_millis(policy.max_codegraph_sync_wall_time_ms_per_repo),
-            )
-        },
-        |path| {
-            run_codegraph_sync(
-                &binary,
-                path,
-                Duration::from_millis(policy.max_codegraph_sync_wall_time_ms_per_repo),
-            )
-        },
+        codegraph_timeout,
+        |target, deadline| run_codegraph_status(&binary, target, deadline),
+        |path, deadline| run_codegraph_sync(&binary, path, deadline),
     );
     let mut scan_overrides = overrides.clone();
-    scan_overrides.codegraph = codegraph.changed_count > 0;
-    let scan = super::scan_workspace_direct(config_path, database_path, &scan_overrides)?;
+    scan_overrides.codegraph = codegraph.synchronized_count > 0;
+    let scan = super::scan_workspace_direct_for_sync(
+        config_path,
+        database_path,
+        &scan_overrides,
+        codegraph.changed_count == 0,
+    )?;
     Ok(SyncSummary {
         schema_version: 1,
         execution: code_system_graph_core::ExecutionSummary::default(),
@@ -329,12 +324,18 @@ pub(crate) fn sync_workspace_direct(
 fn run_codegraph_status(
     binary: &OsStr,
     target: &SyncTarget,
-    timeout: Duration,
+    deadline: Instant,
 ) -> Result<ProviderStatus, String> {
     let binary = binary.to_owned();
     let alias = target.alias.clone();
     let project_path = target.path.clone();
     std::thread::spawn(move || {
+        let timeout = deadline.saturating_duration_since(Instant::now());
+        if timeout.is_zero() {
+            return Err(
+                "CodeGraph status exceeded the repository synchronization deadline".to_owned(),
+            );
+        }
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -419,8 +420,11 @@ fn codegraph_binary(overrides: &ScanOverrides) -> OsString {
 fn run_codegraph_sync(
     binary: &OsStr,
     project_path: &Path,
-    timeout: Duration,
+    deadline: Instant,
 ) -> Result<(), String> {
+    if Instant::now() >= deadline {
+        return Err("codegraph sync exceeded the repository synchronization deadline".to_owned());
+    }
     let mut command = Command::new(binary);
     command
         .arg("sync")
@@ -434,7 +438,6 @@ fn run_codegraph_sync(
     let mut child = command
         .spawn()
         .map_err(|error| format!("failed to start codegraph sync: {error}"))?;
-    let started = Instant::now();
     let status = loop {
         if let Some(status) = child
             .try_wait()
@@ -442,13 +445,13 @@ fn run_codegraph_sync(
         {
             break status;
         }
-        if started.elapsed() >= timeout {
+        if Instant::now() >= deadline {
             super::worker::terminate_process_tree(child.id());
             terminate_codegraph_process_group(&mut child);
-            return Err(format!(
-                "codegraph sync exceeded {} ms and was terminated",
-                timeout.as_millis()
-            ));
+            return Err(
+                "codegraph sync exceeded the repository synchronization deadline and was terminated"
+                    .to_owned(),
+            );
         }
         std::thread::sleep(Duration::from_millis(50));
     };
@@ -510,25 +513,27 @@ struct CodeGraphSyncObservation {
 fn synchronize_codegraph_targets<I, S>(
     targets: &[SyncTarget],
     enabled: bool,
+    timeout: Duration,
     mut inspect: I,
     mut synchronize: S,
 ) -> CodeGraphSyncSummary
 where
-    I: FnMut(&SyncTarget) -> Result<ProviderStatus, String>,
-    S: FnMut(&Path) -> Result<(), String>,
+    I: FnMut(&SyncTarget, Instant) -> Result<ProviderStatus, String>,
+    S: FnMut(&Path, Instant) -> Result<(), String>,
 {
     let mut observations = Vec::with_capacity(targets.len());
     let mut repositories = Vec::with_capacity(targets.len());
     if enabled {
         for target in targets {
+            let deadline = Instant::now() + timeout;
             let observation = if target.path.join(".codegraph").is_dir() {
-                match inspect(target) {
+                match inspect(target, deadline) {
                     Ok(ProviderStatus::Available) => CodeGraphSyncObservation {
                         state: CodeGraphSyncState::Synchronized,
                         detail: None,
                         index_changed: false,
                     },
-                    Ok(ProviderStatus::Stale) => match synchronize(&target.path) {
+                    Ok(ProviderStatus::Stale) => match synchronize(&target.path, deadline) {
                         Ok(()) => CodeGraphSyncObservation {
                             state: CodeGraphSyncState::Synchronized,
                             detail: None,
@@ -672,11 +677,12 @@ mod tests {
         let report = synchronize_codegraph_targets(
             &targets,
             true,
-            |target| {
+            Duration::from_secs(1),
+            |target, _| {
                 called.borrow_mut().push(target.path.clone());
                 Err("failure ".repeat(600))
             },
-            |_| panic!("failed status inspection must not synchronize"),
+            |_, _| panic!("failed status inspection must not synchronize"),
         );
 
         assert_eq!(called.into_inner(), vec![initialized]);
@@ -704,8 +710,9 @@ mod tests {
         let report = synchronize_codegraph_targets(
             &[target],
             false,
-            |_| panic!("disabled synchronization must not inspect CodeGraph"),
-            |_| panic!("disabled synchronization must not invoke CodeGraph"),
+            Duration::from_secs(1),
+            |_, _| panic!("disabled synchronization must not inspect CodeGraph"),
+            |_, _| panic!("disabled synchronization must not invoke CodeGraph"),
         );
         assert!(!report.enabled);
         assert_eq!(report.repository_count, 1);
@@ -725,14 +732,15 @@ mod tests {
         let report = synchronize_codegraph_targets(
             &targets,
             true,
-            |target| {
+            Duration::from_secs(1),
+            |target, _| {
                 if target.alias == "stale" {
                     Ok(ProviderStatus::Stale)
                 } else {
                     Ok(ProviderStatus::Available)
                 }
             },
-            |path| {
+            |path, _| {
                 synchronized.borrow_mut().push(path.to_path_buf());
                 Ok(())
             },
@@ -742,6 +750,36 @@ mod tests {
         assert_eq!(report.synchronized_count, 2);
         assert_eq!(report.changed_count, 1);
         assert_eq!(report.unchanged_count, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn synchronization_should_share_one_deadline_between_status_and_sync() -> anyhow::Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let repository = temporary.path().join("stale");
+        std::fs::create_dir_all(repository.join(".codegraph"))?;
+        let inspected_deadline = RefCell::new(None);
+        let synchronized_deadline = RefCell::new(None);
+
+        let report = synchronize_codegraph_targets(
+            &[target("stale", repository)],
+            true,
+            Duration::from_secs(1),
+            |_, deadline| {
+                inspected_deadline.replace(Some(deadline));
+                Ok(ProviderStatus::Stale)
+            },
+            |_, deadline| {
+                synchronized_deadline.replace(Some(deadline));
+                Ok(())
+            },
+        );
+
+        assert_eq!(report.changed_count, 1);
+        assert_eq!(
+            inspected_deadline.into_inner(),
+            synchronized_deadline.into_inner()
+        );
         Ok(())
     }
 
@@ -762,9 +800,12 @@ mod tests {
         )?;
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700))?;
 
-        let error =
-            run_codegraph_sync(script.as_os_str(), temporary.path(), Duration::from_secs(2))
-                .expect_err("test process must time out");
+        let error = run_codegraph_sync(
+            script.as_os_str(),
+            temporary.path(),
+            Instant::now() + Duration::from_secs(2),
+        )
+        .expect_err("test process must time out");
         assert!(
             error.contains("was terminated"),
             "unexpected error: {error}"
@@ -796,8 +837,12 @@ mod tests {
         )?;
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700))?;
 
-        run_codegraph_sync(script.as_os_str(), temporary.path(), Duration::from_secs(2))
-            .map_err(anyhow::Error::msg)?;
+        run_codegraph_sync(
+            script.as_os_str(),
+            temporary.path(),
+            Instant::now() + Duration::from_secs(2),
+        )
+        .map_err(anyhow::Error::msg)?;
         let pid = std::fs::read_to_string(&descendant_pid)?.parse::<i32>()?;
         for _ in 0..20 {
             if nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_err() {

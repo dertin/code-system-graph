@@ -1177,14 +1177,37 @@ pub fn scan_workspace_with_worker_executable(
 }
 
 #[doc(hidden)]
-#[expect(
-    clippy::too_many_lines,
-    reason = "Atomic scan orchestration keeps lock, resume, publication, and summary sequencing visible"
-)]
 pub(crate) fn scan_workspace_direct(
     config_path: &Path,
     database_path: &Path,
     overrides: &ScanOverrides,
+) -> Result<ScanSummary, ApplicationError> {
+    scan_workspace_direct_with_mode(config_path, database_path, overrides, false)
+}
+
+pub(crate) fn scan_workspace_direct_for_sync(
+    config_path: &Path,
+    database_path: &Path,
+    overrides: &ScanOverrides,
+    reuse_unchanged_with_codegraph: bool,
+) -> Result<ScanSummary, ApplicationError> {
+    scan_workspace_direct_with_mode(
+        config_path,
+        database_path,
+        overrides,
+        reuse_unchanged_with_codegraph,
+    )
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "Atomic scan orchestration keeps lock, resume, publication, and summary sequencing visible"
+)]
+fn scan_workspace_direct_with_mode(
+    config_path: &Path,
+    database_path: &Path,
+    overrides: &ScanOverrides,
+    reuse_unchanged_with_codegraph: bool,
 ) -> Result<ScanSummary, ApplicationError> {
     let context = load_workspace_context(config_path, overrides)?;
     worker::report_progress(code_system_graph_core::JobPhase::Configuration, 1);
@@ -1392,7 +1415,7 @@ pub(crate) fn scan_workspace_direct(
             &context.extraction_budgets,
         )
         && previous_communities.is_some()
-        && !overrides.codegraph
+        && (!overrides.codegraph || reuse_unchanged_with_codegraph)
     {
         work_state
             .complete_candidate(&context.manifest.name)

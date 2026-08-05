@@ -134,18 +134,18 @@ pub fn declared_implementation(
 ///
 /// Tests with no observed provider remain unlinked instead of inventing a target.
 ///
-/// Duplicate providers are omitted without selecting an arbitrary target. Use
-/// [`link_declared_tests_with_ambiguities`] when the caller must report those decisions.
+/// Duplicate providers remain fail-closed for compatibility. Use
+/// [`link_declared_tests_with_ambiguities`] to preserve ambiguities as data while continuing with
+/// unrelated contracts.
 ///
 /// # Errors
 ///
-/// The compatibility wrapper currently returns `Ok`; the result shape is retained so existing
-/// callers do not require an API migration in the patch release.
+/// Returns [`LinkError::AmbiguousProvider`] instead of silently omitting an ambiguous relationship.
 pub fn link_declared_tests(
     tests: &[DeclaredTestCase],
     boundaries: &[HttpBoundary],
 ) -> Result<Vec<Edge>, LinkError> {
-    Ok(link_declared_tests_with_ambiguities(tests, boundaries).edges)
+    link_declared_tests_with_ambiguities(tests, boundaries).into_legacy_result()
 }
 
 /// Links declared tests while preserving duplicate-provider decisions.
@@ -210,18 +210,18 @@ pub fn link_declared_tests_with_ambiguities(
 
 /// Links HTTP provider contracts to declared source implementations.
 ///
-/// Duplicate providers are omitted without selecting an arbitrary target. Use
-/// [`link_declared_implementations_with_ambiguities`] when the caller must report those decisions.
+/// Duplicate providers remain fail-closed for compatibility. Use
+/// [`link_declared_implementations_with_ambiguities`] to preserve ambiguities as data while
+/// continuing with unrelated contracts.
 ///
 /// # Errors
 ///
-/// The compatibility wrapper currently returns `Ok`; the result shape is retained so existing
-/// callers do not require an API migration in the patch release.
+/// Returns [`LinkError::AmbiguousProvider`] instead of silently omitting an ambiguous relationship.
 pub fn link_declared_implementations(
     implementations: &[DeclaredImplementation],
     boundaries: &[HttpBoundary],
 ) -> Result<Vec<Edge>, LinkError> {
-    Ok(link_declared_implementations_with_ambiguities(implementations, boundaries).edges)
+    link_declared_implementations_with_ambiguities(implementations, boundaries).into_legacy_result()
 }
 
 /// Links declared implementations while preserving duplicate-provider decisions.

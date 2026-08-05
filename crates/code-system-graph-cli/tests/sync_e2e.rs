@@ -52,19 +52,29 @@ fn run_sync_with_arguments(
 
 #[cfg(unix)]
 #[test]
-fn initialized_current_codegraph_should_not_sync_or_republish() -> anyhow::Result<()> {
+fn initialized_current_codegraph_should_enrich_native_changes_without_republishing_noops()
+-> anyhow::Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
     let temporary = tempfile::tempdir()?;
     let (manifest, database) = write_workspace(temporary.path())?;
+    std::fs::create_dir(temporary.path().join("api/src"))?;
+    std::fs::write(
+        temporary.path().join("api/src/lib.rs"),
+        "use axum::{Router, routing::get};\npub fn router() -> Router { Router::new().route(\"/before\", get(handler)) }\nasync fn handler() {}\n",
+    )?;
     std::fs::create_dir(temporary.path().join("api/.codegraph"))?;
     let invocation_log = temporary.path().join("codegraph.log");
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fixtures/codegraph/fake/codegraph.py")
+        .canonicalize()?;
     let binary = temporary.path().join("codegraph-current");
     std::fs::write(
         &binary,
         format!(
-            "#!/bin/sh\ncase \"$1\" in\n  --version) echo 1.5.0 ;;\n  status) printf '%s\\n' '{{\"initialized\":true,\"version\":\"1.5.0\",\"pendingChanges\":{{\"added\":0,\"modified\":0,\"removed\":0}},\"worktreeMismatch\":null,\"index\":{{\"reindexRecommended\":false,\"state\":\"complete\"}}}}' ;;\n  sync) printf 'sync\\n' >> '{}'; exit 99 ;;\n  *) exit 98 ;;\nesac\n",
-            invocation_log.display()
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nexec python3 '{}' \"$@\"\n",
+            invocation_log.display(),
+            fixture.display()
         ),
     )?;
     std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700))?;
@@ -75,15 +85,104 @@ fn initialized_current_codegraph_should_not_sync_or_republish() -> anyhow::Resul
 
     let first = run_sync_with_arguments(&manifest, &database, &arguments)?;
     let second = run_sync_with_arguments(&manifest, &database, &arguments)?;
+    let after_second = std::fs::read_to_string(&invocation_log)?;
+    let affected_after_second = after_second
+        .lines()
+        .filter(|line| line.starts_with("affected "))
+        .count();
+
+    std::fs::write(
+        temporary.path().join("api/openapi.yaml"),
+        "openapi: 3.1.0\ninfo: { title: API, version: 1 }\npaths:\n  /after:\n    get: {}\n",
+    )?;
+    let third = run_sync_with_arguments(&manifest, &database, &arguments)?;
+    let after_third = std::fs::read_to_string(&invocation_log)?;
+    let affected_after_third = after_third
+        .lines()
+        .filter(|line| line.starts_with("affected "))
+        .count();
+    let fourth = run_sync_with_arguments(&manifest, &database, &arguments)?;
+    let final_invocations = std::fs::read_to_string(&invocation_log)?;
+    let affected_final = final_invocations
+        .lines()
+        .filter(|line| line.starts_with("affected "))
+        .count();
 
     assert!(!first.scan.reused_snapshot);
+    assert!(affected_after_second > 0);
     assert!(second.scan.reused_snapshot);
     assert_eq!(second.scan.changed_input_count, 0);
     assert_eq!(second.scan.snapshot_id, first.scan.snapshot_id);
     assert_eq!(second.codegraph.synchronized_count, 1);
     assert_eq!(second.codegraph.changed_count, 0);
     assert_eq!(second.codegraph.unchanged_count, 1);
-    assert!(!invocation_log.exists());
+    assert!(third.scan.changed_input_count > 0);
+    assert!(!third.scan.reused_snapshot);
+    assert_eq!(third.codegraph.changed_count, 0);
+    assert!(affected_after_third > affected_after_second);
+    assert!(fourth.scan.reused_snapshot);
+    assert_eq!(fourth.scan.snapshot_id, third.scan.snapshot_id);
+    assert_eq!(affected_final, affected_after_third);
+    assert!(
+        !final_invocations
+            .lines()
+            .any(|line| line.starts_with("sync "))
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn stale_codegraph_index_should_corroborate_even_without_native_changes() -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temporary = tempfile::tempdir()?;
+    let (manifest, database) = write_workspace(temporary.path())?;
+    std::fs::create_dir(temporary.path().join("api/src"))?;
+    std::fs::write(
+        temporary.path().join("api/src/lib.rs"),
+        "use axum::{Router, routing::get};\npub fn router() -> Router { Router::new().route(\"/before\", get(handler)) }\nasync fn handler() {}\n",
+    )?;
+    let initial = run_sync_with_arguments(
+        &manifest,
+        &database,
+        &[std::ffi::OsStr::new("--no-codegraph")],
+    )?;
+    std::fs::create_dir(temporary.path().join("api/.codegraph"))?;
+    let invocation_log = temporary.path().join("codegraph.log");
+    let synchronized_marker = temporary.path().join("synchronized");
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fixtures/codegraph/fake/codegraph.py")
+        .canonicalize()?;
+    let binary = temporary.path().join("codegraph-stale");
+    std::fs::write(
+        &binary,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$1\" in\n  status)\n    if [ -f '{}' ]; then modified=0; else modified=1; fi\n    printf '{{\"initialized\":true,\"version\":\"1.5.0\",\"pendingChanges\":{{\"added\":0,\"modified\":%s,\"removed\":0}},\"worktreeMismatch\":null,\"index\":{{\"reindexRecommended\":false,\"state\":\"complete\"}}}}\\n' \"$modified\"\n    ;;\n  sync) : > '{}' ;;\n  *) exec python3 '{}' \"$@\" ;;\nesac\n",
+            invocation_log.display(),
+            synchronized_marker.display(),
+            synchronized_marker.display(),
+            fixture.display()
+        ),
+    )?;
+    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700))?;
+    let arguments = [
+        std::ffi::OsStr::new("--codegraph-binary"),
+        binary.as_os_str(),
+    ];
+
+    let synchronized = run_sync_with_arguments(&manifest, &database, &arguments)?;
+    let current = run_sync_with_arguments(&manifest, &database, &arguments)?;
+    let invocations = std::fs::read_to_string(&invocation_log)?;
+
+    assert_eq!(synchronized.scan.changed_input_count, 0);
+    assert!(!synchronized.scan.reused_snapshot);
+    assert_eq!(synchronized.codegraph.changed_count, 1);
+    assert_eq!(synchronized.scan.snapshot_id, initial.scan.snapshot_id);
+    assert!(invocations.lines().any(|line| line.starts_with("sync ")));
+    assert!(invocations.lines().any(|line| line.starts_with("query ")));
+    assert!(current.scan.reused_snapshot);
+    assert_eq!(current.codegraph.unchanged_count, 1);
     Ok(())
 }
 
