@@ -196,6 +196,7 @@ pub fn run_worker_from_stdio() -> Result<(), String> {
 
 fn failure_message(error: ApplicationError) -> WorkerMessage {
     let retryable = retryable_application_error(&error);
+    let diagnostic = safe_application_diagnostic(&error);
     let failure = match error {
         ApplicationError::ExtractionLimit(error)
         | ApplicationError::HttpExtraction(
@@ -217,13 +218,13 @@ fn failure_message(error: ApplicationError) -> WorkerMessage {
         ApplicationError::ExecutionLimit(error) => WorkerFailure::ExecutionLimit { error },
         ApplicationError::PartialScanBudgetChanged => WorkerFailure::PartialScanBudgetChanged,
         error if retryable => WorkerFailure::Transient {
-            message: error.to_string(),
+            message: bounded_worker_diagnostic(&error.to_string()),
         },
         error => {
             let exit_code = application_exit_code(&error);
             WorkerFailure::Other {
                 exit_code,
-                message: format!("supervised worker failed with {exit_code:?}"),
+                message: diagnostic,
             }
         }
     };
@@ -231,6 +232,160 @@ fn failure_message(error: ApplicationError) -> WorkerMessage {
         schema_version: PROTOCOL_VERSION,
         failure,
     }
+}
+
+fn safe_application_diagnostic(error: &ApplicationError) -> String {
+    let detail = match error {
+        ApplicationError::ReadFile { path, source } => {
+            format!("failed to read `{}` ({:?})", path.display(), source.kind())
+        }
+        ApplicationError::WriteFile { path, source } => {
+            format!(
+                "failed to create `{}` ({:?})",
+                path.display(),
+                source.kind()
+            )
+        }
+        ApplicationError::UnknownOverrideRepository(alias) => {
+            format!("CLI override references unknown repository alias `{alias}`")
+        }
+        ApplicationError::WorkspaceNameMismatch {
+            requested,
+            manifest,
+        } => format!("workspace name `{requested}` does not match manifest name `{manifest}`"),
+        ApplicationError::ArtifactOutsideCheckout { path, checkout } => format!(
+            "artifact `{}` resolves outside checkout `{}`",
+            path.display(),
+            checkout.display()
+        ),
+        ApplicationError::UnsafeArtifactPath => {
+            "artifact path contains unsafe metadata characters".to_owned()
+        }
+        ApplicationError::PartialScanBudgetChanged => {
+            "extraction budgets changed; run a full scan without `--repo`".to_owned()
+        }
+        ApplicationError::Graphql(GraphqlExtractionError::InvalidGraphql {
+            source_path, ..
+        }) => format!("invalid GraphQL document in `{source_path}`"),
+        ApplicationError::Graphql(GraphqlExtractionError::InvalidJson {
+            source_path,
+            line,
+            ..
+        }) => format!("invalid persisted-operation JSON in `{source_path}` at line {line}"),
+        ApplicationError::Graphql(GraphqlExtractionError::UnsupportedPersistedManifest {
+            source_path,
+        }) => format!("unsupported persisted-operation manifest in `{source_path}`"),
+        ApplicationError::HttpExtraction(error) => error.to_string(),
+        ApplicationError::Link(code_system_graph_core::LinkError::AmbiguousProvider {
+            method,
+            path,
+            candidates,
+        }) => format!(
+            "ambiguous HTTP provider for {method} {path}; stable candidates: {}",
+            candidates.join(", ")
+        ),
+        ApplicationError::Config(error) => safe_config_diagnostic(error),
+        ApplicationError::Manifest(_) => "workspace manifest is invalid".to_owned(),
+        ApplicationError::ManualLink(error) => {
+            format!("manual link configuration is invalid: {error}")
+        }
+        ApplicationError::RegistryAliasMissing(alias) => {
+            format!("validated registry omitted repository alias `{alias}`")
+        }
+        ApplicationError::Registry(_) => "repository registry is invalid".to_owned(),
+        ApplicationError::PackageManifest(_) => "package manifest extraction failed".to_owned(),
+        ApplicationError::GeneratedClient(_) => {
+            "generated-client metadata extraction failed".to_owned()
+        }
+        ApplicationError::Event(_) => "event contract extraction failed".to_owned(),
+        ApplicationError::Protobuf(_) => "Protobuf contract extraction failed".to_owned(),
+        ApplicationError::Data(_) => "database contract extraction failed".to_owned(),
+        ApplicationError::Infrastructure(_) => {
+            "infrastructure contract extraction failed".to_owned()
+        }
+        ApplicationError::Documentation(_) => "documentation extraction failed".to_owned(),
+        ApplicationError::ConfigExtraction(_) => "configuration-key extraction failed".to_owned(),
+        ApplicationError::SourceSyntax(_) => "source syntax inspection failed".to_owned(),
+        ApplicationError::InvalidSourceObservation(_) => {
+            "focused source observation failed structural validation".to_owned()
+        }
+        ApplicationError::BatchPlan(_) => "incremental extractor batch state is invalid".to_owned(),
+        ApplicationError::Store(_) => "workspace storage operation failed".to_owned(),
+        ApplicationError::Initialization(_) => "workspace initialization failed".to_owned(),
+        _ => format!(
+            "application operation failed with {:?}",
+            application_exit_code(error)
+        ),
+    };
+    bounded_worker_diagnostic(&detail)
+}
+
+fn safe_config_diagnostic(error: &code_system_graph_core::ConfigError) -> String {
+    match error {
+        code_system_graph_core::ConfigError::Read { path, source } => format!(
+            "failed to read repository config `{}` ({:?})",
+            path.display(),
+            source.kind()
+        ),
+        code_system_graph_core::ConfigError::Invalid { path, .. } => {
+            format!("invalid repository config `{}`", path.display())
+        }
+        code_system_graph_core::ConfigError::AmbiguousOpenApi { root, candidates } => format!(
+            "ambiguous OpenAPI auto-detection in `{}`; candidates: {}",
+            root.display(),
+            candidates.join(", ")
+        ),
+        other => other.to_string(),
+    }
+}
+
+fn bounded_worker_diagnostic(detail: &str) -> String {
+    const MAX_CHARS: usize = 512;
+    let mut bounded = String::with_capacity(detail.len().min(MAX_CHARS));
+    let mut previous_whitespace = false;
+    let mut truncated = false;
+    for character in detail.chars() {
+        if unsafe_diagnostic_character(character) {
+            continue;
+        }
+        if character.is_whitespace() {
+            if bounded.is_empty() || previous_whitespace {
+                continue;
+            }
+            if bounded.chars().count() >= MAX_CHARS {
+                truncated = true;
+                break;
+            }
+            bounded.push(' ');
+            previous_whitespace = true;
+            continue;
+        }
+        if bounded.chars().count() >= MAX_CHARS {
+            truncated = true;
+            break;
+        }
+        bounded.push(character);
+        previous_whitespace = false;
+    }
+    while bounded.ends_with(' ') {
+        bounded.pop();
+    }
+    if truncated {
+        bounded.push_str("...");
+    }
+    if bounded.is_empty() {
+        "application operation failed".to_owned()
+    } else {
+        bounded
+    }
+}
+
+fn unsafe_diagnostic_character(character: char) -> bool {
+    character.is_control()
+        || matches!(
+            character,
+            '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{200e}' | '\u{200f}'
+        )
 }
 
 fn retryable_application_error(error: &ApplicationError) -> bool {
@@ -1278,15 +1433,31 @@ mod tests {
                 .any(|bytes| bytes == secret.as_bytes())
         );
         assert!(matches!(
-            message,
+            &message,
             WorkerMessage::Failure {
                 failure: WorkerFailure::Other {
                     exit_code: code_system_graph_core::ExitCode::InvalidInput,
-                    ..
+                    message,
                 },
                 ..
-            }
+            } if message.contains("schema.graphql") && message.chars().count() <= 515
         ));
+    }
+
+    #[test]
+    fn worker_failure_diagnostic_should_be_bounded_and_actionable() {
+        let alias = "missing".repeat(200);
+        let message = failure_message(ApplicationError::UnknownOverrideRepository(alias));
+        let WorkerMessage::Failure {
+            failure: WorkerFailure::Other { message, .. },
+            ..
+        } = message
+        else {
+            panic!("other worker failure expected");
+        };
+
+        assert!(message.contains("unknown repository alias"));
+        assert!(message.chars().count() <= 515);
     }
 
     #[cfg(unix)]

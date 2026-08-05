@@ -5,9 +5,13 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use code_system_graph_core::{ConfigSource, EffectiveRepositoryConfig, IgnorePolicy};
+use code_system_graph_core::{
+    CodeGraphConfig, CodeGraphProvider, ConfigSource, EffectiveRepositoryConfig, IgnorePolicy, ProviderBudget, ProviderRequest, ProviderStatus
+};
+use code_system_graph_model::RepoId;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use tokio_util::sync::CancellationToken;
 
 use super::{
     ApplicationError, ScanOverrides, ScanSummary, load_workspace_context, work_database_instance_id
@@ -107,6 +111,12 @@ pub struct CodeGraphSyncSummary {
     pub repository_count: usize,
     /// Number of local indexes synchronized successfully.
     pub synchronized_count: usize,
+    /// Number of local indexes whose structured status required synchronization.
+    #[serde(default)]
+    pub changed_count: usize,
+    /// Number of initialized local indexes that were already current.
+    #[serde(default)]
+    pub unchanged_count: usize,
     /// Number of repositories without an initialized local index.
     pub skipped_count: usize,
     /// Number of external synchronization failures.
@@ -287,15 +297,26 @@ pub(crate) fn sync_workspace_direct(
     let targets = workspace_sync_targets(config_path, overrides)?;
     persist_watch_targets(database_path, &workspace, &targets)?;
     let binary = codegraph_binary(overrides);
-    let codegraph = synchronize_codegraph_targets(&targets, synchronize_codegraph, |path| {
-        run_codegraph_sync(
-            &binary,
-            path,
-            Duration::from_millis(policy.max_codegraph_sync_wall_time_ms_per_repo),
-        )
-    });
+    let codegraph = synchronize_codegraph_targets(
+        &targets,
+        synchronize_codegraph,
+        |target| {
+            run_codegraph_status(
+                &binary,
+                target,
+                Duration::from_millis(policy.max_codegraph_sync_wall_time_ms_per_repo),
+            )
+        },
+        |path| {
+            run_codegraph_sync(
+                &binary,
+                path,
+                Duration::from_millis(policy.max_codegraph_sync_wall_time_ms_per_repo),
+            )
+        },
+    );
     let mut scan_overrides = overrides.clone();
-    scan_overrides.codegraph = codegraph.synchronized_count > 0;
+    scan_overrides.codegraph = codegraph.changed_count > 0;
     let scan = super::scan_workspace_direct(config_path, database_path, &scan_overrides)?;
     Ok(SyncSummary {
         schema_version: 1,
@@ -303,6 +324,42 @@ pub(crate) fn sync_workspace_direct(
         scan,
         codegraph,
     })
+}
+
+fn run_codegraph_status(
+    binary: &OsStr,
+    target: &SyncTarget,
+    timeout: Duration,
+) -> Result<ProviderStatus, String> {
+    let binary = binary.to_owned();
+    let alias = target.alias.clone();
+    let project_path = target.path.clone();
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| format!("cannot start CodeGraph status runtime: {error}"))?;
+        let provider = CodeGraphProvider::new(CodeGraphConfig {
+            binary,
+            max_concurrent_processes: 1,
+            ..CodeGraphConfig::default()
+        })
+        .map_err(|error| format!("cannot configure CodeGraph status provider: {error}"))?;
+        runtime
+            .block_on(provider.index_status(ProviderRequest {
+                repo_id: RepoId::new(format!("sync:{alias}")),
+                project_path,
+                budget: ProviderBudget {
+                    timeout,
+                    max_output_bytes: 256 * 1024,
+                    max_items: 1,
+                },
+                cancellation: CancellationToken::new(),
+            }))
+            .map_err(|error| format!("cannot inspect CodeGraph status: {error}"))
+    })
+    .join()
+    .map_err(|_| "CodeGraph status worker terminated unexpectedly".to_owned())?
 }
 
 fn persist_watch_targets(
@@ -443,33 +500,65 @@ fn cleanup_exited_codegraph_process_group(process_id: u32) {
     super::worker::terminate_process_tree(process_id);
 }
 
-fn synchronize_codegraph_targets<F>(
+#[derive(Debug)]
+struct CodeGraphSyncObservation {
+    state: CodeGraphSyncState,
+    detail: Option<String>,
+    index_changed: bool,
+}
+
+fn synchronize_codegraph_targets<I, S>(
     targets: &[SyncTarget],
     enabled: bool,
-    mut synchronize: F,
+    mut inspect: I,
+    mut synchronize: S,
 ) -> CodeGraphSyncSummary
 where
-    F: FnMut(&Path) -> Result<(), String>,
+    I: FnMut(&SyncTarget) -> Result<ProviderStatus, String>,
+    S: FnMut(&Path) -> Result<(), String>,
 {
+    let mut observations = Vec::with_capacity(targets.len());
     let mut repositories = Vec::with_capacity(targets.len());
     if enabled {
         for target in targets {
-            let (state, detail) = if target.path.join(".codegraph").is_dir() {
-                match synchronize(&target.path) {
-                    Ok(()) => (CodeGraphSyncState::Synchronized, None),
-                    Err(detail) => (CodeGraphSyncState::Failed, Some(bounded_detail(&detail))),
+            let observation = if target.path.join(".codegraph").is_dir() {
+                match inspect(target) {
+                    Ok(ProviderStatus::Available) => CodeGraphSyncObservation {
+                        state: CodeGraphSyncState::Synchronized,
+                        detail: None,
+                        index_changed: false,
+                    },
+                    Ok(ProviderStatus::Stale) => match synchronize(&target.path) {
+                        Ok(()) => CodeGraphSyncObservation {
+                            state: CodeGraphSyncState::Synchronized,
+                            detail: None,
+                            index_changed: true,
+                        },
+                        Err(detail) => failed_sync_observation(&detail),
+                    },
+                    Ok(ProviderStatus::IndexMissing) => CodeGraphSyncObservation {
+                        state: CodeGraphSyncState::SkippedNotInitialized,
+                        detail: Some("local CodeGraph index is not initialized".to_owned()),
+                        index_changed: false,
+                    },
+                    Ok(status) => failed_sync_observation(&format!(
+                        "CodeGraph status is not usable for synchronization: {status:?}"
+                    )),
+                    Err(detail) => failed_sync_observation(&detail),
                 }
             } else {
-                (
-                    CodeGraphSyncState::SkippedNotInitialized,
-                    Some("local CodeGraph index is not initialized".to_owned()),
-                )
+                CodeGraphSyncObservation {
+                    state: CodeGraphSyncState::SkippedNotInitialized,
+                    detail: Some("local CodeGraph index is not initialized".to_owned()),
+                    index_changed: false,
+                }
             };
             repositories.push(CodeGraphRepositorySync {
                 repository: target.alias.clone(),
-                state,
-                detail,
+                state: observation.state,
+                detail: observation.detail.clone(),
             });
+            observations.push(observation);
             super::worker::report_progress(code_system_graph_core::JobPhase::CodeGraphSync, 1);
         }
     }
@@ -477,6 +566,14 @@ where
     let synchronized_count = repositories
         .iter()
         .filter(|item| item.state == CodeGraphSyncState::Synchronized)
+        .count();
+    let changed_count = observations
+        .iter()
+        .filter(|item| item.state == CodeGraphSyncState::Synchronized && item.index_changed)
+        .count();
+    let unchanged_count = observations
+        .iter()
+        .filter(|item| item.state == CodeGraphSyncState::Synchronized && !item.index_changed)
         .count();
     let skipped_count = repositories
         .iter()
@@ -490,9 +587,19 @@ where
         enabled,
         repository_count: targets.len(),
         synchronized_count,
+        changed_count,
+        unchanged_count,
         skipped_count,
         failed_count,
         repositories,
+    }
+}
+
+fn failed_sync_observation(detail: &str) -> CodeGraphSyncObservation {
+    CodeGraphSyncObservation {
+        state: CodeGraphSyncState::Failed,
+        detail: Some(bounded_detail(detail)),
+        index_changed: false,
     }
 }
 
@@ -562,10 +669,15 @@ mod tests {
         let called = RefCell::new(Vec::new());
         let targets = vec![target("zeta", initialized.clone()), target("alpha", absent)];
 
-        let report = synchronize_codegraph_targets(&targets, true, |path| {
-            called.borrow_mut().push(path.to_path_buf());
-            Err("failure ".repeat(600))
-        });
+        let report = synchronize_codegraph_targets(
+            &targets,
+            true,
+            |target| {
+                called.borrow_mut().push(target.path.clone());
+                Err("failure ".repeat(600))
+            },
+            |_| panic!("failed status inspection must not synchronize"),
+        );
 
         assert_eq!(called.into_inner(), vec![initialized]);
         assert_eq!(report.repository_count, 2);
@@ -589,12 +701,48 @@ mod tests {
     #[test]
     fn disabled_codegraph_sync_should_not_invoke_runner() {
         let target = target("repo", PathBuf::from("repo"));
-        let report = synchronize_codegraph_targets(&[target], false, |_| {
-            panic!("disabled synchronization must not invoke CodeGraph")
-        });
+        let report = synchronize_codegraph_targets(
+            &[target],
+            false,
+            |_| panic!("disabled synchronization must not inspect CodeGraph"),
+            |_| panic!("disabled synchronization must not invoke CodeGraph"),
+        );
         assert!(!report.enabled);
         assert_eq!(report.repository_count, 1);
         assert!(report.repositories.is_empty());
+    }
+
+    #[test]
+    fn synchronization_should_distinguish_changed_and_current_indexes() -> anyhow::Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let current = temporary.path().join("current");
+        let stale = temporary.path().join("stale");
+        std::fs::create_dir_all(current.join(".codegraph"))?;
+        std::fs::create_dir_all(stale.join(".codegraph"))?;
+        let synchronized = RefCell::new(Vec::new());
+        let targets = vec![target("current", current), target("stale", stale.clone())];
+
+        let report = synchronize_codegraph_targets(
+            &targets,
+            true,
+            |target| {
+                if target.alias == "stale" {
+                    Ok(ProviderStatus::Stale)
+                } else {
+                    Ok(ProviderStatus::Available)
+                }
+            },
+            |path| {
+                synchronized.borrow_mut().push(path.to_path_buf());
+                Ok(())
+            },
+        );
+
+        assert_eq!(synchronized.into_inner(), vec![stale]);
+        assert_eq!(report.synchronized_count, 2);
+        assert_eq!(report.changed_count, 1);
+        assert_eq!(report.unchanged_count, 1);
+        Ok(())
     }
 
     #[cfg(unix)]

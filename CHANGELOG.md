@@ -3,6 +3,29 @@
 All notable public changes to Code System Graph are documented in this file. Code System Graph follows Semantic
 Versioning.
 
+## [1.0.2] - 2026-08-04
+
+### Performance and reliability
+
+- Made `csgraph sync` inspect structured CodeGraph status before invoking the provider, report
+  changed and unchanged indexes separately, and reuse the current graph snapshot when neither
+  native inputs nor CodeGraph indexes changed.
+- Grouped CodeGraph corroboration inputs in one pass, bounded and deduplicated queries
+  deterministically, and limited focused scans to the selected repository.
+- Released the previous graph before snapshot staging and verified incremental behavior with a
+  100-repository synthetic release workload and a representative large-repository workload.
+- Turned ambiguous HTTP providers into deterministic scan degradations so unrelated links still
+  resolve and exact manual relationships can disambiguate the intended provider.
+- Replaced raw worker parser failures with bounded, secret-safe diagnostics that retain actionable
+  workspace, repository, configuration, and contract context.
+
+### Documentation
+
+- Documented workspace-scoped Cursor MCP configuration, including restart and enablement checks,
+  without requiring a separate CodeGraph installation.
+- Added troubleshooting guidance for Cursor setup and per-value extraction budget failures,
+  including a concrete `maxStringBytesPerValue` example.
+
 ## [1.0.1] - 2026-08-04
 
 ### Fixed

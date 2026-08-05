@@ -109,6 +109,18 @@ CodeGraph is disabled for MCP and HTTP unless the trusted process enables it wit
 selects a custom executable. When disabled, MCP does not advertise `explore` and HTTP returns
 `403 codegraph_disabled`.
 
+### Cursor workspace scope
+
+Cursor should keep this server in `<workspace>/.cursor/mcp.json`, not `~/.cursor/mcp.json`. Use
+absolute paths for both the `csgraph` executable and database, but remember that the MCP config
+location controls Cursor scope; an absolute database path does not make a server global. After
+editing the file, reload the Cursor window or restart Cursor and enable the server in MCP settings.
+
+Do not run `codegraph install`: `csgraph mcp --codegraph` starts the provider itself and advertises
+`explore`. Avoid a separate global CodeGraph MCP entry unless you intentionally want
+repository-local CodeGraph tools exposed in every Cursor project. The complete JSON example is in
+[Agent setup](AGENT_SETUP.md#cursor).
+
 ## Verify the setup
 
 ```bash
@@ -136,9 +148,11 @@ Compatible CLI fallback uses direct process arguments and machine-readable JSON 
 
 Code System Graph never reads `.codegraph/codegraph.db`, never treats a CodeGraph node identifier as
 a global identity, and never persists returned source. Normal scans, MCP, and HTTP never initialize,
-synchronize, install, or upgrade CodeGraph automatically. The explicit `csgraph sync` command is the
-only exception for synchronization: it invokes the public `codegraph sync --quiet <repo>` command
-for indexes that are already initialized, before using the normal watcher-free MCP adapter.
+synchronize, install, or upgrade CodeGraph automatically. The explicit `csgraph sync` command is
+the only exception for synchronization: it reads structured status for initialized indexes and
+invokes `codegraph sync --quiet <repo>` only when pending files, a worktree mismatch, incomplete
+state, or a reindex recommendation makes an index stale. Current indexes are reported as successful
+and unchanged before the normal watcher-free scan path.
 
 ## Code System Graph delivery surfaces
 

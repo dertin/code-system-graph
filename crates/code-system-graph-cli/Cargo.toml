@@ -30,10 +30,10 @@ atomic-write-file = "0.3.0"
 axum = "0.8.9"
 clap = { version = "4.6.4", features = ["derive"] }
 clap_complete = "4.6.8"
-code-system-graph-core = { version = "1.0.1", path = "../code-system-graph-core" }
-code-system-graph-hooks = { version = "1.0.1", path = "../code-system-graph-hooks" }
-code-system-graph-model = { version = "1.0.1", path = "../code-system-graph-model" }
-code-system-graph-store-sqlite = { version = "1.0.1", path = "../code-system-graph-store-sqlite" }
+code-system-graph-core = { version = "1.0.2", path = "../code-system-graph-core" }
+code-system-graph-hooks = { version = "1.0.2", path = "../code-system-graph-hooks" }
+code-system-graph-model = { version = "1.0.2", path = "../code-system-graph-model" }
+code-system-graph-store-sqlite = { version = "1.0.2", path = "../code-system-graph-store-sqlite" }
 rmcp = { version = "3.1.0", features = ["transport-io"] }
 notify = "8.2.0"
 rusqlite = { version = "0.40.1", features = ["bundled"] }

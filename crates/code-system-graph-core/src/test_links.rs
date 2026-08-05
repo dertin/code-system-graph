@@ -4,8 +4,9 @@ use code_system_graph_model::{
     Edge, EdgeId, EdgeKind, EpistemicStatus, Evidence, EvidenceId, Node, NodeId, NodeKind, Provenance, RepoId, stable_id
 };
 
+use crate::linker::{http_link_ambiguity, sort_http_ambiguities};
 use crate::{
-    BoundaryRole, ContractImplementationConfig, HttpBoundary, IntegrationTestConfig, LinkError, normalize_http_path
+    BoundaryRole, ContractImplementationConfig, HttpBoundary, HttpLinkResolution, IntegrationTestConfig, LinkError, normalize_http_path
 };
 
 /// Declared cross-language test case and its validated HTTP target.
@@ -133,13 +134,26 @@ pub fn declared_implementation(
 ///
 /// Tests with no observed provider remain unlinked instead of inventing a target.
 ///
+/// Duplicate providers are omitted without selecting an arbitrary target. Use
+/// [`link_declared_tests_with_ambiguities`] when the caller must report those decisions.
+///
 /// # Errors
 ///
-/// Returns [`LinkError::AmbiguousProvider`] when multiple providers expose the same target.
+/// The compatibility wrapper currently returns `Ok`; the result shape is retained so existing
+/// callers do not require an API migration in the patch release.
 pub fn link_declared_tests(
     tests: &[DeclaredTestCase],
     boundaries: &[HttpBoundary],
 ) -> Result<Vec<Edge>, LinkError> {
+    Ok(link_declared_tests_with_ambiguities(tests, boundaries).edges)
+}
+
+/// Links declared tests while preserving duplicate-provider decisions.
+#[must_use]
+pub fn link_declared_tests_with_ambiguities(
+    tests: &[DeclaredTestCase],
+    boundaries: &[HttpBoundary],
+) -> HttpLinkResolution {
     let mut providers: BTreeMap<(&str, &str), Vec<&HttpBoundary>> = BTreeMap::new();
     for provider in boundaries
         .iter()
@@ -160,21 +174,18 @@ pub fn link_declared_tests(
         }
     }
     let mut edges = Vec::new();
+    let mut ambiguities = Vec::new();
     for test in tests {
         let Some(candidates) = providers.get(&(test.method.as_str(), test.path.as_str())) else {
             continue;
         };
         if candidates.len() > 1 {
-            let mut candidate_ids = candidates
-                .iter()
-                .map(|candidate| candidate.node.id.as_str().to_owned())
-                .collect::<Vec<_>>();
-            candidate_ids.sort();
-            return Err(LinkError::AmbiguousProvider {
-                method: test.method.clone(),
-                path: test.path.clone(),
-                candidates: candidate_ids,
-            });
+            ambiguities.push(http_link_ambiguity(
+                &test.method,
+                &test.path,
+                candidates.iter().map(|candidate| &candidate.node.id),
+            ));
+            continue;
         }
         let provider = candidates[0];
         let edge_key = format!(
@@ -193,19 +204,34 @@ pub fn link_declared_tests(
         });
     }
     edges.sort_by(|left, right| left.id.cmp(&right.id));
-    Ok(edges)
+    sort_http_ambiguities(&mut ambiguities);
+    HttpLinkResolution { edges, ambiguities }
 }
 
 /// Links HTTP provider contracts to declared source implementations.
 ///
+/// Duplicate providers are omitted without selecting an arbitrary target. Use
+/// [`link_declared_implementations_with_ambiguities`] when the caller must report those decisions.
+///
 /// # Errors
 ///
-/// Returns [`LinkError::AmbiguousProvider`] when a repository exposes duplicate exact providers.
+/// The compatibility wrapper currently returns `Ok`; the result shape is retained so existing
+/// callers do not require an API migration in the patch release.
 pub fn link_declared_implementations(
     implementations: &[DeclaredImplementation],
     boundaries: &[HttpBoundary],
 ) -> Result<Vec<Edge>, LinkError> {
+    Ok(link_declared_implementations_with_ambiguities(implementations, boundaries).edges)
+}
+
+/// Links declared implementations while preserving duplicate-provider decisions.
+#[must_use]
+pub fn link_declared_implementations_with_ambiguities(
+    implementations: &[DeclaredImplementation],
+    boundaries: &[HttpBoundary],
+) -> HttpLinkResolution {
     let mut edges = Vec::new();
+    let mut ambiguities = Vec::new();
     for implementation in implementations {
         let candidates = boundaries
             .iter()
@@ -232,16 +258,12 @@ pub fn link_declared_implementations(
             .into_values()
             .collect::<Vec<_>>();
         if candidates.len() > 1 {
-            let mut candidate_ids = candidates
-                .iter()
-                .map(|candidate| candidate.node.id.as_str().to_owned())
-                .collect::<Vec<_>>();
-            candidate_ids.sort();
-            return Err(LinkError::AmbiguousProvider {
-                method: implementation.method.clone(),
-                path: implementation.path.clone(),
-                candidates: candidate_ids,
-            });
+            ambiguities.push(http_link_ambiguity(
+                &implementation.method,
+                &implementation.path,
+                candidates.iter().map(|candidate| &candidate.node.id),
+            ));
+            continue;
         }
         let Some(provider) = candidates.first() else {
             continue;
@@ -269,7 +291,8 @@ pub fn link_declared_implementations(
         });
     }
     edges.sort_by(|left, right| left.id.cmp(&right.id));
-    Ok(edges)
+    sort_http_ambiguities(&mut ambiguities);
+    HttpLinkResolution { edges, ambiguities }
 }
 
 fn consensus_status(confidence: f32) -> EpistemicStatus {

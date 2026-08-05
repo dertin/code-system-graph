@@ -26,8 +26,17 @@ fn write_workspace(
 }
 
 fn run_sync(manifest: &std::path::Path, database: &std::path::Path) -> anyhow::Result<SyncSummary> {
+    run_sync_with_arguments(manifest, database, &[])
+}
+
+fn run_sync_with_arguments(
+    manifest: &std::path::Path,
+    database: &std::path::Path,
+    arguments: &[&std::ffi::OsStr],
+) -> anyhow::Result<SyncSummary> {
     let output = Command::new(env!("CARGO_BIN_EXE_csgraph"))
         .arg("sync")
+        .args(arguments)
         .arg("--config")
         .arg(manifest)
         .arg("--database")
@@ -39,6 +48,43 @@ fn run_sync(manifest: &std::path::Path, database: &std::path::Path) -> anyhow::R
         String::from_utf8_lossy(&output.stderr)
     );
     Ok(serde_json::from_slice(&output.stdout)?)
+}
+
+#[cfg(unix)]
+#[test]
+fn initialized_current_codegraph_should_not_sync_or_republish() -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temporary = tempfile::tempdir()?;
+    let (manifest, database) = write_workspace(temporary.path())?;
+    std::fs::create_dir(temporary.path().join("api/.codegraph"))?;
+    let invocation_log = temporary.path().join("codegraph.log");
+    let binary = temporary.path().join("codegraph-current");
+    std::fs::write(
+        &binary,
+        format!(
+            "#!/bin/sh\ncase \"$1\" in\n  --version) echo 1.5.0 ;;\n  status) printf '%s\\n' '{{\"initialized\":true,\"version\":\"1.5.0\",\"pendingChanges\":{{\"added\":0,\"modified\":0,\"removed\":0}},\"worktreeMismatch\":null,\"index\":{{\"reindexRecommended\":false,\"state\":\"complete\"}}}}' ;;\n  sync) printf 'sync\\n' >> '{}'; exit 99 ;;\n  *) exit 98 ;;\nesac\n",
+            invocation_log.display()
+        ),
+    )?;
+    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700))?;
+    let arguments = [
+        std::ffi::OsStr::new("--codegraph-binary"),
+        binary.as_os_str(),
+    ];
+
+    let first = run_sync_with_arguments(&manifest, &database, &arguments)?;
+    let second = run_sync_with_arguments(&manifest, &database, &arguments)?;
+
+    assert!(!first.scan.reused_snapshot);
+    assert!(second.scan.reused_snapshot);
+    assert_eq!(second.scan.changed_input_count, 0);
+    assert_eq!(second.scan.snapshot_id, first.scan.snapshot_id);
+    assert_eq!(second.codegraph.synchronized_count, 1);
+    assert_eq!(second.codegraph.changed_count, 0);
+    assert_eq!(second.codegraph.unchanged_count, 1);
+    assert!(!invocation_log.exists());
+    Ok(())
 }
 
 #[test]

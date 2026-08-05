@@ -91,6 +91,26 @@ impl CodeGraphProvider {
         })
     }
 
+    /// Reads the structured local-index status without starting MCP or modifying the index.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError`] when the request is invalid, the compatible CLI cannot be
+    /// executed, or its bounded JSON status does not satisfy the validated contract.
+    pub async fn index_status(
+        &self,
+        mut request: ProviderRequest,
+    ) -> Result<ProviderStatus, ProviderError> {
+        let deadline = tokio::time::Instant::now() + request.budget.timeout;
+        let _permit = self.enter(&request, deadline).await?;
+        self.compatible_cli_version(&mut request, deadline).await?;
+        update_remaining_timeout(&mut request, deadline)?;
+        self.cli
+            .status(&request)
+            .await
+            .map(|status| status.status())
+    }
+
     async fn enter(
         &self,
         request: &ProviderRequest,

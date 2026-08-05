@@ -153,13 +153,15 @@ path together.
 
 ## Cursor
 
-Create or merge `.cursor/mcp.json` in the workspace:
+Create or merge `<workspace>/.cursor/mcp.json`. Do not put this Code System Graph entry in
+`~/.cursor/mcp.json`; the configuration-file location is what keeps the server scoped to this
+workspace. An absolute database path identifies the snapshot but does not make the server global.
 
 ```json
 {
   "mcpServers": {
     "code-system-graph": {
-      "command": "csgraph",
+      "command": "/absolute/path/to/bin/csgraph",
       "args": [
         "mcp",
         "--codegraph",
@@ -173,7 +175,11 @@ Create or merge `.cursor/mcp.json` in the workspace:
 }
 ```
 
-Open Cursor's MCP settings and confirm that the server and its tools are enabled.
+`--codegraph` makes this server advertise `explore`; `csgraph mcp` starts the CodeGraph provider,
+so do not run `codegraph install` for this setup. Reload the Cursor window or restart Cursor after
+changing the file, then open MCP settings and confirm that `code-system-graph` and its tools are
+enabled. A separate global CodeGraph MCP entry would expose repository-local tools in every Cursor
+project and is not needed for this integration.
 
 ## Install optional routing
 
@@ -265,6 +271,10 @@ If the server is absent or disconnected:
 4. confirm the workspace name matches the scanned snapshot;
 5. rerun the agent's MCP list/status command after changing configuration;
 6. rerun `csgraph status` to check database freshness.
+
+For Cursor, also confirm that the entry is in `<workspace>/.cursor/mcp.json`, reload the window,
+and enable the server in Cursor's MCP settings. See [Troubleshooting](TROUBLESHOOTING.md) for
+extraction-budget and workspace-scope examples.
 
 Agent configuration is not removed when the `csgraph` binary is uninstalled. Remove MCP registration
 and Code System Graph-owned hooks first.

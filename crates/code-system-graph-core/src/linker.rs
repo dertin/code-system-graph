@@ -26,6 +26,26 @@ pub enum LinkError {
     },
 }
 
+/// One exact HTTP contract that could not be linked because several providers matched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpLinkAmbiguity {
+    /// Canonical HTTP method.
+    pub method: String,
+    /// Canonical path template.
+    pub path: String,
+    /// Stable candidate node identifiers in deterministic order.
+    pub candidates: Vec<String>,
+}
+
+/// Deterministic automatic HTTP links plus unresolved exact-provider ambiguities.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HttpLinkResolution {
+    /// Unambiguous automatic relationships.
+    pub edges: Vec<Edge>,
+    /// Source-free ambiguous contract identities omitted from the edge set.
+    pub ambiguities: Vec<HttpLinkAmbiguity>,
+}
+
 /// Endpoint field being resolved for a manual relationship.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ManualLinkEndpoint {
@@ -132,10 +152,20 @@ pub struct ManualLinkResolution {
 /// Consumers without an observed provider remain unlinked. Callers must represent that as a
 /// coverage gap rather than concluding that no dependency exists.
 ///
+/// Duplicate providers are omitted without selecting an arbitrary target. Use
+/// [`link_http_boundaries_with_ambiguities`] when the caller must report those decisions.
+///
 /// # Errors
 ///
-/// Returns [`LinkError::AmbiguousProvider`] instead of selecting among duplicate providers.
+/// The compatibility wrapper currently returns `Ok`; the result shape is retained so existing
+/// callers do not require an API migration in the patch release.
 pub fn link_http_boundaries(boundaries: &[HttpBoundary]) -> Result<Vec<Edge>, LinkError> {
+    Ok(link_http_boundaries_with_ambiguities(boundaries).edges)
+}
+
+/// Links exact HTTP boundaries while preserving duplicate-provider decisions.
+#[must_use]
+pub fn link_http_boundaries_with_ambiguities(boundaries: &[HttpBoundary]) -> HttpLinkResolution {
     let mut providers: BTreeMap<(&str, &str), Vec<&HttpBoundary>> = BTreeMap::new();
     for boundary in boundaries {
         if boundary.role == BoundaryRole::Provider {
@@ -156,6 +186,7 @@ pub fn link_http_boundaries(boundaries: &[HttpBoundary]) -> Result<Vec<Edge>, Li
     }
 
     let mut edges = Vec::new();
+    let mut ambiguities = Vec::new();
     for consumer in boundaries
         .iter()
         .filter(|boundary| boundary.role == BoundaryRole::Consumer)
@@ -165,16 +196,12 @@ pub fn link_http_boundaries(boundaries: &[HttpBoundary]) -> Result<Vec<Edge>, Li
             continue;
         };
         if candidates.len() > 1 {
-            let mut candidate_ids = candidates
-                .iter()
-                .map(|candidate| candidate.node.id.as_str().to_owned())
-                .collect::<Vec<_>>();
-            candidate_ids.sort();
-            return Err(LinkError::AmbiguousProvider {
-                method: consumer.method.clone(),
-                path: consumer.path.clone(),
-                candidates: candidate_ids,
-            });
+            ambiguities.push(http_link_ambiguity(
+                &consumer.method,
+                &consumer.path,
+                candidates.iter().map(|candidate| &candidate.node.id),
+            ));
+            continue;
         }
         let provider = candidates[0];
         let edge_key = format!(
@@ -201,7 +228,37 @@ pub fn link_http_boundaries(boundaries: &[HttpBoundary]) -> Result<Vec<Edge>, Li
         });
     }
     edges.sort_by(|left, right| left.id.cmp(&right.id));
-    Ok(edges)
+    sort_http_ambiguities(&mut ambiguities);
+    HttpLinkResolution { edges, ambiguities }
+}
+
+pub(crate) fn http_link_ambiguity<'a>(
+    method: &str,
+    path: &str,
+    candidates: impl IntoIterator<Item = &'a NodeId>,
+) -> HttpLinkAmbiguity {
+    let mut candidates = candidates
+        .into_iter()
+        .map(|candidate| candidate.as_str().to_owned())
+        .collect::<Vec<_>>();
+    candidates.sort();
+    candidates.dedup();
+    HttpLinkAmbiguity {
+        method: method.to_owned(),
+        path: path.to_owned(),
+        candidates,
+    }
+}
+
+pub(crate) fn sort_http_ambiguities(ambiguities: &mut Vec<HttpLinkAmbiguity>) {
+    ambiguities.sort_by(|left, right| {
+        (&left.method, &left.path, &left.candidates).cmp(&(
+            &right.method,
+            &right.path,
+            &right.candidates,
+        ))
+    });
+    ambiguities.dedup();
 }
 
 fn consensus_status(confidence: f32) -> EpistemicStatus {
@@ -501,7 +558,7 @@ mod tests {
     };
 
     use super::{
-        LinkError, ManualLinkEndpoint, ManualLinkError, link_http_boundaries, merge_affected_link_neighborhoods, resolve_manual_links
+        ManualLinkEndpoint, ManualLinkError, link_http_boundaries, link_http_boundaries_with_ambiguities, merge_affected_link_neighborhoods, resolve_manual_links
     };
     use crate::{HttpConsumerConfig, ManualLinkConfig, extract_openapi};
 
@@ -573,11 +630,18 @@ paths:
     }
 
     #[test]
-    fn link_http_boundaries_should_reject_duplicate_providers() {
-        let result =
-            link_http_boundaries(&[consumer(), provider("repo:api-a"), provider("repo:api-b")]);
+    fn link_http_boundaries_should_preserve_duplicate_providers_as_ambiguity() {
+        let result = link_http_boundaries_with_ambiguities(&[
+            consumer(),
+            provider("repo:api-a"),
+            provider("repo:api-b"),
+        ]);
 
-        assert!(matches!(result, Err(LinkError::AmbiguousProvider { .. })));
+        assert!(result.edges.is_empty());
+        assert_eq!(result.ambiguities.len(), 1);
+        assert_eq!(result.ambiguities[0].method, "POST");
+        assert_eq!(result.ambiguities[0].path, "/api/orders");
+        assert_eq!(result.ambiguities[0].candidates.len(), 2);
     }
 
     #[test]

@@ -4,16 +4,16 @@ default-members = ["crates/*"]
 resolver = "3"
 
 [workspace.package]
-version = "1.0.1"
+version = "1.0.2"
 edition = "2024"
 rust-version = "1.97.1"
-description = "Local system-level code intelligence across repositories."
+description = "Local cross-repository code intelligence and dependency graph for impact analysis and AI coding agents."
 license = "Apache-2.0"
 repository = "https://github.com/dertin/code-system-graph"
 homepage = "https://github.com/dertin/code-system-graph"
 readme = "README.md"
-keywords = ["code-intelligence", "static-analysis", "impact-analysis", "mcp", "monorepo"]
-categories = ["development-tools"]
+keywords = ["code-intelligence", "static-analysis", "impact-analysis", "mcp", "dependency-graph"]
+categories = ["development-tools", "command-line-utilities"]
 
 [workspace.lints.rust]
 future_incompatible = { level = "warn", priority = -1 }

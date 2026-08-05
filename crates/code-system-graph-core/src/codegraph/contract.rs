@@ -328,6 +328,16 @@ mod tests {
     }
 
     #[test]
+    fn status_contract_should_recognize_current_index() {
+        let status: StatusContract = serde_json::from_str(include_str!(
+            "../../../../fixtures/codegraph/1.5.0/status.json"
+        ))
+        .expect("fixture should be valid");
+
+        assert_eq!(status.status(), ProviderStatus::Available);
+    }
+
+    #[test]
     fn cli_contract_should_reject_unvalidated_versions() {
         assert!(supports_cli_contract("1.5.0"));
         assert!(!supports_cli_contract("1.6.0"));

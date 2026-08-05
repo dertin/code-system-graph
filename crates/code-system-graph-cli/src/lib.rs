@@ -16,7 +16,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use atomic_write_file::AtomicWriteFile;
 use code_system_graph_core::{
-    AffectedTestsRequest, AnalyzerVersions, ArtifactKey, BatchAction, BatchPlanError, BitbucketProvider, ChangeAnalysisError, ChangeAnalysisOptions, ChangeError, ChangeImpactReport, ChangeProvider, ChangeRequest, ChangeScope, ChangeSet, CodeGraphConfig, CodeGraphProvider, CommunityError, ConfigDoctorInput, ConfigError, ConfigExtractionError, ContractReport, ContractRequest, CorroborationReport, DataDocument, DataExtractionError, DeclaredImplementation, DeclaredTestCase, DoctorReport, DoctorRequest, DocumentationDocument, DocumentationExtractionError, EXTRACTION_CONTRACT_VERSION, EffectiveRepositoryConfig, EventDocument, EventExtractionError, EventGraphFacts, ExecutionPolicy, ExitCode, ExportReport, ExportRequest, ExtractionBudgets, ExtractionGraphFacts, ExtractionLimitExceeded, ExtractionTracker, ExtractorBatch, ExtractorBatchPlan, FederatedGraph, FreshnessDoctorInput, GeneratedClientError, GeneratedClientMetadata, GitCliChangeProvider, GitHubProvider, GraphqlDocument, GraphqlExtractionError, GraphqlGraphFacts, HttpBoundary, HttpExtractionError, ImpactContext, ImpactError, ImpactReport, ImpactRequest, ImpactTarget, IncrementalPlan, InfrastructureDocument, InfrastructureExtractionError, IntegrityDoctorInput, InterfaceError, LinkError, LocalCodeIntelligenceProvider, LocalContextRequest, LocalContextResult, LocalEnrichmentInput, LocalEnrichmentStatus, LocalImpactItem, LocalImpactRequest, ManifestEdit, ManifestEditError, ManifestError, ManualLinkConfig, ManualLinkError, PackageGraphFacts, PackageManifest, PackageManifestError, PrAuthToken, ProtobufDocument, ProtobufExtractionError, ProtobufGraphFacts, ProviderBudget, ProviderCapability, ProviderDoctorInput, ProviderDoctorStatus, ProviderError, ProviderRequest, ProviderStatus, PullRequestCoordinates, PullRequestError, PullRequestInspectRequest, PullRequestInspection, PullRequestListPage, PullRequestListRequest, PullRequestListState, PullRequestProvider, PullRequestProviderConfig, PullRequestProviderKind, QueryError, RecommendedCommand, RegisteredWorkspace, RegistryError, ReqwestPrHttpTransport, SafeConfigDocument, SchemaDoctorInput, SearchFilters, SearchReport, SearchRequest, SourceEpistemicStatus, SourceGraphFacts, SourceLanguage, SourceObservation, SourceRole, SourceSyntaxError, SourceSyntaxLanguage, SourceWarning, SymbolAnchor, SymbolCorroboration, TraceError, TraversalReport, TraversalRequest, WorkspaceManifest, affected_link_keys, analyze_changes, analyze_communities_with_progress, analyze_impact, apply_openapi_override, classify_interface_error, commit_manifest_edit, compare_community_snapshots, corroborate_repository, declared_implementation, declared_test_case, doctor, documents_to_graph, encode_native_path, event_documents_to_graph, export_graph, extract_asyncapi, extract_codeowners, extract_data_artifact, extract_docker_compose, extract_generated_client_metadata, extract_graphql_document_with_tracker, extract_graphql_persisted_operations_with_tracker, extract_helm, extract_kubernetes, extract_markdown, extract_openapi_with_tracker, extract_package_manifest_with_tracker, extract_protobuf_with_tracker, extract_safe_config, extract_service_catalog, extract_terraform, graphql_documents_to_graph, inspect_contracts, inspect_source_syntax, link_declared_implementations, link_declared_tests, link_http_boundaries, link_registered_package_owners, load_extractor_batch_with_budgets, merge_affected_link_neighborhoods, package_manifest_to_graph, parse_event_source, parse_go_source_with_tracker, parse_graphql_source_with_tracker, parse_java_source_with_tracker, parse_javascript_source_at_path_with_tracker, parse_literal_sql_source_at_root, parse_manifest, parse_protobuf_generated_source, parse_python_source_with_tracker, parse_rust_source_with_tracker, parse_typescript_source_at_path_with_tracker, plan_extractor_batches, plan_incremental_scan, precheck_focused_source_values, preview_add_manual_link, preview_add_repository, preview_remove_repository, protobuf_documents_to_graph, register_workspace, resolve_manual_links, resolve_repository_config, search, source_observations_to_graph, store_extractor_batch, traverse
+    AffectedTestsRequest, AnalyzerVersions, ArtifactKey, BatchAction, BatchPlanError, BitbucketProvider, ChangeAnalysisError, ChangeAnalysisOptions, ChangeError, ChangeImpactReport, ChangeProvider, ChangeRequest, ChangeScope, ChangeSet, CodeGraphConfig, CodeGraphProvider, CommunityError, ConfigDoctorInput, ConfigError, ConfigExtractionError, ContractReport, ContractRequest, CorroborationReport, DataDocument, DataExtractionError, DeclaredImplementation, DeclaredTestCase, DoctorReport, DoctorRequest, DocumentationDocument, DocumentationExtractionError, EXTRACTION_CONTRACT_VERSION, EffectiveRepositoryConfig, EventDocument, EventExtractionError, EventGraphFacts, ExecutionPolicy, ExitCode, ExportReport, ExportRequest, ExtractionBudgets, ExtractionGraphFacts, ExtractionLimitExceeded, ExtractionTracker, ExtractorBatch, ExtractorBatchPlan, FederatedGraph, FreshnessDoctorInput, GeneratedClientError, GeneratedClientMetadata, GitCliChangeProvider, GitHubProvider, GraphqlDocument, GraphqlExtractionError, GraphqlGraphFacts, HttpBoundary, HttpExtractionError, ImpactContext, ImpactError, ImpactReport, ImpactRequest, ImpactTarget, IncrementalPlan, InfrastructureDocument, InfrastructureExtractionError, IntegrityDoctorInput, InterfaceError, LinkError, LocalCodeIntelligenceProvider, LocalContextRequest, LocalContextResult, LocalEnrichmentInput, LocalEnrichmentStatus, LocalImpactItem, LocalImpactRequest, ManifestEdit, ManifestEditError, ManifestError, ManualLinkConfig, ManualLinkError, PackageGraphFacts, PackageManifest, PackageManifestError, PrAuthToken, ProtobufDocument, ProtobufExtractionError, ProtobufGraphFacts, ProviderBudget, ProviderCapability, ProviderDoctorInput, ProviderDoctorStatus, ProviderError, ProviderRequest, ProviderStatus, PullRequestCoordinates, PullRequestError, PullRequestInspectRequest, PullRequestInspection, PullRequestListPage, PullRequestListRequest, PullRequestListState, PullRequestProvider, PullRequestProviderConfig, PullRequestProviderKind, QueryError, RecommendedCommand, RegisteredWorkspace, RegistryError, ReqwestPrHttpTransport, SafeConfigDocument, SchemaDoctorInput, SearchFilters, SearchReport, SearchRequest, SourceEpistemicStatus, SourceGraphFacts, SourceLanguage, SourceObservation, SourceRole, SourceSyntaxError, SourceSyntaxLanguage, SourceWarning, SymbolAnchor, SymbolCorroboration, TraceError, TraversalReport, TraversalRequest, WorkspaceManifest, affected_link_keys, analyze_changes, analyze_communities_with_progress, analyze_impact, apply_openapi_override, classify_interface_error, commit_manifest_edit, compare_community_snapshots, corroborate_repository, declared_implementation, declared_test_case, doctor, documents_to_graph, encode_native_path, event_documents_to_graph, export_graph, extract_asyncapi, extract_codeowners, extract_data_artifact, extract_docker_compose, extract_generated_client_metadata, extract_graphql_document_with_tracker, extract_graphql_persisted_operations_with_tracker, extract_helm, extract_kubernetes, extract_markdown, extract_openapi_with_tracker, extract_package_manifest_with_tracker, extract_protobuf_with_tracker, extract_safe_config, extract_service_catalog, extract_terraform, graphql_documents_to_graph, inspect_contracts, inspect_source_syntax, link_declared_implementations_with_ambiguities, link_declared_tests_with_ambiguities, link_http_boundaries_with_ambiguities, link_registered_package_owners, load_extractor_batch_with_budgets, merge_affected_link_neighborhoods, package_manifest_to_graph, parse_event_source, parse_go_source_with_tracker, parse_graphql_source_with_tracker, parse_java_source_with_tracker, parse_javascript_source_at_path_with_tracker, parse_literal_sql_source_at_root, parse_manifest, parse_protobuf_generated_source, parse_python_source_with_tracker, parse_rust_source_with_tracker, parse_typescript_source_at_path_with_tracker, plan_extractor_batches, plan_incremental_scan, precheck_focused_source_values, preview_add_manual_link, preview_add_repository, preview_remove_repository, protobuf_documents_to_graph, register_workspace, resolve_manual_links, resolve_repository_config, search, source_observations_to_graph, store_extractor_batch, traverse
 };
 pub use code_system_graph_core::{
     ConfigSource, DEFAULT_EXCLUDES, IgnorePolicy, PROTECTED_EXCLUDES
@@ -857,6 +857,7 @@ struct GraphAssembly {
     evidence: Vec<Evidence>,
     link_decisions: Vec<LinkDecision>,
     link_node_keys: BTreeMap<NodeId, String>,
+    degradations: Vec<String>,
 }
 
 struct FocusedBatchState {
@@ -1133,8 +1134,8 @@ fn generated_state_is_ignored(content: &[u8]) -> bool {
 ///
 /// # Errors
 ///
-/// Returns [`ApplicationError`] for unreadable inputs, invalid contracts, ambiguous links, or
-/// storage failure.
+/// Returns [`ApplicationError`] for unreadable inputs, invalid contracts, invalid manual links, or
+/// storage failure. Ambiguous automatic HTTP providers are reported as degradations.
 pub fn scan_workspace(
     config_path: &Path,
     database_path: &Path,
@@ -1147,7 +1148,8 @@ pub fn scan_workspace(
 /// # Errors
 ///
 /// Returns [`ApplicationError`] for unknown aliases, invalid overrides, unreadable inputs,
-/// invalid contracts, ambiguous links, or storage failure.
+/// invalid contracts, invalid manual links, or storage failure. Ambiguous automatic HTTP providers
+/// are reported as degradations.
 pub fn scan_workspace_with_overrides(
     config_path: &Path,
     database_path: &Path,
@@ -1453,6 +1455,7 @@ pub(crate) fn scan_workspace_direct(
             &context,
             &focused_batches,
             &plan,
+            overrides.repository.as_deref(),
             overrides.codegraph_binary.clone(),
         )
     } else {
@@ -1475,6 +1478,7 @@ pub(crate) fn scan_workspace_direct(
         edges,
         evidence,
         link_decisions,
+        degradations: graph_degradations,
         ..
     } = graph;
     let community_config = default_community_config();
@@ -1508,6 +1512,7 @@ pub(crate) fn scan_workspace_direct(
             },
             Ok,
         )?;
+    drop(previous_graph);
     let community_delta_count = previous_communities.as_ref().map_or(0, |previous| {
         compare_community_snapshots(previous, &community_snapshot)
             .changes
@@ -1520,6 +1525,7 @@ pub(crate) fn scan_workspace_direct(
     let extractor_runs = extractor_runs(&snapshot_id, &fingerprints, &plan);
     let manual_link_records = persisted_manual_link_records(&snapshot_id, &link_decisions)?;
     let mut staged_degradations = focused_batches.degradations.clone();
+    staged_degradations.extend(graph_degradations);
     staged_degradations.extend(corroboration.degradations.clone());
     staged_degradations.extend(stored_batch_degradations(
         &focused_batches.stored_batches,
@@ -4681,12 +4687,37 @@ fn assemble_graph(
         &repository_aliases,
     );
 
-    let mut edges = link_http_boundaries(&boundaries)?;
-    edges.extend(link_declared_tests(&tests, &boundaries)?);
-    edges.extend(link_declared_implementations(
-        &implementations,
-        &boundaries,
-    )?);
+    let mut http_links = link_http_boundaries_with_ambiguities(&boundaries);
+    let test_links = link_declared_tests_with_ambiguities(&tests, &boundaries);
+    let implementation_links =
+        link_declared_implementations_with_ambiguities(&implementations, &boundaries);
+    http_links.ambiguities.extend(test_links.ambiguities);
+    http_links
+        .ambiguities
+        .extend(implementation_links.ambiguities);
+    http_links.ambiguities.sort_by(|left, right| {
+        (&left.method, &left.path, &left.candidates).cmp(&(
+            &right.method,
+            &right.path,
+            &right.candidates,
+        ))
+    });
+    http_links.ambiguities.dedup();
+    let degradations = http_links
+        .ambiguities
+        .iter()
+        .map(|ambiguity| {
+            format!(
+                "ambiguous HTTP provider for {} {}; stable candidates: {}",
+                ambiguity.method,
+                ambiguity.path,
+                ambiguity.candidates.join(", ")
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut edges = http_links.edges;
+    edges.extend(test_links.edges);
+    edges.extend(implementation_links.edges);
     edges.extend(
         source_facts
             .iter()
@@ -4841,6 +4872,7 @@ fn assemble_graph(
         evidence: evidence.into_values().collect(),
         link_decisions: Vec::new(),
         link_node_keys,
+        degradations,
     })
 }
 
@@ -4963,84 +4995,15 @@ fn relink_affected_graph(
     Ok(())
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "Optional provider orchestration keeps budgets, isolation, and degradation accounting together"
-)]
 fn run_codegraph_corroboration(
     context: &WorkspaceContext,
     focused: &FocusedBatchState,
     plan: &IncrementalPlan,
+    selected_repository: Option<&str>,
     codegraph_binary: Option<PathBuf>,
 ) -> CorroborationSummary {
-    let mut jobs = Vec::new();
-    let mut setup_degradations = Vec::new();
-    for repository in &context.registry.record.repositories {
-        let Some(project_path) = context.registry.checkout_path(&repository.alias) else {
-            setup_degradations.push(format!(
-                "CodeGraph skipped `{}` because its checkout is unavailable",
-                repository.alias
-            ));
-            continue;
-        };
-        let mut anchors = focused
-            .source_batches
-            .iter()
-            .filter(|batch| batch.source.repo_id == repository.id)
-            .flat_map(|batch| {
-                let source_path = portable_path(&batch.source.path.display);
-                batch.outputs.iter().filter_map(move |observation| {
-                    if observation.role != SourceRole::Provider {
-                        return None;
-                    }
-                    Some(SymbolAnchor {
-                        symbol: observation.symbol_name.clone()?,
-                        source_path: source_path.clone(),
-                        start_line: usize::try_from(observation.lines.start).ok()?,
-                    })
-                })
-            })
-            .collect::<Vec<_>>();
-        anchors.sort_by(|left, right| {
-            (&left.source_path, left.start_line, &left.symbol).cmp(&(
-                &right.source_path,
-                right.start_line,
-                &right.symbol,
-            ))
-        });
-        anchors.dedup();
-        if anchors.len() > 50 {
-            anchors.truncate(50);
-            setup_degradations.push(format!(
-                "CodeGraph symbol corroboration for `{}` was limited to 50 anchors",
-                repository.alias
-            ));
-        }
-        let mut changed_files = plan
-            .changes
-            .iter()
-            .filter(|change| repository.id == change.repo_id)
-            .filter(|change| change.kind != code_system_graph_model::ArtifactChangeKind::Unchanged)
-            .map(|change| portable_path(&change.path.display))
-            .collect::<Vec<_>>();
-        changed_files.sort();
-        changed_files.dedup();
-        if changed_files.len() > 1_024 {
-            changed_files.truncate(1_024);
-            setup_degradations.push(format!(
-                "CodeGraph affected-test corroboration for `{}` was limited to 1,024 changed files",
-                repository.alias
-            ));
-        }
-        if !anchors.is_empty() || !changed_files.is_empty() {
-            jobs.push((
-                repository.id.clone(),
-                project_path.to_path_buf(),
-                anchors,
-                changed_files,
-            ));
-        }
-    }
+    let (jobs, setup_degradations) =
+        prepare_codegraph_jobs(context, focused, plan, selected_repository);
     let worker = std::thread::spawn(move || -> Result<Vec<RepositoryCorroboration>, String> {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -5107,6 +5070,98 @@ fn run_codegraph_corroboration(
     summary.degradations.sort();
     summary.degradations.dedup();
     summary
+}
+
+type CodeGraphJob = (RepoId, PathBuf, Vec<SymbolAnchor>, Vec<String>);
+
+fn prepare_codegraph_jobs(
+    context: &WorkspaceContext,
+    focused: &FocusedBatchState,
+    plan: &IncrementalPlan,
+    selected_repository: Option<&str>,
+) -> (Vec<CodeGraphJob>, Vec<String>) {
+    let mut anchors_by_repository = BTreeMap::<RepoId, Vec<SymbolAnchor>>::new();
+    for batch in &focused.source_batches {
+        let source_path = portable_path(&batch.source.path.display);
+        let anchors = anchors_by_repository
+            .entry(batch.source.repo_id.clone())
+            .or_default();
+        anchors.extend(batch.outputs.iter().filter_map(|observation| {
+            if observation.role != SourceRole::Provider {
+                return None;
+            }
+            Some(SymbolAnchor {
+                symbol: observation.symbol_name.clone()?,
+                source_path: source_path.clone(),
+                start_line: usize::try_from(observation.lines.start).ok()?,
+            })
+        }));
+    }
+    let mut changed_files_by_repository = BTreeMap::<RepoId, Vec<String>>::new();
+    for change in plan
+        .changes
+        .iter()
+        .filter(|change| change.kind != code_system_graph_model::ArtifactChangeKind::Unchanged)
+    {
+        changed_files_by_repository
+            .entry(change.repo_id.clone())
+            .or_default()
+            .push(portable_path(&change.path.display));
+    }
+
+    let mut jobs = Vec::new();
+    let mut setup_degradations = Vec::new();
+    for repository in &context.registry.record.repositories {
+        if selected_repository.is_some_and(|selected| selected != repository.alias) {
+            continue;
+        }
+        let Some(project_path) = context.registry.checkout_path(&repository.alias) else {
+            setup_degradations.push(format!(
+                "CodeGraph skipped `{}` because its checkout is unavailable",
+                repository.alias
+            ));
+            continue;
+        };
+        let mut anchors = anchors_by_repository
+            .remove(&repository.id)
+            .unwrap_or_default();
+        anchors.sort_by(|left, right| {
+            (&left.source_path, left.start_line, &left.symbol).cmp(&(
+                &right.source_path,
+                right.start_line,
+                &right.symbol,
+            ))
+        });
+        anchors.dedup();
+        if anchors.len() > 50 {
+            anchors.truncate(50);
+            setup_degradations.push(format!(
+                "CodeGraph symbol corroboration for `{}` was limited to 50 anchors",
+                repository.alias
+            ));
+        }
+        let mut changed_files = changed_files_by_repository
+            .remove(&repository.id)
+            .unwrap_or_default();
+        changed_files.sort();
+        changed_files.dedup();
+        if changed_files.len() > 1_024 {
+            changed_files.truncate(1_024);
+            setup_degradations.push(format!(
+                "CodeGraph affected-test corroboration for `{}` was limited to 1,024 changed files",
+                repository.alias
+            ));
+        }
+        if !anchors.is_empty() || !changed_files.is_empty() {
+            jobs.push((
+                repository.id.clone(),
+                project_path.to_path_buf(),
+                anchors,
+                changed_files,
+            ));
+        }
+    }
+    (jobs, setup_degradations)
 }
 
 fn apply_codegraph_corroboration(graph: &mut GraphAssembly, reports: &[RepositoryCorroboration]) {
