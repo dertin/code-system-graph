@@ -3,7 +3,7 @@
 All notable public changes to Code System Graph are documented in this file. Code System Graph follows Semantic
 Versioning.
 
-## [1.0.2] - 2026-08-04
+## [1.0.2] - 2026-08-05
 
 ### Performance and reliability
 

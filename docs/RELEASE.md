@@ -1,7 +1,9 @@
-# Code System Graph 1.0.1 Release
+# Code System Graph 1.0.2 Release
 
-Code System Graph 1.0.1 is the first cross-platform maintenance release. The source tree and
-package version are `1.0.1`. Continuous integration runs on GitHub at
+Code System Graph 1.0.2 is a performance and reliability maintenance release. It avoids
+republishing unchanged CodeGraph-backed snapshots, bounds focused corroboration work, preserves
+ambiguous HTTP evidence as degradations, and improves supervised-worker diagnostics. The source
+tree and package version are `1.0.2`. Continuous integration runs on GitHub at
 `https://github.com/dertin/code-system-graph`.
 
 Platform claims below require native build, test, packaging, and archive-smoke evidence from the
@@ -81,8 +83,8 @@ GNU tar, and SHA-256 tooling. The workspace MSRV remains 1.97.1 and is validated
 
 ```text
 SOURCE_DATE_EPOCH=0 scripts/package-release.sh x86_64-unknown-linux-gnu
-scripts/smoke-install.sh dist/code-system-graph-x86_64-unknown-linux-gnu-v1.0.1
-sha256sum --check dist/code-system-graph-x86_64-unknown-linux-gnu-v1.0.1.sha256
+scripts/smoke-install.sh dist/code-system-graph-x86_64-unknown-linux-gnu-v1.0.2
+sha256sum --check dist/code-system-graph-x86_64-unknown-linux-gnu-v1.0.2.sha256
 ```
 
 The package contains `csgraph`, `code-system-graph-hooks`, public documentation, license and notice files,
@@ -115,7 +117,7 @@ clean `main` branch aligned with `origin/main`, Cargo credentials for crates.io,
 selects `prepare`:
 
 ```text
-.github/workflows/release.sh 1.0.1 prepare
+.github/workflows/release.sh 1.0.2 prepare
 ```
 
 Preparation runs the complete publish-readiness suite and dry-runs all five packages without
@@ -123,7 +125,7 @@ creating a tag, publishing a crate, or dispatching a workflow. To perform the ir
 pass `publish` explicitly:
 
 ```text
-.github/workflows/release.sh 1.0.1 publish
+.github/workflows/release.sh 1.0.2 publish
 ```
 
 Publish mode verifies that the workspace repository matches `origin`, creates and pushes the
