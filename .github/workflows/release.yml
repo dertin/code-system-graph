@@ -276,7 +276,21 @@ jobs:
         run: |
           set -euo pipefail
           cd release-assets
-          sha256sum * > SHA256SUMS
+          shopt -s nullglob
+          archives=(*.tgz *.zip)
+          sboms=(*.cdx.json)
+          if [ "${#archives[@]}" -ne 5 ] || [ "${#sboms[@]}" -ne 1 ]; then
+            printf 'expected five archives and one SBOM; found %s archives and %s SBOMs\n' \
+              "${#archives[@]}" "${#sboms[@]}" >&2
+            exit 1
+          fi
+          sha256sum "${archives[@]}" "${sboms[@]}" > SHA256SUMS
+          find . -mindepth 1 -maxdepth 1 \
+            ! -name '*.tgz' \
+            ! -name '*.zip' \
+            ! -name '*.cdx.json' \
+            ! -name 'SHA256SUMS' \
+            -exec rm -rf -- {} +
 
       - name: Generate artifact attestations
         uses: actions/attest@v4
