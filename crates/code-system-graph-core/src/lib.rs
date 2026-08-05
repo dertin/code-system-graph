@@ -119,7 +119,7 @@ pub use interfaces::{
     Ambiguity, ConfigDoctorInput, ContractAction, ContractCompatibility, ContractCompatibilitySummary, ContractDifference, ContractFinding, ContractIssue, ContractIssueSeverity, ContractLink, ContractReport, ContractRequest, ContractView, DELIVERY_METADATA_VERSION, DoctorCategory, DoctorCheck, DoctorReport, DoctorRequest, DoctorStatus, DomainErrorKind, EvidenceMetadata, ExitCode, ExportFormat, ExportReport, ExportRequest, FreshnessDoctorInput, INTERFACE_RESULT_VERSION, INTERFACE_SCHEMA_VERSION, IntegrityDoctorInput, InterfaceError, MAX_EXPORT_EDGES, MAX_EXPORT_NODES, NextAction, Page, Pagination, ProviderDoctorInput, ProviderDoctorStatus, PublicSchema, PublicSchemaCatalog, SchemaDoctorInput, Summary, Warning, classify_exit_code, classify_interface_error, doctor, export_graph, inspect_contracts, paginate, public_schema_catalog
 };
 pub use linker::{
-    LinkError, ManualLinkEndpoint, ManualLinkError, ManualLinkResolution, link_http_boundaries, merge_affected_link_neighborhoods, resolve_manual_links
+    HttpLinkAmbiguity, HttpLinkResolution, LinkError, ManualLinkEndpoint, ManualLinkError, ManualLinkResolution, link_http_boundaries, link_http_boundaries_with_ambiguities, merge_affected_link_neighborhoods, resolve_manual_links
 };
 pub use manifest::{
     ContractImplementationConfig, HttpConsumerConfig, HttpContractConfig, IntegrationTestConfig, ManifestError, ManualLinkConfig, RepositoryConfig, WorkspaceManifest, parse_manifest, validate_manual_links
@@ -161,6 +161,6 @@ pub use source_syntax::{
     SourceSyntaxError, SourceSyntaxInspection, SourceSyntaxLanguage, inspect_source_syntax
 };
 pub use test_links::{
-    DeclaredImplementation, DeclaredTestCase, declared_implementation, declared_test_case, link_declared_implementations, link_declared_tests
+    DeclaredImplementation, DeclaredTestCase, declared_implementation, declared_test_case, link_declared_implementations, link_declared_implementations_with_ambiguities, link_declared_tests, link_declared_tests_with_ambiguities
 };
 pub use trace::{FederatedGraph, TraceError};

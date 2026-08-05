@@ -5,7 +5,7 @@ for maintainers are in [Release engineering](RELEASE.md).
 
 ## Current availability
 
-Code System Graph `1.0.1` is published on [crates.io](https://crates.io/crates/code-system-graph)
+Code System Graph `1.0.2` is published on [crates.io](https://crates.io/crates/code-system-graph)
 and [GitHub Releases](https://github.com/dertin/code-system-graph/releases). Native release CI
 validates Linux x86_64/ARM64, macOS x86_64/ARM64, and Windows x86_64 before their archives are
 published.
@@ -84,8 +84,8 @@ For a Linux x86_64 archive:
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-tar -xzf code-system-graph-x86_64-unknown-linux-gnu-v1.0.1.tgz
-PREFIX="$HOME/.local" ./code-system-graph-x86_64-unknown-linux-gnu-v1.0.1/install.sh
+tar -xzf code-system-graph-x86_64-unknown-linux-gnu-v1.0.2.tgz
+PREFIX="$HOME/.local" ./code-system-graph-x86_64-unknown-linux-gnu-v1.0.2/install.sh
 ```
 
 Replace the target in the archive name with `x86_64-apple-darwin`,
@@ -93,7 +93,7 @@ Replace the target in the archive name with `x86_64-apple-darwin`,
 same installer.
 
 The Windows archive is a ZIP file. Verify `SHA256SUMS`, extract
-`code-system-graph-x86_64-pc-windows-msvc-v1.0.1.zip`, and add its `bin` directory containing
+`code-system-graph-x86_64-pc-windows-msvc-v1.0.2.zip`, and add its `bin` directory containing
 `csgraph.exe` and `code-system-graph-hooks.exe` to `PATH`.
 
 `PREFIX` defaults to `$HOME/.local`. The installer places binaries under `$PREFIX/bin`, installed
@@ -171,7 +171,7 @@ cargo uninstall code-system-graph-hooks
 Run `uninstall.sh` from the verified extracted package with the same prefix:
 
 ```bash
-PREFIX="$HOME/.local" ./code-system-graph-x86_64-unknown-linux-gnu-v1.0.1/uninstall.sh
+PREFIX="$HOME/.local" ./code-system-graph-x86_64-unknown-linux-gnu-v1.0.2/uninstall.sh
 ```
 
 Before uninstalling either installation type, remove any optional agent hooks:

@@ -2,12 +2,14 @@
 
 # Code System Graph
 
-**System-level code intelligence across repositories**
+**Open-source cross-repository code intelligence, dependency mapping, and impact analysis for AI
+coding agents**
 
-Understand what connects your repositories and what a change could break before you ship it.
+Map APIs, events, schemas, packages, databases, and ownership across repositories before a change
+breaks another service.
 
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-![Source version](https://img.shields.io/badge/source-v1.0.1-orange.svg)
+![Source version](https://img.shields.io/badge/source-v1.0.2-orange.svg)
 [![crates.io](https://img.shields.io/crates/v/code-system-graph.svg)](https://crates.io/crates/code-system-graph)
 ![Platforms](https://img.shields.io/badge/validated-Linux%20%7C%20macOS%20%7C%20Windows-1793d1.svg)
 ![Privacy](https://img.shields.io/badge/privacy-local%20%7C%20no%20telemetry-2ea44f.svg)
@@ -22,10 +24,11 @@ Claude Code | Codex | Gemini CLI | Antigravity | Cursor
 
 </div>
 
-Code System Graph builds a local, evidence-backed map of the boundaries between repositories:
-APIs, events, schemas, packages, databases, deployments, tests, owners, and documentation. Your
-coding agent can then answer system-level questions that are difficult to solve by searching one
-repository at a time.
+Code System Graph is a local-first static analysis and system architecture tool that builds an
+evidence-backed dependency graph across repositories. It connects APIs, events, schemas, packages,
+databases, deployments, tests, owners, and documentation, then exposes that context to AI coding
+agents through the Model Context Protocol (MCP). Agents can answer system-level questions that are
+difficult to solve by searching one repository at a time.
 
 ## What problem does it solve?
 
@@ -279,6 +282,11 @@ configuration format; optional routing hooks are a separate step. Follow
 [Connect an agent](docs/AGENT_SETUP.md) for exact commands, configuration files, verification, and
 limitations.
 
+For Cursor, keep the entry in `<workspace>/.cursor/mcp.json`; an absolute database path does not
+make a global MCP entry workspace-scoped. Reload Cursor and enable the server after changing the
+file. `csgraph mcp --codegraph` starts CodeGraph itself, so a separate `codegraph install` entry is
+unnecessary.
+
 You can now ask the agent:
 
 ```text
@@ -383,7 +391,7 @@ non-loopback HTTP access.
 - [Use CodeGraph with every repository in a workspace](docs/CODEGRAPH_INTEGRATION.md)
 - [Connect Claude Code, Codex, Gemini, Antigravity, or Cursor](docs/AGENT_SETUP.md)
 - [CLI reference](docs/CLI.md)
-- [Troubleshooting with `doctor`](docs/GETTING_STARTED.md#troubleshooting)
+- [Troubleshooting](docs/TROUBLESHOOTING.md)
 
 ### Analysis guides
 

@@ -1,5 +1,7 @@
 //! Acceptance tests for targeted and forced scan controls.
 
+use std::fmt::Write as _;
+
 use code_system_graph::{
     ApplicationError, ScanOverrides, WatcherState, application_exit_code, finish_watcher_lease, scan_workspace, scan_workspace_with_overrides, scan_workspace_with_worker_executable, start_watcher_lease, status_workspace
 };
@@ -100,6 +102,149 @@ fn targeted_scan_should_reuse_unselected_repository_batches() -> anyhow::Result<
         })
         .expect("forced source batch should remain persisted");
     assert_eq!(forced_source.output_count, 1);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn targeted_codegraph_scan_should_not_schedule_unselected_repositories() -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temporary = tempfile::tempdir()?;
+    let mut manifest = String::from("version: 1\nname: focused-codegraph\nrepos:\n");
+    for alias in ["a", "b"] {
+        let repository = temporary.path().join(alias);
+        std::fs::create_dir_all(repository.join("src"))?;
+        std::fs::write(
+            repository.join("openapi.yaml"),
+            openapi(&format!("/{alias}")),
+        )?;
+        std::fs::write(
+            repository.join("src/lib.rs"),
+            format!(
+                "use axum::{{Router, routing::get}};\npub fn router() -> Router {{ Router::new().route(\"/{alias}\", get(handler)) }}\nasync fn handler() {{}}\n"
+            ),
+        )?;
+        write!(
+            manifest,
+            "  {alias}:\n    path: {alias}\n    openapi: openapi.yaml\n"
+        )?;
+    }
+    let manifest_path = temporary.path().join("code-system-graph.yaml");
+    let database = temporary.path().join("graph.db");
+    std::fs::write(&manifest_path, manifest)?;
+    scan_workspace(&manifest_path, &database)?;
+
+    let invocation_log = temporary.path().join("codegraph.log");
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fixtures/codegraph/fake/codegraph.py")
+        .canonicalize()?;
+    let binary = temporary.path().join("codegraph-focused");
+    std::fs::write(
+        &binary,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nexec python3 '{}' \"$@\"\n",
+            invocation_log.display(),
+            fixture.display()
+        ),
+    )?;
+    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700))?;
+    std::fs::write(
+        temporary.path().join("a/openapi.yaml"),
+        openapi("/a/changed"),
+    )?;
+
+    let summary = scan_workspace_with_overrides(
+        &manifest_path,
+        &database,
+        &ScanOverrides {
+            codegraph: true,
+            codegraph_binary: Some(binary),
+            repository: Some("a".to_owned()),
+            ..ScanOverrides::default()
+        },
+    )?;
+    let invocations = std::fs::read_to_string(invocation_log)?;
+
+    assert!(summary.changed_input_count > 0);
+    assert!(invocations.contains(temporary.path().join("a").to_string_lossy().as_ref()));
+    assert!(!invocations.contains(temporary.path().join("b").to_string_lossy().as_ref()));
+    Ok(())
+}
+
+#[test]
+fn duplicate_http_providers_should_degrade_without_aborting_unrelated_links() -> anyhow::Result<()>
+{
+    let temporary = tempfile::tempdir()?;
+    for alias in ["api-a", "api-b", "web"] {
+        std::fs::create_dir(temporary.path().join(alias))?;
+    }
+    std::fs::write(
+        temporary.path().join("api-a/openapi.yaml"),
+        "openapi: 3.1.0\ninfo: { title: A, version: 1 }\npaths:\n  /orders:\n    get: {}\n  /health:\n    get: {}\n",
+    )?;
+    std::fs::write(
+        temporary.path().join("api-b/openapi.yaml"),
+        openapi("/orders"),
+    )?;
+    for source in ["orders.ts", "health.ts"] {
+        std::fs::write(temporary.path().join("web").join(source), "export {};\n")?;
+    }
+    let base_manifest = "version: 1\nname: http-ambiguity\nrepos:\n  api-a:\n    path: api-a\n    openapi: openapi.yaml\n  api-b:\n    path: api-b\n    openapi: openapi.yaml\n  web:\n    path: web\n    httpConsumers:\n      - method: GET\n        path: /orders\n        source: orders.ts\n      - method: GET\n        path: /health\n        source: health.ts\n";
+    let manifest = temporary.path().join("code-system-graph.yaml");
+    let database = temporary.path().join("graph.db");
+    std::fs::write(&manifest, base_manifest)?;
+
+    let summary = scan_workspace(&manifest, &database)?;
+    let store = SqliteStore::open_read_only(&database)?;
+    let (nodes, edges) = store.load_current_graph("http-ambiguity")?;
+    let automatic_calls = edges
+        .iter()
+        .filter(|edge| edge.kind == code_system_graph_model::EdgeKind::CallsRemote)
+        .count();
+    assert_eq!(automatic_calls, 1);
+    assert!(
+        summary
+            .degradations
+            .iter()
+            .any(|item| item.contains("ambiguous HTTP provider for GET /orders"))
+    );
+
+    let consumer = nodes
+        .iter()
+        .find(|node| node.stable_key.contains(":consumer:GET:/orders"))
+        .expect("orders consumer node");
+    let registry = store.load_workspace_registry("http-ambiguity")?;
+    let api_a = registry
+        .repositories
+        .iter()
+        .find(|repository| repository.alias == "api-a")
+        .expect("api-a registry entry");
+    let provider = nodes
+        .iter()
+        .find(|node| {
+            node.repo_id.as_ref() == Some(&api_a.id)
+                && node.stable_key.contains(":provider:GET:/orders")
+        })
+        .expect("api-a orders provider");
+    let resolved_manifest = format!(
+        "{base_manifest}manualLinks:\n  - from: {}\n    to: {}\n    relation: calls_remote\n    contract: GET /orders\n    reason: Select the authoritative orders provider\n",
+        consumer.id.as_str(),
+        provider.id.as_str()
+    );
+    drop(store);
+    std::fs::write(&manifest, resolved_manifest)?;
+
+    scan_workspace(&manifest, &database)?;
+    let (_, resolved_edges) =
+        SqliteStore::open_read_only(&database)?.load_current_graph("http-ambiguity")?;
+    assert_eq!(
+        resolved_edges
+            .iter()
+            .filter(|edge| edge.kind == code_system_graph_model::EdgeKind::CallsRemote)
+            .count(),
+        2
+    );
     Ok(())
 }
 
@@ -219,6 +364,9 @@ fn supervised_validation_failures_should_keep_invalid_input_classification() -> 
             ApplicationError::SupervisedApplication { .. }
         ));
     }
+    assert!(errors[0].to_string().contains("missing"));
+    assert!(errors[1].to_string().contains("wrong"));
+    assert!(errors[1].to_string().contains("typed-worker-errors"));
 
     std::fs::write(repository.join("openapi.yaml"), "openapi: [")?;
     let malformed = scan_workspace(&manifest, &database).expect_err("malformed OpenAPI");
@@ -227,6 +375,7 @@ fn supervised_validation_failures_should_keep_invalid_input_classification() -> 
         malformed,
         ApplicationError::SupervisedApplication { .. }
     ));
+    assert!(malformed.to_string().contains("invalid OpenAPI document"));
     Ok(())
 }
 

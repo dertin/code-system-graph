@@ -266,6 +266,20 @@ batch reuse. If budgets changed, a scan restricted with `--repo` fails early and
 scan so one snapshot cannot mix global policies. Any exhausted budget aborts before publication;
 the previous snapshot remains current and queryable.
 
+If one legitimate metadata value exceeds the default 65,536-byte per-value string limit, raise
+only that ceiling conservatively in the workspace manifest:
+
+```yaml
+extractionBudgets:
+  maxStringBytesPerValue: 131072
+```
+
+This is a positive-integer, workspace-wide ceiling applied independently to each extracted string
+value. It does not raise `maxAccumulatedStringBytesPerArtifact`, which bounds all strings produced
+by one artifact-extractor invocation, or `maxSerializedOutputBytesPerArtifact`, which bounds the
+complete encoded batch. Prefer the smallest practical increase and change the other limits only
+when the reported resource names them explicitly. See [Troubleshooting](TROUBLESHOOTING.md).
+
 Supervised execution policy is also global and operator-owned. It bounds the lifetime and resident
 memory of each fresh scan or sync worker, and makes a foreground watcher expire even when changes
 continue indefinitely. It does not cap repositories, files, graph nodes, graph edges, or the active

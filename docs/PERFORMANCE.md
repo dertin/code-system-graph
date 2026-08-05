@@ -97,6 +97,6 @@ includes discovery, fingerprinting, linking, community analysis, and SQLite publ
   community algorithms.
 
 The canonical repository is `https://github.com/dertin/code-system-graph`. Linux x86_64 has native
-workload evidence; cross-platform workflow jobs are configured but macOS, Windows, and Linux ARM64
-lack native release validation. No performance result is claimed for those targets until native
-validation completes.
+performance-workload evidence. Release CI validates supported Linux, macOS, and Windows targets,
+but those platform checks do not establish performance characteristics. No performance result is
+claimed for targets without equivalent measured workload evidence.
