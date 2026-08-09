@@ -245,7 +245,13 @@ jobs:
           "@
           $csgraph = Join-Path $binDir "csgraph.exe"
           & $csgraph scan --config (Join-Path $smoke "code-system-graph.yaml") --database (Join-Path $smoke "graph.db") | Out-Null
+          if ($LASTEXITCODE -ne 0) {
+            throw "csgraph scan failed with exit code $LASTEXITCODE"
+          }
           & $csgraph plugin create --output (Join-Path $smoke "plugin") --config (Join-Path $smoke "code-system-graph.yaml") --database (Join-Path $smoke "graph.db") | Out-Null
+          if ($LASTEXITCODE -ne 0) {
+            throw "complete plugin generation failed with exit code $LASTEXITCODE"
+          }
           if (-not (Test-Path (Join-Path $smoke "plugin\plugin.json"))) {
             throw "generated plugin is missing plugin.json"
           }
@@ -268,15 +274,20 @@ jobs:
           }
           $base = Join-Path $smoke "base-plugin"
           New-Item -ItemType Directory -Path (Join-Path $base ".codex-plugin") -Force | Out-Null
-          New-Item -ItemType Directory -Path (Join-Path $base "skills\release-system-graph") -Force | Out-Null
+          New-Item -ItemType Directory -Path (Join-Path $base "skills") -Force | Out-Null
           Set-Content -Path (Join-Path $base "plugin.json") -Value '{"name":"release-base","version":"1.0.0","description":"Release smoke base"}'
           Set-Content -Path (Join-Path $base "mcp.json") -Value '{"mcpServers":{"release-code-system-graph":{"type":"stdio","command":"csgraph","args":["mcp","--binding","${PLUGIN_ROOT}/.local/code-system-graph/mcp-binding.json"],"env":{"CODE_SYSTEM_GRAPH_MCP_ADMIN":"0"}}}}'
           Set-Content -Path (Join-Path $base ".codex-plugin\plugin.json") -Value '{"name":"release-base","version":"1.0.0","mcpServers":{"release-code-system-graph":{"type":"stdio","command":"csgraph","args":["mcp","--binding","${PLUGIN_ROOT}/.local/code-system-graph/mcp-binding.json"],"env":{"CODE_SYSTEM_GRAPH_MCP_ADMIN":"0"}}}}'
           Set-Content -Path (Join-Path $base ".gitignore") -Value '/.local/'
-          Set-Content -Path (Join-Path $base "skills\release-system-graph\SKILL.md") -Value "---`nname: release-system-graph`ndescription: Release smoke routing skill.`n---"
           & $csgraph plugin create --output $base --mcp-server-name release-code-system-graph --routing-skill release-system-graph --config (Join-Path $smoke "code-system-graph.yaml") --database (Join-Path $smoke "graph.db") | Out-Null
+          if ($LASTEXITCODE -ne 0) {
+            throw "existing plugin composition failed with exit code $LASTEXITCODE"
+          }
           if (-not (Test-Path (Join-Path $base ".local\code-system-graph\mcp-binding.json"))) {
             throw "local MCP binding is missing"
+          }
+          if (-not (Test-Path (Join-Path $base "skills\release-system-graph\SKILL.md"))) {
+            throw "managed routing skill is missing"
           }
 
       - name: Upload release asset
