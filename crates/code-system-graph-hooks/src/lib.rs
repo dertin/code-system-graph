@@ -8,6 +8,7 @@
 mod install;
 mod managed_root;
 mod routing;
+pub mod templates;
 mod types;
 
 pub use install::{install, status, uninstall};

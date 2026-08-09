@@ -3,6 +3,47 @@
 All notable public changes to Code System Graph are documented in this file. Code System Graph follows Semantic
 Versioning.
 
+## [1.0.3] - 2026-08-09
+
+### Added
+
+- Added `executionPolicy.maxCodeGraphCorroborationAnchorsPerRepo`, retaining the 50-anchor default
+  while supporting smaller positive limits and explicit `-1` unlimited mode.
+- Added opt-in per-repository `useGitignore` with workspace-over-local precedence, nested Git rule
+  semantics, observable configuration origins, and shared native, OpenAPI, and watch discovery.
+  Watched workspaces now reload ignore matchers and directory watches after enabled `.gitignore`
+  files change.
+- Added `csgraph plugin create` and a versioned Agent Plugins 1.0.0 template for generating portable
+  read-only MCP packages with stable clone-independent identities, YAML-safe workspace metadata,
+  workspace-verifying routing guidance, and an ignored developer-local runtime binding.
+- Added existing-plugin composition mode, `csgraph plugin uninstall`, and `csgraph mcp --binding`.
+  Managed MCP entries, routing skills, receipts, and local bindings can be installed and removed
+  without changing unrelated plugin components; modified or unowned content is never deleted. New
+  local bindings and receipts record the generating `csgraph` version, exact executable
+  fingerprint, and build-time source commit/dirty state when available.
+- Complete plugins generate one client-neutral Agent Skill. Existing Codex plugins additionally
+  receive optional UI metadata in `agents/openai.yaml`; portable-only plugins do not. Every managed
+  skill file is validated and owned by the integration receipt.
+- Native Claude Code, Codex, and Gemini prompt hooks now act only as intent-based skill selectors;
+  the packaged Agent Skill remains the single detailed MCP procedure. Cursor and Antigravity
+  project rules are documented as fallbacks when their clients cannot load that skill.
+- Consolidated the portable Agent Plugin, canonical skill, native classifier signals, dynamic hook
+  guidance, static fallback rules, strict gate, and host-facing text under one visible
+  `agent-integration-template/` tree; Rust no longer carries editable routing prose or shell bodies.
+- Reduced Agent Skill and hook prompt noise with task-oriented tool selection, progressive loading
+  of maintenance guidance, and narrower English and Spanish routing signals that ignore generic
+  coding prompts.
+- Plugin creation and binding failures now preserve the standard CLI exit classifications for
+  invalid input, missing paths, conflicts, and internal failures.
+
+### Release engineering
+
+- Added schema validation, idempotency and conflict coverage, Unicode and space-path coverage,
+  YAML-frontmatter validation, stable exit-code coverage, local-binding ownership checks, MCP
+  handshakes for complete and existing-plugin profiles, and watched `.gitignore` reload coverage.
+- Included the complete versioned Agent integration template tree in Unix and Windows release
+  archives and smoke validation.
+
 ## [1.0.2] - 2026-08-05
 
 ### Performance and reliability

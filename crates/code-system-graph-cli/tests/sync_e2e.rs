@@ -283,6 +283,88 @@ fn assert_watch_sync(extra_arguments: &[&str]) -> anyhow::Result<()> {
     result
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn native_watch_should_reload_gitignore_before_filtering_future_events() -> anyhow::Result<()> {
+    let temporary = tempfile::tempdir()?;
+    let (manifest, database) = write_workspace(temporary.path())?;
+    let repository = temporary.path().join("api");
+    std::fs::create_dir(repository.join("src"))?;
+    let source = repository.join("src/lib.rs");
+    std::fs::write(&source, "pub fn before() {}\n")?;
+    std::fs::write(repository.join(".gitignore"), "src/\n")?;
+    std::fs::write(
+        &manifest,
+        "version: 1\nname: sync-e2e\nrepos:\n  api:\n    path: api\n    openapi: openapi.yaml\n    useGitignore: true\n",
+    )?;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_csgraph"))
+        .arg("sync")
+        .arg("--watch")
+        .arg("--no-codegraph")
+        .arg("--debounce-ms")
+        .arg("100")
+        .arg("--config")
+        .arg(&manifest)
+        .arg("--database")
+        .arg(&database)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("watch stdout was not piped"))?;
+    let (sender, receiver) = mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            if sender.send(line).is_err() {
+                break;
+            }
+        }
+    });
+
+    let result = (|| -> anyhow::Result<()> {
+        let initial = receiver
+            .recv_timeout(Duration::from_secs(15))
+            .context("watch did not publish its initial pass")??;
+        let initial = watch_sync_summary(&initial)?;
+        std::fs::write(repository.join(".gitignore"), "")?;
+        let unignored = next_changed_watch_summary(&receiver, &initial)?;
+
+        std::fs::write(&source, "pub fn after() {}\n")?;
+        let edited = next_changed_watch_summary(&receiver, &unignored)?;
+
+        assert_ne!(unignored.scan.snapshot_id, initial.scan.snapshot_id);
+        assert_ne!(edited.scan.snapshot_id, unignored.scan.snapshot_id);
+        Ok(())
+    })();
+
+    child.kill()?;
+    let _status = child.wait()?;
+    reader
+        .join()
+        .map_err(|_| anyhow::anyhow!("watch stdout reader panicked"))?;
+    result
+}
+
+#[cfg(target_os = "linux")]
+fn next_changed_watch_summary(
+    receiver: &mpsc::Receiver<Result<String, std::io::Error>>,
+    previous: &SyncSummary,
+) -> anyhow::Result<SyncSummary> {
+    loop {
+        let candidate = receiver
+            .recv_timeout(Duration::from_secs(15))
+            .context("watch did not publish after the expected change")??;
+        let candidate = watch_sync_summary(&candidate)?;
+        if candidate.scan.changed_input_count > 0
+            && candidate.scan.snapshot_id != previous.scan.snapshot_id
+        {
+            return Ok(candidate);
+        }
+    }
+}
+
 #[test]
 fn watch_failure_should_not_persist_or_emit_parser_literals() -> anyhow::Result<()> {
     let temporary = tempfile::tempdir()?;

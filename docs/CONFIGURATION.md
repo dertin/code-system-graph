@@ -57,6 +57,7 @@ repos:
       - "**/generated/**"
     includeDefaults:
       - vendor/internal-sdk/**
+    useGitignore: true
     httpConsumers:
       - method: POST
         path: /orders
@@ -71,6 +72,7 @@ repos:
 | `implementations` | A contract implementation anchor cannot be linked exactly from source |
 | `excludes` | Additional repository-relative paths must be omitted from automatic discovery |
 | `includeDefaults` | A specific path inside a default dependency or build exclusion must be discovered |
+| `useGitignore` | Repository-contained `.gitignore` rules should filter automatic discovery |
 
 These fields add explicit evidence. They are not required for supported, unambiguous source
 patterns.
@@ -102,6 +104,13 @@ match still wins. Explicit `openapi`, `httpConsumers`, `integrationTests`, and `
 artifacts remain authoritative and observable even when their containing tree is excluded from
 automatic discovery.
 
+`useGitignore` defaults to `false`, preserving the 1.0.2 discovery behavior. When enabled, root and
+nested `.gitignore` files inside the registered checkout use Git-compatible comments, escapes, and
+negations. It deliberately does not load `.ignore`, parent-directory rules, global Git excludes, or
+`.git/info/exclude`, and it never follows symlinks. Protected and explicit `excludes` rules still
+win; a `.gitignore` negation can only reverse another `.gitignore` rule. Read or parse failures are
+reported instead of becoming silent exclusions.
+
 Inspect the complete effective policy, including rules not present in YAML, without creating or
 opening a database:
 
@@ -124,6 +133,7 @@ version: 1
 openapi: ./contracts/openapi.yaml
 excludes:
   - coverage/**
+useGitignore: true
 ```
 
 Effective values use this precedence, from highest to lowest:
@@ -290,6 +300,7 @@ executionPolicy:
   maxScanWallTimeMs: 21600000
   maxNoProgressTimeMs: 300000
   maxCodeGraphSyncWallTimeMsPerRepo: 3600000
+  maxCodeGraphCorroborationAnchorsPerRepo: 50
   maxWorkerMemoryBytes: 17179869184
   gracefulTerminationMs: 5000
   watchIdleTimeoutMs: 28800000
@@ -304,7 +315,11 @@ The cache is not preallocated. Completed batches and a fully validated candidate
 resumed from the owner-only operational sidecar; that candidate remains invisible to every query
 surface until one atomic publication transaction succeeds.
 
-All values must be positive and representable. The no-progress and per-repository CodeGraph
+All values must be positive and representable except
+`maxCodeGraphCorroborationAnchorsPerRepo`, which also accepts `-1` for unlimited. Its default is
+`50`; it is applied independently after deterministic sorting and deduplication for each
+repository. Unlimited corroboration remains subject to scan/provider time, memory, and request
+budgets. The independent changed-file ceiling remains 1,024. The no-progress and per-repository CodeGraph
 deadlines cannot exceed the pass deadline; the termination grace cannot exceed the no-progress
 deadline; and watcher sub-deadlines cannot exceed the session deadline. Raising values explicitly
 authorizes greater maximum CPU, memory, or cloud-agent cost. Like extraction budgets, this block is

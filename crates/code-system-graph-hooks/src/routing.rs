@@ -7,51 +7,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use atomic_write_file::AtomicWriteFile;
 use serde::{Deserialize, Serialize};
 
+use crate::templates::{
+    FEDERATED_CODEGRAPH_GUIDANCE, FEDERATED_NATIVE_GUIDANCE, FEDERATED_SIGNALS, LOCAL_CODEGRAPH_GUIDANCE, LOCAL_NATIVE_GUIDANCE, LOCAL_SIGNALS
+};
 use crate::types::{HookError, RoutingIntent, RoutingRequest, RoutingResponse};
-
-const FEDERATED_CODEGRAPH_GUIDANCE: &str = "Use Code System Graph first for federated contracts, architecture, impact, diff, or PR-overlap context; use explore for repository-local source and symbol detail.";
-const LOCAL_CODEGRAPH_GUIDANCE: &str = "Use Code System Graph explore first for repository-local symbols, callers, tests, and implementation detail; use CodeGraph directly only if the provider is degraded.";
-const FEDERATED_NATIVE_GUIDANCE: &str = "Use Code System Graph first for federated contracts, architecture, impact, diff, or PR-overlap context. Repository-local source and symbol detail is unavailable in the native-only profile.";
-const LOCAL_NATIVE_GUIDANCE: &str = "Use Code System Graph for persisted repository entities, relationships, and source-free evidence. Repository-local source and symbol detail is unavailable in the native-only profile.";
-
-const FEDERATED_SIGNALS: &[&str] = &[
-    "cross-repo",
-    "cross repo",
-    "multiple repos",
-    "across repos",
-    "contract",
-    "api boundary",
-    "architecture",
-    "architectural",
-    "impact",
-    "blast radius",
-    "diff",
-    "pull request",
-    "pull-request",
-    "pr overlap",
-    "overlapping pr",
-    "dependency graph",
-    "service boundary",
-    "federated",
-];
-
-const LOCAL_SIGNALS: &[&str] = &[
-    "repository",
-    "repo",
-    "code",
-    "symbol",
-    "function",
-    "method",
-    "class",
-    "module",
-    "file",
-    "test",
-    "bug",
-    "refactor",
-    "implement",
-    "caller",
-    "call site",
-];
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct DedupState {
@@ -62,19 +21,21 @@ struct DedupState {
 #[must_use]
 pub fn classify_prompt(prompt: &str) -> RoutingIntent {
     let normalized = prompt.to_lowercase();
-    if FEDERATED_SIGNALS
-        .iter()
-        .any(|signal| normalized.contains(signal))
-    {
+    if contains_signal(FEDERATED_SIGNALS, &normalized) {
         RoutingIntent::Federated
-    } else if LOCAL_SIGNALS
-        .iter()
-        .any(|signal| normalized.contains(signal))
-    {
+    } else if contains_signal(LOCAL_SIGNALS, &normalized) {
         RoutingIntent::LocalRepository
     } else {
         RoutingIntent::None
     }
+}
+
+fn contains_signal(signals: &str, normalized_prompt: &str) -> bool {
+    signals
+        .lines()
+        .map(str::trim)
+        .filter(|signal| !signal.is_empty())
+        .any(|signal| normalized_prompt.contains(signal))
 }
 
 /// Classifies one host event and applies session/repository TTL deduplication.
@@ -134,10 +95,10 @@ pub fn route(request: &RoutingRequest) -> Result<RoutingResponse, HookError> {
 fn guidance_for(intent: RoutingIntent, codegraph_enabled: bool) -> Option<&'static str> {
     match (intent, codegraph_enabled) {
         (RoutingIntent::None, _) => None,
-        (RoutingIntent::LocalRepository, true) => Some(LOCAL_CODEGRAPH_GUIDANCE),
-        (RoutingIntent::Federated, true) => Some(FEDERATED_CODEGRAPH_GUIDANCE),
-        (RoutingIntent::LocalRepository, false) => Some(LOCAL_NATIVE_GUIDANCE),
-        (RoutingIntent::Federated, false) => Some(FEDERATED_NATIVE_GUIDANCE),
+        (RoutingIntent::LocalRepository, true) => Some(LOCAL_CODEGRAPH_GUIDANCE.trim_end()),
+        (RoutingIntent::Federated, true) => Some(FEDERATED_CODEGRAPH_GUIDANCE.trim_end()),
+        (RoutingIntent::LocalRepository, false) => Some(LOCAL_NATIVE_GUIDANCE.trim_end()),
+        (RoutingIntent::Federated, false) => Some(FEDERATED_NATIVE_GUIDANCE.trim_end()),
     }
 }
 
@@ -234,6 +195,10 @@ mod tests {
 
             assert!(!native.contains("explore"));
             assert!(enriched.contains("explore"));
+            assert!(native.contains("Follow the installed Code System Graph skill"));
+            assert!(enriched.contains("Follow the installed Code System Graph skill"));
+            assert!(!native.contains("routing path"));
+            assert!(!enriched.contains("routing path"));
         }
     }
 }

@@ -1,0 +1,17 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "{{MCP_SERVER_NAME}}": {
+      "type": "stdio",
+      "command": "csgraph",
+      "args": [
+        "mcp",
+        "--binding",
+        "${PLUGIN_ROOT}/.local/code-system-graph/mcp-binding.json"
+      ],
+      "env": {
+        "CODE_SYSTEM_GRAPH_MCP_ADMIN": "0"
+      }
+    }
+  }
+}

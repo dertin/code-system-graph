@@ -1,0 +1,4 @@
+interface:
+  display_name: {{SKILL_DISPLAY_NAME_YAML}}
+  short_description: "Workspace graph navigation and impact"
+  default_prompt: {{SKILL_DEFAULT_PROMPT_YAML}}

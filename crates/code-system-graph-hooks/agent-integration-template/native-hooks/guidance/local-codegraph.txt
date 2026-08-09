@@ -1,0 +1,1 @@
+Use `explore` to locate relevant symbols, call paths, implementation, and tests before broad filesystem searches. Follow the installed Code System Graph skill when available.

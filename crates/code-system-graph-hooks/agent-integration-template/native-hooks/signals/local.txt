@@ -1,0 +1,47 @@
+call path
+caller
+callee
+call site
+affected test
+find symbol
+locate symbol
+symbol definition
+implementation of
+where is this defined
+where is it defined
+where is the implementation
+where does this call
+where does it call
+repository structure
+module dependency
+dependency path
+local impact
+source context
+ruta de llamadas
+quién llama
+quien llama
+sitio de llamada
+punto de llamada
+pruebas afectadas
+tests afectados
+buscar símbolo
+buscar simbolo
+localizar símbolo
+localizar simbolo
+definición del símbolo
+definicion del simbolo
+implementación de
+implementacion de
+dónde está definido
+donde esta definido
+dónde se define
+donde se define
+dónde se implementa
+donde se implementa
+estructura del repositorio
+dependencia de módulo
+dependencia de modulo
+ruta de dependencias
+impacto local
+contexto de código
+contexto de codigo

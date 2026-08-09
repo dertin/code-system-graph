@@ -3,6 +3,7 @@
 use std::path::{Component, Path, PathBuf};
 
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
+use ignore::{IncrementalIgnore, WalkBuilder};
 use serde::ser::{Serialize, SerializeStruct, Serializer};
 use thiserror::Error;
 
@@ -94,6 +95,8 @@ pub struct IgnorePolicy {
     configured_excludes_source: ConfigSource,
     include_defaults: Vec<String>,
     include_defaults_source: ConfigSource,
+    use_gitignore: bool,
+    use_gitignore_source: ConfigSource,
     protected_matcher: GlobSet,
     default_matcher: GlobSet,
     configured_matcher: GlobSet,
@@ -108,6 +111,8 @@ impl PartialEq for IgnorePolicy {
             && self.configured_excludes_source == other.configured_excludes_source
             && self.include_defaults == other.include_defaults
             && self.include_defaults_source == other.include_defaults_source
+            && self.use_gitignore == other.use_gitignore
+            && self.use_gitignore_source == other.use_gitignore_source
     }
 }
 
@@ -118,7 +123,7 @@ impl Serialize for IgnorePolicy {
     where
         S: Serializer,
     {
-        let mut state = serializer.serialize_struct("IgnorePolicy", 4)?;
+        let mut state = serializer.serialize_struct("IgnorePolicy", 6)?;
         state.serialize_field("configured_excludes", &self.configured_excludes)?;
         state.serialize_field(
             "configured_excludes_source",
@@ -126,6 +131,8 @@ impl Serialize for IgnorePolicy {
         )?;
         state.serialize_field("include_defaults", &self.include_defaults)?;
         state.serialize_field("include_defaults_source", &self.include_defaults_source)?;
+        state.serialize_field("use_gitignore", &self.use_gitignore)?;
+        state.serialize_field("use_gitignore_source", &self.use_gitignore_source)?;
         state.end()
     }
 }
@@ -142,6 +149,30 @@ impl IgnorePolicy {
         configured_excludes_source: ConfigSource,
         include_defaults: Vec<String>,
         include_defaults_source: ConfigSource,
+    ) -> Result<Self, IgnorePatternError> {
+        Self::with_gitignore(
+            configured_excludes,
+            configured_excludes_source,
+            include_defaults,
+            include_defaults_source,
+            false,
+            ConfigSource::Default,
+        )
+    }
+
+    /// Builds one validated, compiled repository exclusion policy with optional `.gitignore`
+    /// discovery.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IgnorePatternError`] when a configured pattern is unsafe or malformed.
+    pub fn with_gitignore(
+        configured_excludes: Vec<String>,
+        configured_excludes_source: ConfigSource,
+        include_defaults: Vec<String>,
+        include_defaults_source: ConfigSource,
+        use_gitignore: bool,
+        use_gitignore_source: ConfigSource,
     ) -> Result<Self, IgnorePatternError> {
         let mut configured_excludes = normalize_patterns(configured_excludes)?;
         let mut include_defaults = normalize_patterns(include_defaults)?;
@@ -160,6 +191,8 @@ impl IgnorePolicy {
             configured_excludes_source,
             include_defaults,
             include_defaults_source,
+            use_gitignore,
+            use_gitignore_source,
             include_prefixes,
             include_can_match_anywhere,
         })
@@ -189,6 +222,18 @@ impl IgnorePolicy {
         self.include_defaults_source
     }
 
+    /// Whether repository-contained `.gitignore` files participate in automatic discovery.
+    #[must_use]
+    pub const fn use_gitignore(&self) -> bool {
+        self.use_gitignore
+    }
+
+    /// Configuration layer that selected [`Self::use_gitignore`].
+    #[must_use]
+    pub const fn use_gitignore_source(&self) -> ConfigSource {
+        self.use_gitignore_source
+    }
+
     /// Whether one repository-relative path must be omitted from automatic discovery.
     #[must_use]
     pub fn excludes(&self, relative: &Path, directory: bool) -> bool {
@@ -213,11 +258,14 @@ impl IgnorePolicy {
     pub fn fingerprint_material(&self) -> String {
         format!(
             "version={IGNORE_POLICY_VERSION};protected={PROTECTED_EXCLUDES:?};defaults={DEFAULT_EXCLUDES:?};\
-             excludes={:?};excludes_source={:?};include_defaults={:?};include_defaults_source={:?}",
+             excludes={:?};excludes_source={:?};include_defaults={:?};include_defaults_source={:?};\
+             use_gitignore={};use_gitignore_source={:?}",
             self.configured_excludes,
             self.configured_excludes_source,
             self.include_defaults,
-            self.include_defaults_source
+            self.include_defaults_source,
+            self.use_gitignore,
+            self.use_gitignore_source
         )
     }
 
@@ -229,6 +277,169 @@ impl IgnorePolicy {
             .iter()
             .any(|prefix| prefix.starts_with(directory) || directory.starts_with(prefix))
     }
+}
+
+/// Failure while applying repository-contained `.gitignore` files during discovery.
+#[derive(Debug, Error)]
+pub enum RepositoryDiscoveryError {
+    /// Directory traversal or an enabled ignore file failed.
+    #[error("repository discovery failed under `{root}`: {source}")]
+    Ignore {
+        /// Registered repository root.
+        root: PathBuf,
+        /// Bounded walker or ignore-file failure.
+        #[source]
+        source: ignore::Error,
+    },
+    /// A walker result unexpectedly escaped its configured root.
+    #[error("repository discovery path `{path}` escaped root `{root}`")]
+    OutsideRoot {
+        /// Registered repository root.
+        root: PathBuf,
+        /// Unexpected walker path.
+        path: PathBuf,
+    },
+}
+
+/// Cached matcher for event paths outside a complete repository traversal.
+#[derive(Debug, Clone)]
+pub struct RepositoryPathMatcher {
+    policy: IgnorePolicy,
+    gitignore: Option<IncrementalIgnore>,
+}
+
+impl RepositoryPathMatcher {
+    /// Builds a matcher rooted at one registered checkout.
+    #[must_use]
+    pub fn new(root: &Path, policy: IgnorePolicy) -> Self {
+        let gitignore = policy
+            .use_gitignore()
+            .then(|| {
+                let mut matchers = gitignore_walk_builder(root, true).build_matchers();
+                matchers.pop()
+            })
+            .flatten();
+        Self { policy, gitignore }
+    }
+
+    /// Returns whether a path is excluded by protected, configured, default, or Git rules.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RepositoryDiscoveryError`] when an enabled ignore file cannot be interpreted.
+    pub fn excludes(
+        &mut self,
+        relative: &Path,
+        directory: bool,
+    ) -> Result<bool, RepositoryDiscoveryError> {
+        if self.policy.excludes(relative, directory) {
+            return Ok(true);
+        }
+        let Some(matcher) = self.gitignore.as_mut() else {
+            return Ok(false);
+        };
+        let (match_result, error) = matcher.matched_with_errors(relative, directory);
+        if let Some(source) = error {
+            return Err(RepositoryDiscoveryError::Ignore {
+                root: matcher.root().to_path_buf(),
+                source,
+            });
+        }
+        Ok(match_result.is_ignore())
+    }
+}
+
+/// Discovers regular, non-symlink files under one repository with the complete native policy.
+///
+/// `max_depth` uses walker depth, where the configured repository root is depth zero.
+///
+/// # Errors
+///
+/// Returns [`RepositoryDiscoveryError`] for directory or enabled ignore-file failures.
+pub fn discover_repository_files(
+    root: &Path,
+    policy: &IgnorePolicy,
+    max_depth: Option<usize>,
+) -> Result<Vec<PathBuf>, RepositoryDiscoveryError> {
+    discover_repository_files_matching(root, policy, max_depth, None, |_| true)
+}
+
+pub(crate) fn discover_repository_files_matching(
+    root: &Path,
+    policy: &IgnorePolicy,
+    max_depth: Option<usize>,
+    max_results: Option<usize>,
+    mut matches: impl FnMut(&Path) -> bool,
+) -> Result<Vec<PathBuf>, RepositoryDiscoveryError> {
+    let mut builder = gitignore_walk_builder(root, policy.use_gitignore());
+    if let Some(max_depth) = max_depth {
+        builder.max_depth(Some(max_depth));
+    }
+    let filter_policy = policy.clone();
+    let filter_root = root.to_path_buf();
+    builder.filter_entry(move |entry| {
+        if entry.depth() == 0 {
+            return true;
+        }
+        let Some(file_type) = entry.file_type() else {
+            return false;
+        };
+        if file_type.is_symlink() {
+            return false;
+        }
+        entry
+            .path()
+            .strip_prefix(&filter_root)
+            .is_ok_and(|relative| !filter_policy.excludes(relative, file_type.is_dir()))
+    });
+    builder.sort_by_file_path(std::path::Path::cmp);
+
+    let mut files = Vec::new();
+    for entry in builder.build() {
+        let entry = entry.map_err(|source| RepositoryDiscoveryError::Ignore {
+            root: root.to_path_buf(),
+            source,
+        })?;
+        let Some(file_type) = entry.file_type() else {
+            continue;
+        };
+        if entry.depth() == 0 || !file_type.is_file() || file_type.is_symlink() {
+            continue;
+        }
+        let relative =
+            entry
+                .path()
+                .strip_prefix(root)
+                .map_err(|_| RepositoryDiscoveryError::OutsideRoot {
+                    root: root.to_path_buf(),
+                    path: entry.path().to_path_buf(),
+                })?;
+        if !matches(relative) {
+            continue;
+        }
+        files.push(relative.to_path_buf());
+        if max_results.is_some_and(|limit| files.len() >= limit) {
+            break;
+        }
+    }
+    files.sort();
+    files.dedup();
+    Ok(files)
+}
+
+fn gitignore_walk_builder(root: &Path, use_gitignore: bool) -> WalkBuilder {
+    let mut builder = WalkBuilder::new(root);
+    builder
+        .standard_filters(false)
+        .hidden(false)
+        .parents(false)
+        .ignore(false)
+        .git_ignore(use_gitignore)
+        .git_global(false)
+        .git_exclude(false)
+        .require_git(false)
+        .follow_links(false);
+    builder
 }
 
 /// Validates configured exclusion globs.
@@ -407,7 +618,38 @@ fn unsafe_character(character: char) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
+    use tempfile::tempdir;
+
     use super::*;
+
+    #[test]
+    fn bounded_matching_discovery_should_stop_after_the_requested_results()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let repository = tempdir()?;
+        for index in 0..40 {
+            fs::write(
+                repository.path().join(format!("openapi-{index:02}.yaml")),
+                "openapi: 3.1.0\n",
+            )?;
+        }
+        let mut visited = 0_usize;
+        let files = discover_repository_files_matching(
+            repository.path(),
+            &policy(&[], &[]),
+            None,
+            Some(32),
+            |_| {
+                visited += 1;
+                true
+            },
+        )?;
+
+        assert_eq!(files.len(), 32);
+        assert_eq!(visited, 32);
+        Ok(())
+    }
 
     fn policy(excludes: &[&str], includes: &[&str]) -> IgnorePolicy {
         IgnorePolicy::new(
@@ -417,6 +659,129 @@ mod tests {
             ConfigSource::WorkspaceManifest,
         )
         .expect("valid fixture policy")
+    }
+
+    fn gitignore_policy(excludes: &[&str], includes: &[&str]) -> IgnorePolicy {
+        IgnorePolicy::with_gitignore(
+            excludes.iter().map(ToString::to_string).collect(),
+            ConfigSource::WorkspaceManifest,
+            includes.iter().map(ToString::to_string).collect(),
+            ConfigSource::WorkspaceManifest,
+            true,
+            ConfigSource::WorkspaceManifest,
+        )
+        .expect("valid fixture policy")
+    }
+
+    fn write(root: &Path, relative: &str, contents: &str) {
+        let path = root.join(relative);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("create fixture parent");
+        }
+        fs::write(path, contents).expect("write fixture");
+    }
+
+    #[test]
+    fn gitignore_should_be_opt_in_and_support_nested_rules_and_negation() {
+        let checkout = tempdir().expect("checkout");
+        let root = checkout.path();
+        write(
+            root,
+            ".gitignore",
+            "ignored/*\n!ignored/keep.rs\nspace\\ path.rs\n",
+        );
+        write(root, "ignored/drop.rs", "drop");
+        write(root, "ignored/keep.rs", "keep");
+        write(root, "space path.rs", "space");
+        write(root, "nested/.gitignore", "*.rs\n!keep.rs\n");
+        write(root, "nested/drop.rs", "drop");
+        write(root, "nested/keep.rs", "keep");
+
+        let enabled = discover_repository_files(root, &gitignore_policy(&[], &[]), None)
+            .expect("enabled discovery");
+        assert!(enabled.contains(&PathBuf::from("ignored/keep.rs")));
+        assert!(enabled.contains(&PathBuf::from("nested/keep.rs")));
+        assert!(!enabled.contains(&PathBuf::from("ignored/drop.rs")));
+        assert!(!enabled.contains(&PathBuf::from("nested/drop.rs")));
+        assert!(!enabled.contains(&PathBuf::from("space path.rs")));
+
+        let disabled =
+            discover_repository_files(root, &policy(&[], &[]), None).expect("disabled discovery");
+        assert!(disabled.contains(&PathBuf::from("ignored/drop.rs")));
+        assert!(disabled.contains(&PathBuf::from("nested/drop.rs")));
+        assert!(disabled.contains(&PathBuf::from("space path.rs")));
+    }
+
+    #[test]
+    fn gitignore_should_not_read_parent_dot_ignore_or_git_exclude_rules() {
+        let parent = tempdir().expect("parent");
+        let root = parent.path().join("checkout");
+        fs::create_dir_all(root.join(".git/info")).expect("git metadata");
+        write(parent.path(), ".gitignore", "from-parent.rs\n");
+        write(&root, ".ignore", "from-dot-ignore.rs\n");
+        write(&root, ".git/info/exclude", "from-git-exclude.rs\n");
+        for file in [
+            "from-parent.rs",
+            "from-dot-ignore.rs",
+            "from-git-exclude.rs",
+        ] {
+            write(&root, file, file);
+        }
+
+        let files =
+            discover_repository_files(&root, &gitignore_policy(&[], &[]), None).expect("discovery");
+        for file in [
+            "from-parent.rs",
+            "from-dot-ignore.rs",
+            "from-git-exclude.rs",
+        ] {
+            assert!(files.contains(&PathBuf::from(file)), "missing {file}");
+        }
+    }
+
+    #[test]
+    fn explicit_and_protected_exclusions_should_override_gitignore_negations() {
+        let checkout = tempdir().expect("checkout");
+        let root = checkout.path();
+        write(
+            root,
+            ".gitignore",
+            "!generated/private.rs\n!vendor/sdk/lib.rs\n!.git/config\n",
+        );
+        write(root, "generated/private.rs", "private");
+        write(root, "vendor/sdk/lib.rs", "sdk");
+        write(root, ".git/config", "config");
+
+        let files = discover_repository_files(
+            root,
+            &gitignore_policy(&["generated/**"], &["vendor/sdk/**"]),
+            None,
+        )
+        .expect("discovery");
+        assert!(!files.contains(&PathBuf::from("generated/private.rs")));
+        assert!(files.contains(&PathBuf::from("vendor/sdk/lib.rs")));
+        assert!(!files.contains(&PathBuf::from(".git/config")));
+    }
+
+    #[test]
+    fn path_matcher_should_follow_nested_gitignore_rules() {
+        let checkout = tempdir().expect("checkout");
+        let root = checkout.path();
+        write(root, ".gitignore", "root.rs\n");
+        write(root, "nested/.gitignore", "*.rs\n!keep.rs\n");
+        let mut matcher = RepositoryPathMatcher::new(root, gitignore_policy(&[], &[]));
+
+        assert!(matcher.excludes(Path::new("root.rs"), false).expect("root"));
+        assert!(
+            matcher
+                .excludes(Path::new("nested/drop.rs"), false)
+                .expect("nested drop")
+        );
+        assert!(
+            !matcher
+                .excludes(Path::new("nested/keep.rs"), false)
+                .expect("nested keep")
+        );
     }
 
     #[test]

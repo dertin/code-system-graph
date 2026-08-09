@@ -3797,7 +3797,7 @@ mod tests {
         let document = parse_graphql_source(SourceLanguage::TypeScript, input)
             .expect("bounded TypeScript extraction should succeed");
 
-        assert!(document.resolvers.is_empty());
+        assert_eq!(document.resolvers, Vec::new());
     }
 
     #[test]

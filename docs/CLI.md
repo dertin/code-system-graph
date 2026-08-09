@@ -36,6 +36,8 @@ csgraph status --database <db> [--config <manifest>]
 csgraph doctor --database <db> [--config <manifest>]
 csgraph diagnostics --database <db> [--config <manifest>] --output <new-bundle.json>
 csgraph backup|restore ...
+csgraph plugin create --output <directory> [--mcp-server-name <server> --routing-skill <skill>] [--config <manifest>] [--database <db>] [--codegraph] [--replace-generated]
+csgraph plugin uninstall --output <directory> --mcp-server-name <server> --routing-skill <skill>
 ```
 
 Normal scan reuses unchanged source-owned batches. `--repo` recomputes only the selected alias and
@@ -44,8 +46,9 @@ scope. Doctor reports unavailable observations as unknown rather than healthy.
 
 `config show` resolves workspace and repository-local configuration without opening a database. Its
 deterministic JSON reports protected exclusions, reactivable built-in defaults, configured
-`excludes` and `includeDefaults` in canonical form with their source, and the ordered effective
-rules. The optional `--repo` filter requires one exact manifest alias.
+`excludes` and `includeDefaults` in canonical form, effective `useGitignore`, their configuration
+sources, and the ordered effective rules. The optional `--repo` filter requires one exact manifest
+alias.
 
 `scan` and plain `sync` each perform one pass and exit. Neither command installs a watcher or
 background service. `sync` is incremental, but first runs `codegraph sync --quiet` with direct
@@ -67,6 +70,48 @@ system, architecture, generation time, whether `CODE_SYSTEM_GRAPH_DEBUG=1` was r
 source-free doctor report. It refuses to overwrite an existing destination and creates the file
 with mode `0600` on Unix. Review the bundle before sharing it; the command does not upload or send
 anything.
+
+`plugin create` validates the manifest, existing database snapshot, and workspace identity before
+atomically writing a strict portable-core Agent Plugins 1.0.0 directory and its ignored local
+binding. It reports snapshot freshness and generated files as JSON. Re-running against byte-identical output
+returns `changed: false`; different, additional, or symlinked entries are conflicts and remain
+untouched. `--codegraph-binary` requires `--codegraph` and is resolved only inside the local
+binding. Plugin, MCP, and skill names derive from the declared workspace name, making versioned
+output stable across clones. The report distinguishes `complete_plugin` from `existing_plugin`
+mode, records the ignored binding path, the canonical workspace root, and
+`client_managed_project_local` activation scope because the Agent Plugins standard delegates
+directory-based enablement to each client.
+
+Only `.local/code-system-graph/mcp-binding.json` embeds absolute host paths. The generated
+`/.local/` rule excludes it; the remaining plugin files are portable and versionable. Developers
+use existing-plugin mode with the plugin's MCP server and routing skill names to recreate the
+binding after cloning.
+
+All generated content comes directly from
+`crates/code-system-graph-hooks/agent-integration-template/agent-plugin/`, which Cargo packages
+through the shared hooks crate consumed by the CLI. One portable MCP declaration consumes the ignored binding; strict `{{VAR}}` rendering
+rejects unknown, missing, or unused template variables. Complete-plugin mode emits one standard
+Agent Skill and no client-specific UI metadata.
+
+When `--mcp-server-name` and `--routing-skill` are supplied together, `plugin create` treats
+`--output` as an existing portable plugin. It adds the named read-only server entry to `mcp.json`
+and, when present, `.codex-plugin/plugin.json`, and generates the routing skill when absent.
+Matching components are left unchanged; conflicting components fail closed. Unrelated MCP servers,
+skills, and manifest fields are preserved. When a Codex manifest is present, the managed skill also
+receives optional `agents/openai.yaml` UI metadata; portable-only bases do not. `.gitignore` must
+contain the exact `/.local/` rule.
+
+The ignored `.local/code-system-graph/` directory contains the runtime binding and an ownership
+receipt with hashes for managed skill files. Both record the generating package version, exact
+executable fingerprint, and build-time source commit/dirty state when available. Older owned
+bindings without this additive provenance remain readable and replaceable. Existing-plugin mode
+reports `changed: false` for an identical integration. `--replace-generated` atomically replaces
+only recognized local state and never adopts an unmanaged directory. Updating a changed versioned
+skill requires `plugin uninstall` followed by `plugin create`. Uninstall requires that receipt and
+removes only the
+exact managed MCP entries, unchanged skill, and local directory. Modified or unowned components
+produce a conflict. `csgraph mcp --binding <file>` validates the binding and its referenced
+manifest, database, and optional CodeGraph executable before starting the read-only server.
 
 ## Intelligence
 

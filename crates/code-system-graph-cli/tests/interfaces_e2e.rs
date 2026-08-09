@@ -50,7 +50,7 @@ fn contracts_exports_and_doctor_should_share_source_free_snapshot_services() -> 
     let doctor = doctor_workspace(&fixture, &database)?;
     let serialized = serde_json::to_string(&contracts)?;
 
-    assert!(!contracts.contracts.is_empty());
+    assert_ne!(contracts.contracts.as_slice(), &[]);
     assert!(json.content.starts_with('{'));
     assert!(graphml.content.starts_with("<?xml"));
     assert!(!json.truncated);
@@ -72,7 +72,7 @@ fn contracts_exports_and_doctor_should_share_source_free_snapshot_services() -> 
         ])
         .output()?;
     assert_eq!(output.status.code(), Some(3));
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, Vec::<u8>::new());
     Ok(())
 }
 
@@ -84,7 +84,7 @@ fn cli_should_generate_completions_without_protocol_noise() -> anyhow::Result<()
         .output()?;
 
     assert!(output.status.success());
-    assert!(output.stderr.is_empty());
+    assert_eq!(output.stderr, Vec::<u8>::new());
     assert!(String::from_utf8(output.stdout)?.contains("_csgraph"));
     Ok(())
 }

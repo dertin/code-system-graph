@@ -1,0 +1,10 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "{{PLUGIN_NAME}}",
+  "version": "{{PLUGIN_VERSION}}",
+  "description": "Workspace graph tools and usage skill for {{WORKSPACE_JSON_STRING}}",
+  "homepage": "https://github.com/dertin/code-system-graph",
+  "repository": "https://github.com/dertin/code-system-graph",
+  "license": "Apache-2.0",
+  "keywords": ["code-intelligence", "graph", "mcp", "workspace"]
+}

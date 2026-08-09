@@ -212,6 +212,7 @@ pub struct ChangeRequest {
 }
 
 /// Read-only source of repository changes.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait ChangeProvider: Send + Sync {
     /// Collects a bounded and fingerprinted change set.
@@ -1567,6 +1568,7 @@ mod tests {
     fn repo() -> Result<TempDir, Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         git(temp.path(), &["init", "-q"])?;
+        git(temp.path(), &["config", "core.autocrlf", "false"])?;
         git(
             temp.path(),
             &["config", "user.name", "Code System Graph Test"],

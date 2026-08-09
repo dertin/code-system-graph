@@ -1,0 +1,1 @@
+Cursor beforeSubmitPrompt can allow or block but cannot inject advisory routing context; installed an always-on project rule instead.

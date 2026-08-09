@@ -1412,7 +1412,7 @@ mod tests {
             };
             let restored = application_failure(failure);
             assert_eq!(application_exit_code(&restored), expected);
-            assert!(!restored.to_string().is_empty());
+            assert_ne!(restored.to_string(), "");
         }
     }
 

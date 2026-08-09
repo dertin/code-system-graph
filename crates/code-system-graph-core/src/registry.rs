@@ -414,6 +414,7 @@ mod tests {
         let linked = temporary.path().join("linked");
         fs::create_dir_all(&repository)?;
         git(&repository, &["init"])?;
+        git(&repository, &["config", "core.autocrlf", "false"])?;
         fs::write(repository.join("README.md"), "fixture")?;
         git(&repository, &["add", "README.md"])?;
         git(

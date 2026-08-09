@@ -2719,7 +2719,7 @@ fn ordinary() {
 "##;
         let result = parse_rust_source(source);
 
-        assert!(result.is_empty());
+        assert_eq!(result, Vec::new());
     }
 
     #[test]
@@ -3050,7 +3050,7 @@ client.get("/not-httpx")
 "#;
         let result = parse_python_source(source);
 
-        assert!(result.is_empty());
+        assert_eq!(result, Vec::new());
     }
 
     #[test]

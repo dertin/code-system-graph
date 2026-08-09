@@ -651,7 +651,7 @@ paths:
             provider("repo:api-b"),
         ]);
 
-        assert!(result.edges.is_empty());
+        assert_eq!(result.edges, Vec::new());
         assert_eq!(result.ambiguities.len(), 1);
         assert_eq!(result.ambiguities[0].method, "POST");
         assert_eq!(result.ambiguities[0].path, "/api/orders");

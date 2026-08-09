@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -12,6 +14,8 @@ pub const DEFAULT_MAX_SCAN_WALL_TIME_MS: u64 = 21_600_000;
 pub const DEFAULT_MAX_NO_PROGRESS_TIME_MS: u64 = 300_000;
 /// Default maximum wall time for one repository-local `CodeGraph` synchronization.
 pub const DEFAULT_MAX_CODEGRAPH_SYNC_WALL_TIME_MS_PER_REPO: u64 = 3_600_000;
+/// Default maximum source-symbol anchors corroborated through `CodeGraph` per repository.
+pub const DEFAULT_MAX_CODEGRAPH_CORROBORATION_ANCHORS_PER_REPO: i64 = 50;
 /// Default maximum resident memory accepted for one worker process.
 pub const DEFAULT_MAX_WORKER_MEMORY_BYTES: u64 = 17_179_869_184;
 /// Default cooperative shutdown grace period before forced termination.
@@ -24,6 +28,82 @@ pub const DEFAULT_MAX_WATCH_SESSION_WALL_TIME_MS: u64 = 86_400_000;
 pub const DEFAULT_MIN_WATCH_RESCAN_INTERVAL_MS: u64 = 10_000;
 /// Default maximum retained historical checkpoint-cache bytes.
 pub const DEFAULT_MAX_CHECKPOINT_CACHE_BYTES: u64 = 10_737_418_240;
+
+/// Effective per-repository limit for source-symbol corroboration through `CodeGraph`.
+///
+/// The workspace manifest keeps `-1` as its portable unlimited sentinel, but resolved policy and
+/// consumers use this type so that sentinel handling does not leak beyond the serde boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema)]
+pub enum CodeGraphCorroborationAnchorLimit {
+    /// Corroborate at most this many source-symbol anchors per repository.
+    Bounded(NonZeroUsize),
+    /// Do not apply a count limit.
+    Unlimited,
+}
+
+impl CodeGraphCorroborationAnchorLimit {
+    /// Returns the bounded limit, or `None` when corroboration is unlimited.
+    #[must_use]
+    pub const fn bounded(self) -> Option<NonZeroUsize> {
+        match self {
+            Self::Bounded(limit) => Some(limit),
+            Self::Unlimited => None,
+        }
+    }
+}
+
+impl TryFrom<i64> for CodeGraphCorroborationAnchorLimit {
+    type Error = InvalidExecutionPolicy;
+
+    fn try_from(value: i64) -> Result<Self, Self::Error> {
+        if value == -1 {
+            return Ok(Self::Unlimited);
+        }
+        let limit = usize::try_from(value)
+            .ok()
+            .and_then(NonZeroUsize::new)
+            .ok_or(InvalidExecutionPolicy::InvalidValue {
+                field: "maxCodeGraphCorroborationAnchorsPerRepo",
+                value: value.unsigned_abs(),
+            })?;
+        Ok(Self::Bounded(limit))
+    }
+}
+
+impl Serialize for CodeGraphCorroborationAnchorLimit {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let value = match self {
+            Self::Bounded(limit) => i64::try_from(limit.get()).map_err(|_| {
+                serde::ser::Error::custom("CodeGraph corroboration anchor limit exceeds i64")
+            })?,
+            Self::Unlimited => -1,
+        };
+        serializer.serialize_i64(value)
+    }
+}
+
+impl<'de> Deserialize<'de> for CodeGraphCorroborationAnchorLimit {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        i64::deserialize(deserializer)?
+            .try_into()
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+impl std::fmt::Display for CodeGraphCorroborationAnchorLimit {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Bounded(limit) => limit.fmt(formatter),
+            Self::Unlimited => formatter.write_str("-1"),
+        }
+    }
+}
 
 /// Optional operator-owned execution-policy overrides from the workspace manifest.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -218,6 +298,26 @@ impl ExecutionPolicy {
             .map(|(name, value)| format!("{name}={value}"))
             .collect::<Vec<_>>()
             .join(";");
+        stable_id("execution-policy", &canonical)
+    }
+
+    /// Returns a fingerprint that also includes the additive `CodeGraph` corroboration bound.
+    #[must_use]
+    pub fn fingerprint_with_codegraph_limit(
+        &self,
+        limit: CodeGraphCorroborationAnchorLimit,
+    ) -> String {
+        let mut canonical = self
+            .canonical_values()
+            .into_iter()
+            .map(|(name, value)| format!("{name}={value}"))
+            .collect::<Vec<_>>()
+            .join(";");
+        write!(
+            canonical,
+            ";maxCodeGraphCorroborationAnchorsPerRepo={limit}"
+        )
+        .expect("writing to a String cannot fail");
         stable_id("execution-policy", &canonical)
     }
 }
@@ -502,6 +602,15 @@ mod tests {
         let policy = ExecutionPolicy::default();
 
         assert_eq!(policy.max_scan_wall_time_ms, 21_600_000);
+        assert_eq!(
+            CodeGraphCorroborationAnchorLimit::try_from(
+                DEFAULT_MAX_CODEGRAPH_CORROBORATION_ANCHORS_PER_REPO
+            )
+            .expect("default anchor limit")
+            .bounded()
+            .map(NonZeroUsize::get),
+            Some(50)
+        );
         assert_eq!(policy.max_worker_memory_bytes, 17_179_869_184);
         assert_eq!(policy.max_checkpoint_cache_bytes, 10_737_418_240);
     }
@@ -533,6 +642,45 @@ mod tests {
                 value: 0
             }
         ));
+    }
+
+    #[test]
+    fn corroboration_anchor_limit_should_accept_positive_or_unlimited() {
+        let bounded =
+            CodeGraphCorroborationAnchorLimit::try_from(12).expect("positive anchor limit");
+        let unlimited =
+            CodeGraphCorroborationAnchorLimit::try_from(-1).expect("unlimited anchor limit");
+
+        assert_eq!(bounded.bounded().map(NonZeroUsize::get), Some(12));
+        assert_eq!(unlimited.bounded(), None);
+        assert_ne!(
+            ExecutionPolicy::default().fingerprint_with_codegraph_limit(bounded),
+            ExecutionPolicy::default().fingerprint_with_codegraph_limit(unlimited)
+        );
+        assert_eq!(
+            serde_json::to_value(bounded).expect("bounded limit serializes"),
+            serde_json::json!(12)
+        );
+        assert_eq!(
+            serde_json::to_value(unlimited).expect("unlimited limit serializes"),
+            serde_json::json!(-1)
+        );
+    }
+
+    #[test]
+    fn corroboration_anchor_limit_should_reject_zero_and_values_below_sentinel() {
+        for value in [0, -2] {
+            let error = CodeGraphCorroborationAnchorLimit::try_from(value)
+                .expect_err("invalid anchor limit");
+
+            assert!(matches!(
+                error,
+                InvalidExecutionPolicy::InvalidValue {
+                    field: "maxCodeGraphCorroborationAnchorsPerRepo",
+                    value: observed
+                } if observed == value.unsigned_abs()
+            ));
+        }
     }
 
     #[test]

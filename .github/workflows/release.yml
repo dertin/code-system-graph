@@ -156,11 +156,12 @@ jobs:
           version="${RELEASE_TAG#v}"
           asset_dir="${PRODUCT_NAME}-${TARGET}-v${version}"
           doc_dir="dist/${asset_dir}/share/doc/${PRODUCT_NAME}"
-          mkdir -p "dist/${asset_dir}/bin" "$doc_dir"
+          mkdir -p "dist/${asset_dir}/bin" "$doc_dir" "dist/${asset_dir}/share/${PRODUCT_NAME}"
           cp "target/${TARGET}/release/csgraph" "dist/${asset_dir}/bin/"
           cp "target/${TARGET}/release/code-system-graph-hooks" "dist/${asset_dir}/bin/"
           cp LICENSE NOTICE THIRD_PARTY_NOTICES.md README.md SECURITY.md "$doc_dir/"
           cp -R docs "$doc_dir/"
+          cp -R crates/code-system-graph-hooks/agent-integration-template "dist/${asset_dir}/share/${PRODUCT_NAME}/"
           cp scripts/install.sh scripts/uninstall.sh "dist/${asset_dir}/"
           tar -C dist -czf "dist/${asset_dir}.tgz" "${asset_dir}"
           rm -rf "dist/${asset_dir}"
@@ -185,11 +186,13 @@ jobs:
           $assetDir = "$env:PRODUCT_NAME-$env:TARGET-v$version"
           $binDir = "dist\$assetDir\bin"
           $docDir = "dist\$assetDir\share\doc\$env:PRODUCT_NAME"
-          New-Item -ItemType Directory -Path $binDir, $docDir -Force
+          $shareDir = "dist\$assetDir\share\$env:PRODUCT_NAME"
+          New-Item -ItemType Directory -Path $binDir, $docDir, $shareDir -Force
           Copy-Item "target\$env:TARGET\release\csgraph.exe" $binDir
           Copy-Item "target\$env:TARGET\release\code-system-graph-hooks.exe" $binDir
           Copy-Item LICENSE, NOTICE, THIRD_PARTY_NOTICES.md, README.md, SECURITY.md $docDir
           Copy-Item docs "$docDir\docs" -Recurse
+          Copy-Item crates\code-system-graph-hooks\agent-integration-template "$shareDir\agent-integration-template" -Recurse
           Compress-Archive -Path "dist\$assetDir" -DestinationPath "dist\$assetDir.zip" -Force
           Remove-Item "dist\$assetDir" -Recurse -Force
 
@@ -208,6 +211,64 @@ jobs:
           }
           if (-not (Test-Path (Join-Path $binDir "code-system-graph-hooks.exe"))) {
             throw "code-system-graph-hooks.exe is missing from the archive"
+          }
+          $template = Join-Path $extracted "$assetDir\share\$env:PRODUCT_NAME\agent-integration-template\agent-plugin\plugin.json"
+          if (-not (Test-Path $template)) {
+            throw "agent-integration-template is missing from the archive"
+          }
+          @(
+            "mcp.json",
+            "generated.gitignore",
+            "metadata\skill-description.txt",
+            "metadata\openai-display-name.txt",
+            "metadata\openai-default-prompt.txt",
+            "skills\code-system-graph\SKILL.md",
+            "skills\code-system-graph\references\operating-guide.md"
+          ) | ForEach-Object {
+            $templateFile = Join-Path (Split-Path -Parent $template) $_
+            if (-not (Test-Path $templateFile)) {
+              throw "agent-integration-template is missing agent-plugin\$_"
+            }
+          }
+          if (-not (Test-Path (Join-Path (Split-Path -Parent (Split-Path -Parent $template)) "native-hooks\strict-gate.sh"))) {
+            throw "agent-integration-template is missing native-hooks\strict-gate.sh"
+          }
+          $smoke = Join-Path $env:RUNNER_TEMP "code-system-graph-plugin-smoke"
+          New-Item -ItemType Directory -Path (Join-Path $smoke "repo\src") -Force
+          Set-Content -Path (Join-Path $smoke "repo\src\lib.rs") -Value "pub fn smoke() {}"
+          Set-Content -Path (Join-Path $smoke "code-system-graph.yaml") -Value @"
+          version: 1
+          name: release-plugin-smoke
+          repos:
+            app:
+              path: repo
+          "@
+          $csgraph = Join-Path $binDir "csgraph.exe"
+          & $csgraph scan --config (Join-Path $smoke "code-system-graph.yaml") --database (Join-Path $smoke "graph.db") | Out-Null
+          & $csgraph plugin create --output (Join-Path $smoke "plugin") --config (Join-Path $smoke "code-system-graph.yaml") --database (Join-Path $smoke "graph.db") | Out-Null
+          if (-not (Test-Path (Join-Path $smoke "plugin\plugin.json"))) {
+            throw "generated plugin is missing plugin.json"
+          }
+          if (-not (Test-Path (Join-Path $smoke "plugin\.gitignore"))) {
+            throw "generated portable plugin is missing .gitignore"
+          }
+          if (-not (Test-Path (Join-Path $smoke "plugin\.local\code-system-graph\mcp-binding.json"))) {
+            throw "generated portable plugin is missing its local binding"
+          }
+          if (Get-ChildItem (Join-Path $smoke "plugin") -File -Recurse | Select-String -Pattern '\{\{[A-Z0-9_]+\}\}' -Quiet) {
+            throw "generated plugin contains an unresolved template variable"
+          }
+          $base = Join-Path $smoke "base-plugin"
+          New-Item -ItemType Directory -Path (Join-Path $base ".codex-plugin") -Force | Out-Null
+          New-Item -ItemType Directory -Path (Join-Path $base "skills\release-system-graph") -Force | Out-Null
+          Set-Content -Path (Join-Path $base "plugin.json") -Value '{"name":"release-base","version":"1.0.0","description":"Release smoke base"}'
+          Set-Content -Path (Join-Path $base "mcp.json") -Value '{"mcpServers":{"release-code-system-graph":{"type":"stdio","command":"csgraph","args":["mcp","--binding","${PLUGIN_ROOT}/.local/code-system-graph/mcp-binding.json"],"env":{"CODE_SYSTEM_GRAPH_MCP_ADMIN":"0"}}}}'
+          Set-Content -Path (Join-Path $base ".codex-plugin\plugin.json") -Value '{"name":"release-base","version":"1.0.0","mcpServers":{"release-code-system-graph":{"type":"stdio","command":"csgraph","args":["mcp","--binding","${PLUGIN_ROOT}/.local/code-system-graph/mcp-binding.json"],"env":{"CODE_SYSTEM_GRAPH_MCP_ADMIN":"0"}}}}'
+          Set-Content -Path (Join-Path $base ".gitignore") -Value '/.local/'
+          Set-Content -Path (Join-Path $base "skills\release-system-graph\SKILL.md") -Value "---`nname: release-system-graph`ndescription: Release smoke routing skill.`n---"
+          & $csgraph plugin create --output $base --mcp-server-name release-code-system-graph --routing-skill release-system-graph --config (Join-Path $smoke "code-system-graph.yaml") --database (Join-Path $smoke "graph.db") | Out-Null
+          if (-not (Test-Path (Join-Path $base ".local\code-system-graph\mcp-binding.json"))) {
+            throw "local MCP binding is missing"
           }
 
       - name: Upload release asset

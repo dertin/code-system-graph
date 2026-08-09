@@ -86,3 +86,35 @@ fn scan_should_invalidate_incremental_state_when_policy_changes() -> anyhow::Res
     assert!(after.discovered_input_count < before.discovered_input_count);
     Ok(())
 }
+
+#[test]
+fn scan_should_apply_gitignore_but_keep_explicit_artifacts() -> anyhow::Result<()> {
+    let temporary = tempfile::tempdir()?;
+    let repository = temporary.path().join("repo");
+    std::fs::create_dir_all(repository.join("ignored"))?;
+    std::fs::write(repository.join(".gitignore"), "ignored/*\n")?;
+    std::fs::write(repository.join("ignored/hidden.rs"), "pub fn hidden() {}\n")?;
+    std::fs::write(
+        repository.join("ignored/openapi.yaml"),
+        "openapi: 3.1.0\ninfo:\n  title: Explicit\n  version: 1\npaths: {}\n",
+    )?;
+    let manifest = temporary.path().join("code-system-graph.yaml");
+    std::fs::write(
+        &manifest,
+        "version: 1\nname: gitignore\nrepos:\n  app:\n    path: repo\n    useGitignore: true\n    openapi: ignored/openapi.yaml\n",
+    )?;
+    let database = temporary.path().join("graph.db");
+
+    scan_workspace(&manifest, &database)?;
+    let paths = SqliteStore::open_read_only(&database)?
+        .load_current_artifact_fingerprints("gitignore")?
+        .into_iter()
+        .map(|fingerprint| fingerprint.path)
+        .collect::<Vec<_>>();
+    let native_path =
+        |relative: &str| encode_native_path(&relative.split('/').collect::<std::path::PathBuf>());
+
+    assert!(!paths.contains(&native_path("ignored/hidden.rs")));
+    assert!(paths.contains(&native_path("ignored/openapi.yaml")));
+    Ok(())
+}

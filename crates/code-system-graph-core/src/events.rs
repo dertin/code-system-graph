@@ -2330,7 +2330,7 @@ channels:
             r#"let example = "event_bus.publish(\"orders\", payload)";"#,
         );
 
-        assert!(document.observations.is_empty());
+        assert_eq!(document.observations, Vec::new());
     }
 
     #[test]

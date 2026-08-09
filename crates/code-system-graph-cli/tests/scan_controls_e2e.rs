@@ -1,5 +1,6 @@
 //! Acceptance tests for targeted and forced scan controls.
 
+#[cfg(unix)]
 use std::fmt::Write as _;
 
 use code_system_graph::{

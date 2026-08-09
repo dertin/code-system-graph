@@ -442,7 +442,7 @@ mod tests {
             report.symbols.as_slice(),
             [SymbolCorroboration::Unresolved { .. }]
         ));
-        assert!(report.affected_tests.is_empty());
+        assert_eq!(report.affected_tests, Vec::<String>::new());
         assert_eq!(provider.operation_calls.load(Ordering::Relaxed), 0);
     }
 }

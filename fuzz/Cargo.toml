@@ -12,8 +12,8 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4.13"
-code-system-graph-core = { version = "1.0.2", path = "../crates/code-system-graph-core" }
-code-system-graph-model = { version = "1.0.2", path = "../crates/code-system-graph-model" }
+code-system-graph-core = { version = "1.0.3", path = "../crates/code-system-graph-core" }
+code-system-graph-model = { version = "1.0.3", path = "../crates/code-system-graph-model" }
 serde_json = "1.0.151"
 
 [[bin]]

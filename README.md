@@ -9,7 +9,7 @@ Map APIs, events, schemas, packages, databases, and ownership across repositorie
 breaks another service.
 
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-![Source version](https://img.shields.io/badge/source-v1.0.2-orange.svg)
+![Source version](https://img.shields.io/badge/source-v1.0.3-orange.svg)
 [![crates.io](https://img.shields.io/crates/v/code-system-graph.svg)](https://crates.io/crates/code-system-graph)
 ![Platforms](https://img.shields.io/badge/validated-Linux%20%7C%20macOS%20%7C%20Windows-1793d1.svg)
 ![Privacy](https://img.shields.io/badge/privacy-local%20%7C%20no%20telemetry-2ea44f.svg)
@@ -273,12 +273,77 @@ codex mcp add code-system-graph -- \
   --database /absolute/path/to/my-project/.code-system-graph/code-system-graph.db
 ```
 
+For clients that support [Agent Plugins](https://agent-plugins.org/), generate one portable,
+workspace-bound package plus its ignored local binding instead of configuring MCP and routing
+guidance separately:
+
+```bash
+csgraph plugin create \
+  --output ./code-system-graph-agent-plugin \
+  --config code-system-graph.yaml \
+  --database .code-system-graph/code-system-graph.db \
+  --codegraph
+```
+
+The visible `crates/code-system-graph-hooks/agent-integration-template/` directory is the sole
+source for editable agent installation, skill, discovery, and activation content. `agent-plugin/`
+owns the portable manifest, MCP declaration, canonical skill, operating guide, optional client
+metadata, license, validation schemas, and
+`/.local/` rule. `native-hooks/` owns classifier signals, dynamic selector guidance, static
+fallback rules, strict-gate shell, limitations, and host UI text. Complete-plugin mode emits only
+the portable core; client metadata is used only while composing into a plugin that already targets
+that client. Rust includes and renders these files and contains no second policy or prompt body.
+
+The manifest, MCP declaration, skill, and guide contain no machine paths and can be versioned. Only
+`.local/code-system-graph/mcp-binding.json` records the current developer's manifest, database,
+plugin root, optional CodeGraph executable, and auditable generator build identity: version, exact
+executable fingerprint, and build-time commit/dirty state when available. Do not commit `.local/`.
+Other developers recreate their binding after cloning by running `plugin create --output
+<plugin>` with that plugin's `--mcp-server-name` and `--routing-skill`.
+
+If a team already distributes a portable plugin, keep its MCP declarations versioned and write only
+the developer-local workspace binding under the ignored `.local/` tree:
+
+```bash
+csgraph plugin create \
+  --output ./team-agent-plugin \
+  --mcp-server-name team-code-system-graph \
+  --routing-skill team-system-graph \
+  --config code-system-graph.yaml \
+  --database .code-system-graph/code-system-graph.db \
+  --codegraph
+```
+
+The portable and Codex MCP entries must invoke `csgraph mcp --binding
+${PLUGIN_ROOT}/.local/code-system-graph/mcp-binding.json`; `create` validates those entries, the
+existing routing skill, and the `/.local/` ignore rule without rewriting any of them. Install the
+plugin root. Re-run with `--replace-generated` after local paths change; only a binding carrying
+Code System Graph's recognized ownership identity can be replaced. Until local binding creation
+runs, that MCP entry fails visibly while independent plugin skills and servers remain usable.
+
+The generated MCP is read-only and requires `csgraph 1.0.3` in `PATH`; it does not bundle binaries.
+Its plugin, server, and skill share a stable name derived from the declared workspace name, so
+clones produce the same versioned files. Install it project-locally for workspace-only activation;
+the generated skill also requires the nearest manifest and MCP `status` to report that workspace.
+For Claude Code, Codex, and Gemini, an optional native prompt hook can improve activation by asking
+the client to use the installed skill. The hook stays brief; the skill remains the only detailed
+procedure. Do not combine the skill with an always-on project rule.
+
+Use the same generated Agent Skill for every supported client. Do not copy its policy into a global
+`AGENTS.md`, Cursor rule, or another always-on instruction. Agent Plugins clients load the packaged
+skill directly; other clients need only a small native manifest/MCP adapter or, as a compatibility
+fallback, one manual MCP registration plus the same skill. Agent Plugins does not define a single
+cross-vendor marketplace.
+
 `--codegraph` exposes bounded repository-local `explore` context through Code System Graph. Omit it
 when CodeGraph is not installed; `explore` then remains unavailable while the federated tools keep
 working.
 
-Claude Code, Codex, Gemini CLI, Antigravity, and Cursor are supported. Each agent uses its own MCP
-configuration format; optional routing hooks are a separate step. Follow
+Claude Code, Codex, Gemini CLI, Antigravity, and Cursor are supported. Codex and Cursor can consume
+the packaged Agent Plugin; the other clients currently use their native MCP/plugin format with the
+same Agent Skill. Native prompt hooks can complement skill activation in Claude Code, Codex, and
+Gemini. Static Cursor and Antigravity rules remain fallback mechanisms when a skill cannot load.
+Follow
 [Connect an agent](docs/AGENT_SETUP.md) for exact commands, configuration files, verification, and
 limitations.
 
@@ -310,7 +375,7 @@ Where is coverage incomplete or stale?
 | Detect sibling repositories or choose workspace aliases | Manual manifest configuration |
 | Publish updates after files or the manifest change | Manual with one-shot `scan` or `sync`; automatic while `sync --watch` is running |
 | Register the MCP server with an agent | One explicit agent-specific command or config |
-| Install routing hooks | Optional, one explicit command per agent and repository |
+| Install native routing | Optional skill selector for Claude/Codex/Gemini; static fallback for Cursor/Antigravity |
 | Enable CodeGraph enrichment | Optional |
 
 ## Configuration at a glance
@@ -325,7 +390,7 @@ Where is coverage incomplete or stale?
 ### Optional
 
 - explicit OpenAPI paths or manual links when automatic evidence is insufficient;
-- repository-specific `excludes` and `includeDefaults` discovery globs;
+- repository-specific `excludes`, `includeDefaults`, and opt-in `useGitignore` discovery policy;
 - Git for local change, revision, and strict pre-commit analysis;
 - [CodeGraph](docs/CODEGRAPH_INTEGRATION.md) for repository-local source and symbol context;
 - GitHub or Bitbucket Cloud access for pull-request analysis;

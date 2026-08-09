@@ -6,6 +6,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use crate::managed_root::{MAX_HOST_FILE_BYTES, ManagedRoot};
+use crate::templates::{
+    ANTIGRAVITY_LIMITATION, CURSOR_LIMITATION, CURSOR_RULE, GEMINI_HOOK_DESCRIPTION, HOOK_STATUS_MESSAGE, STATIC_ROUTING_CODEGRAPH, STATIC_ROUTING_NATIVE, STATIC_RULE, STRICT_GATE
+};
 use crate::types::{
     HookError, HookMode, HookStatus, HostKind, InstallReport, InstallRequest, UninstallReport
 };
@@ -13,8 +16,6 @@ use crate::types::{
 const PRODUCT_MARKER: &str = "code-system-graph-hooks:v1";
 const STATE_DIRECTORY: &str = ".code-system-graph/hooks";
 const GENERATED_STATE_IGNORE_RULE: &[u8] = b".code-system-graph/";
-const CURSOR_LIMITATION: &str = "Cursor beforeSubmitPrompt can allow or block but cannot inject advisory routing context; installed an always-on project rule instead.";
-const ANTIGRAVITY_LIMITATION: &str = "Antigravity IDE does not document a stable project-file prompt hook protocol; installed a workspace rule instead.";
 
 #[derive(Debug, Clone, Copy)]
 enum HostProtocol {
@@ -241,12 +242,12 @@ fn host_spec(request: &InstallRequest) -> HostSpec {
         HostKind::Antigravity => (
             ".agents/rules/code-system-graph-routing.md",
             HostProtocol::Guidance,
-            Some(ANTIGRAVITY_LIMITATION),
+            Some(ANTIGRAVITY_LIMITATION.trim_end()),
         ),
         HostKind::Cursor => (
             ".cursor/rules/code-system-graph-routing.mdc",
             HostProtocol::Guidance,
-            Some(CURSOR_LIMITATION),
+            Some(CURSOR_LIMITATION.trim_end()),
         ),
     };
     HostSpec {
@@ -392,7 +393,7 @@ fn owned_json_entry_with_policy(
                 "type": "command",
                 "command": command,
                 "timeout": 5,
-                "statusMessage": "Selecting repository intelligence"
+                "statusMessage": HOOK_STATUS_MESSAGE.trim_end()
             }]
         }),
         HostKind::Gemini => json!({
@@ -402,7 +403,7 @@ fn owned_json_entry_with_policy(
                 "type": "command",
                 "command": command,
                 "timeout": 5000,
-                "description": "Select Code System Graph or CodeGraph from prompt intent"
+                "description": GEMINI_HOOK_DESCRIPTION.trim_end()
             }]
         }),
         HostKind::Antigravity | HostKind::Cursor => Value::Null,
@@ -508,8 +509,9 @@ fn install_guidance(
 
 fn guidance_scaffold(host: HostKind, block: &str) -> String {
     if host == HostKind::Cursor {
-        format!(
-            "---\ndescription: Code System Graph routing guidance ({PRODUCT_MARKER})\nalwaysApply: true\n---\n\n{block}"
+        render_embedded_template(
+            CURSOR_RULE,
+            &[("PRODUCT_MARKER", PRODUCT_MARKER), ("BLOCK", block)],
         )
     } else {
         block.to_owned()
@@ -518,14 +520,17 @@ fn guidance_scaffold(host: HostKind, block: &str) -> String {
 
 fn guidance_block(host: HostKind, codegraph_enabled: bool) -> String {
     let routing = if codegraph_enabled {
-        "- For work local to this repository, use Code System Graph explore first and use CodeGraph directly only if the provider is degraded.\n- For cross-repository work, contracts, architecture, impact, diffs, or pull-request overlap, use Code System Graph first and explore for local symbol detail."
+        STATIC_ROUTING_CODEGRAPH.trim_end()
     } else {
-        "- For repository-local work, use Code System Graph only for persisted entities, relationships, and source-free evidence; local source and symbol detail is unavailable in the native-only profile.\n- For cross-repository work, contracts, architecture, impact, diffs, or pull-request overlap, use Code System Graph first."
+        STATIC_ROUTING_NATIVE.trim_end()
     };
-    format!(
-        "{begin}\n# Code System Graph intelligence routing\n\nClassify only the user's submitted prompt. Do not quote, copy, or inject the prompt itself.\n\n{routing}\n- Never automatically run scans, CodeGraph init or sync, source queries, or mutations because of this rule.\n- Keep routing guidance brief and advisory.\n{end}\n",
-        begin = begin_marker(host),
-        end = end_marker(host)
+    render_embedded_template(
+        STATIC_RULE,
+        &[
+            ("BEGIN_MARKER", &begin_marker(host)),
+            ("ROUTING", routing),
+            ("END_MARKER", &end_marker(host)),
+        ],
     )
 }
 
@@ -543,10 +548,7 @@ fn remove_guidance(
         return Ok(false);
     };
     let generated_cursor_scaffold = request.host == HostKind::Cursor
-        && updated.trim()
-            == format!(
-                "---\ndescription: Code System Graph routing guidance ({PRODUCT_MARKER})\nalwaysApply: true\n---"
-            );
+        && updated.trim() == guidance_scaffold(HostKind::Cursor, "").trim();
     backup(managed, relative, backups)?;
     if updated.trim().is_empty() || generated_cursor_scaffold {
         managed.remove_file_if_exists(relative)?;
@@ -604,21 +606,35 @@ fn install_strict_gate(
 }
 
 fn strict_gate_block(request: &InstallRequest) -> String {
-    format!(
-        "{begin}\nCODE_SYSTEM_GRAPH_RESULT=\"$({binary} changes --scope staged --database {database} --workspace {workspace} --repository {repository})\" || {{\n  echo \"Code System Graph staged-change analysis failed; commit blocked by strict mode.\" >&2\n  exit 1\n}}\nCODE_SYSTEM_GRAPH_FINGERPRINT=\"$(printf '%s' \"$CODE_SYSTEM_GRAPH_RESULT\" | tr -d '\\n' | sed -n 's/.*\"exact_diff_fingerprint\":\"\\([^\"]*\\)\".*/\\1/p')\"\nif [ -z \"$CODE_SYSTEM_GRAPH_FINGERPRINT\" ]; then\n  echo \"Code System Graph returned no exact staged fingerprint; commit blocked by strict mode.\" >&2\n  exit 1\nfi\nunset CODE_SYSTEM_GRAPH_RESULT CODE_SYSTEM_GRAPH_FINGERPRINT\n{end}\n",
-        begin = begin_marker(request.host),
-        binary = shell_quote(
-            request
-                .code_system_graph_binary
-                .as_os_str()
-                .to_string_lossy()
-                .as_ref()
-        ),
-        database = shell_quote(request.database.as_os_str().to_string_lossy().as_ref()),
-        workspace = shell_quote(&request.workspace),
-        repository = shell_quote(&request.repository),
-        end = end_marker(request.host)
+    let binary = shell_quote(
+        request
+            .code_system_graph_binary
+            .as_os_str()
+            .to_string_lossy()
+            .as_ref(),
+    );
+    let database = shell_quote(request.database.as_os_str().to_string_lossy().as_ref());
+    let workspace = shell_quote(&request.workspace);
+    let repository = shell_quote(&request.repository);
+    render_embedded_template(
+        STRICT_GATE,
+        &[
+            ("BEGIN_MARKER", &begin_marker(request.host)),
+            ("BINARY", &binary),
+            ("DATABASE", &database),
+            ("WORKSPACE", &workspace),
+            ("REPOSITORY", &repository),
+            ("END_MARKER", &end_marker(request.host)),
+        ],
     )
+}
+
+fn render_embedded_template(template: &str, variables: &[(&str, &str)]) -> String {
+    variables
+        .iter()
+        .fold(template.to_owned(), |rendered, (name, value)| {
+            rendered.replace(&format!("{{{{{name}}}}}"), value)
+        })
 }
 
 fn remove_strict_gate(
@@ -980,7 +996,7 @@ fn make_executable(_path: &Path) -> Result<(), HookError> {
 mod tests {
     use std::path::PathBuf;
 
-    use super::{guidance_block, owned_json_entry};
+    use super::{guidance_block, guidance_scaffold, owned_json_entry, strict_gate_block};
     use crate::types::{HookMode, HostKind, InstallRequest};
 
     fn request(host: HostKind, codegraph_enabled: bool) -> InstallRequest {
@@ -1002,6 +1018,10 @@ mod tests {
         let enriched = guidance_block(HostKind::Cursor, true);
         assert!(!native.contains("explore"));
         assert!(enriched.contains("explore"));
+        assert!(!native.contains("{{"));
+        assert!(!enriched.contains("{{"));
+        assert!(!guidance_scaffold(HostKind::Cursor, &native).contains("{{"));
+        assert!(!strict_gate_block(&request(HostKind::Codex, false)).contains("{{"));
 
         let runtime = PathBuf::from("/bin/code-system-graph-hooks");
         let native_hook = owned_json_entry(&request(HostKind::Codex, false), &runtime).to_string();

@@ -279,6 +279,42 @@ fn classifier_prefers_federated_signals_over_local_signals() {
     );
 }
 
+#[test]
+fn classifier_should_avoid_generic_coding_prompt_noise() {
+    assert_eq!(
+        classify_prompt("Fix the bug in this file and run its tests"),
+        RoutingIntent::None
+    );
+    assert_eq!(
+        classify_prompt("Review this pull request diff"),
+        RoutingIntent::None
+    );
+    assert_eq!(
+        classify_prompt("Where is deployment documentation published?"),
+        RoutingIntent::None
+    );
+    assert_eq!(
+        classify_prompt("¿Dónde está publicada la documentación del despliegue?"),
+        RoutingIntent::None
+    );
+    assert_eq!(
+        classify_prompt("Find callers of process_order"),
+        RoutingIntent::LocalRepository
+    );
+    assert_eq!(
+        classify_prompt("Encuentra quién llama a process_order"),
+        RoutingIntent::LocalRepository
+    );
+    assert_eq!(
+        classify_prompt("Check contract compatibility between repositories"),
+        RoutingIntent::Federated
+    );
+    assert_eq!(
+        classify_prompt("Revisa el impacto entre repositorios"),
+        RoutingIntent::Federated
+    );
+}
+
 struct Fixture {
     directory: TempDir,
     host: HostKind,

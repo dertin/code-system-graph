@@ -1,0 +1,1 @@
+Use Code System Graph for tasks in workspace `{{WORKSPACE}}` that need repository discovery, source navigation, dependencies, contracts, architecture, change impact, or cross-repository evidence. Do not use it for tasks outside that workspace.

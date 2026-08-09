@@ -40,7 +40,15 @@ struct PersistedWatchTarget {
     configured_excludes_source: ConfigSource,
     include_defaults: Vec<String>,
     include_defaults_source: ConfigSource,
+    #[serde(default)]
+    use_gitignore: bool,
+    #[serde(default = "default_config_source")]
+    use_gitignore_source: ConfigSource,
     explicit_paths: Vec<PathBuf>,
+}
+
+const fn default_config_source() -> ConfigSource {
+    ConfigSource::Default
 }
 
 impl From<&SyncTarget> for PersistedWatchTarget {
@@ -52,6 +60,8 @@ impl From<&SyncTarget> for PersistedWatchTarget {
             configured_excludes_source: target.ignore_policy.configured_excludes_source(),
             include_defaults: target.ignore_policy.include_defaults().to_vec(),
             include_defaults_source: target.ignore_policy.include_defaults_source(),
+            use_gitignore: target.ignore_policy.use_gitignore(),
+            use_gitignore_source: target.ignore_policy.use_gitignore_source(),
             explicit_paths: target.explicit_paths.clone(),
         }
     }
@@ -61,11 +71,13 @@ impl TryFrom<PersistedWatchTarget> for SyncTarget {
     type Error = ApplicationError;
 
     fn try_from(target: PersistedWatchTarget) -> Result<Self, Self::Error> {
-        let ignore_policy = IgnorePolicy::new(
+        let ignore_policy = IgnorePolicy::with_gitignore(
             target.configured_excludes,
             target.configured_excludes_source,
             target.include_defaults,
             target.include_defaults_source,
+            target.use_gitignore,
+            target.use_gitignore_source,
         )
         .map_err(|error| {
             ApplicationError::Initialization(format!("invalid persisted watch scope: {error}"))
@@ -716,7 +728,7 @@ mod tests {
         );
         assert!(!report.enabled);
         assert_eq!(report.repository_count, 1);
-        assert!(report.repositories.is_empty());
+        assert_eq!(report.repositories.as_slice(), &[]);
     }
 
     #[test]

@@ -67,7 +67,7 @@ pub use communities::{
     CommunityError, analyze_communities, analyze_communities_with_progress, compare_community_snapshots
 };
 pub use config::{
-    ConfigError, ConfigSource, EffectiveRepositoryConfig, apply_openapi_override, resolve_repository_config
+    ConfigError, ConfigSource, EffectiveRepositoryConfig, apply_openapi_override, resolve_repository_config, resolve_repository_config_with_use_gitignore
 };
 pub use contract_compat::{
     CompatibilityFinding, CompatibilityReport, CompatibilityStatus, compare_database_contracts, compare_event_contracts, compare_graphql_contracts, compare_http_contracts, compare_package_contracts, compare_protobuf_contracts
@@ -86,7 +86,7 @@ pub use events::{
     DeliverySemantics, EventBroker, EventDocument, EventEvidenceLine, EventExtractionError, EventObservation, EventRole, EventSchemaDefinition, EventSchemaField, extract_asyncapi, parse_event_source
 };
 pub use execution_policy::{
-    ExecutionLimitExceeded, ExecutionPolicy, ExecutionPolicyOverrides, ExecutionResource, ExecutionSummary, InvalidExecutionPolicy, JobPhase, MonotonicClock, ScanJobTracker
+    CodeGraphCorroborationAnchorLimit, DEFAULT_MAX_CODEGRAPH_CORROBORATION_ANCHORS_PER_REPO, ExecutionLimitExceeded, ExecutionPolicy, ExecutionPolicyOverrides, ExecutionResource, ExecutionSummary, InvalidExecutionPolicy, JobPhase, MonotonicClock, ScanJobTracker
 };
 pub use extraction_budget::{
     BoundedJsonWriter, EXTRACTION_CONTRACT_VERSION, ExtractionBudgetOverrides, ExtractionBudgets, ExtractionClock, ExtractionLimitExceeded, ExtractionResource, ExtractionTracker, InvalidExtractionBudget
@@ -106,7 +106,7 @@ pub use http::{
     BoundaryRole, HttpBoundary, HttpExtractionError, extract_openapi, extract_openapi_with_tracker, normalize_http_path
 };
 pub use ignore_policy::{
-    DEFAULT_EXCLUDES, IGNORE_POLICY_VERSION, IgnorePatternError, IgnorePolicy, PROTECTED_EXCLUDES, validate_excludes, validate_include_defaults
+    DEFAULT_EXCLUDES, IGNORE_POLICY_VERSION, IgnorePatternError, IgnorePolicy, PROTECTED_EXCLUDES, RepositoryDiscoveryError, RepositoryPathMatcher, discover_repository_files, validate_excludes, validate_include_defaults
 };
 pub use impact::{
     CompatibilityInput, ContractImpact, CoverageSummary, CriticalityAssignment, CriticalityTag, EnvironmentAssignment, ImpactClassification, ImpactCompatibilityStatus, ImpactContext, ImpactDepthBucket, ImpactDirection, ImpactError, ImpactItem, ImpactOptions, ImpactPathStep, ImpactReport, ImpactRequest, ImpactTarget, LocalEnrichmentInput, LocalEnrichmentStatus, LocalImpactItem, LocalImpactSummary, RecommendedCommand, RepositoryImpact, ResolvedTarget, RiskFactor, RiskLevel, ServiceImpact, TestRecommendation, TestRecommendationSource, TruncationInfo, analyze_impact
@@ -122,7 +122,7 @@ pub use linker::{
     HttpLinkAmbiguity, HttpLinkResolution, LinkError, ManualLinkEndpoint, ManualLinkError, ManualLinkResolution, link_http_boundaries, link_http_boundaries_with_ambiguities, merge_affected_link_neighborhoods, resolve_manual_links
 };
 pub use manifest::{
-    ContractImplementationConfig, HttpConsumerConfig, HttpContractConfig, IntegrationTestConfig, ManifestError, ManualLinkConfig, RepositoryConfig, WorkspaceManifest, parse_manifest, validate_manual_links
+    ContractImplementationConfig, HttpConsumerConfig, HttpContractConfig, IntegrationTestConfig, ManifestError, ManifestExtensions, ManualLinkConfig, RepositoryConfig, WorkspaceManifest, parse_manifest, parse_manifest_with_extensions, validate_manual_links
 };
 pub use manifest_edit::{
     ManifestEdit, ManifestEditError, ManifestWriteReport, commit_manifest_edit, preview_add_manual_link, preview_add_repository, preview_remove_repository

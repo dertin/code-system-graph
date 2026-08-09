@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use code_system_graph_model::stable_id;
@@ -7,8 +6,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::ignore_policy::discover_repository_files_matching;
 use crate::{
-    CapabilityDir, CapabilityError, ContractImplementationConfig, HttpConsumerConfig, IgnorePatternError, IgnorePolicy, IntegrationTestConfig, MAX_REPOSITORY_CONFIG_BYTES, RegularFileEntry, RepositoryConfig, validate_excludes, validate_include_defaults
+    CapabilityDir, CapabilityError, ContractImplementationConfig, HttpConsumerConfig, IgnorePatternError, IgnorePolicy, IntegrationTestConfig, MAX_REPOSITORY_CONFIG_BYTES, RegularFileEntry, RepositoryConfig, RepositoryDiscoveryError, validate_excludes, validate_include_defaults
 };
 
 const LOCAL_CONFIG_NAME: &str = ".code-system-graph.yaml";
@@ -91,6 +91,7 @@ struct RepositoryLocalConfig {
     implementations: Option<Vec<ContractImplementationConfig>>,
     excludes: Option<Vec<String>>,
     include_defaults: Option<Vec<String>>,
+    use_gitignore: Option<bool>,
 }
 
 /// Error returned while resolving repository configuration precedence.
@@ -147,6 +148,9 @@ pub enum ConfigError {
         #[source]
         source: IgnorePatternError,
     },
+    /// Automatic repository discovery or an enabled `.gitignore` file failed.
+    #[error(transparent)]
+    Discovery(#[from] RepositoryDiscoveryError),
     /// Repository-local configuration is a symbolic link or reparse point.
     #[error("repository config `{path}` is a symbolic link or reparse point")]
     Symlink {
@@ -190,6 +194,22 @@ pub fn resolve_repository_config(
     checkout_path: &Path,
     workspace: &RepositoryConfig,
 ) -> Result<EffectiveRepositoryConfig, ConfigError> {
+    resolve_repository_config_with_use_gitignore(checkout_path, workspace, None)
+}
+
+/// Resolves repository configuration with an additive workspace-level `.gitignore` choice.
+///
+/// This companion API keeps [`RepositoryConfig`] exhaustively constructible for patch-version
+/// source compatibility.
+///
+/// # Errors
+///
+/// Returns the same errors as [`resolve_repository_config`].
+pub fn resolve_repository_config_with_use_gitignore(
+    checkout_path: &Path,
+    workspace: &RepositoryConfig,
+    workspace_use_gitignore: Option<bool>,
+) -> Result<EffectiveRepositoryConfig, ConfigError> {
     let checkout = CapabilityDir::open(checkout_path)
         .map_err(|error| map_capability_error(error, checkout_path, LOCAL_CONFIG_NAME))?;
     let local_relative = Path::new(LOCAL_CONFIG_NAME);
@@ -213,7 +233,12 @@ pub fn resolve_repository_config(
         }
     };
 
-    let ignore_policy = resolve_ignore_policy(checkout_path, workspace, local.as_ref())?;
+    let ignore_policy = resolve_ignore_policy(
+        checkout_path,
+        workspace,
+        workspace_use_gitignore,
+        local.as_ref(),
+    )?;
     let (openapi, openapi_source) = if let Some(openapi) = &workspace.openapi {
         (vec![openapi.clone()], ConfigSource::WorkspaceManifest)
     } else if let Some(openapi) = local.as_ref().and_then(|config| config.openapi.clone()) {
@@ -307,50 +332,20 @@ fn discover_openapi_candidates(
     root: &Path,
     ignore_policy: &IgnorePolicy,
 ) -> Result<Vec<String>, ConfigError> {
-    let mut pending = vec![(root.to_path_buf(), 0_usize)];
     let mut candidates = Vec::new();
-    while let Some((directory, depth)) = pending.pop() {
-        let entries = fs::read_dir(&directory).map_err(|source| ConfigError::Read {
-            path: directory.clone(),
-            source,
-        })?;
-        let mut entries =
-            entries
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|source| ConfigError::Read {
-                    path: directory.clone(),
-                    source,
-                })?;
-        entries.sort_by_key(fs::DirEntry::file_name);
-        for entry in entries {
-            let file_type = entry.file_type().map_err(|source| ConfigError::Read {
-                path: entry.path(),
-                source,
-            })?;
-            let name = entry.file_name().to_string_lossy().to_string();
-            let path = entry.path();
-            let relative = path.strip_prefix(root).unwrap_or(path.as_path());
-            if file_type.is_dir() {
-                if depth < MAX_OPENAPI_DISCOVERY_DEPTH && !ignore_policy.excludes(relative, true) {
-                    pending.push((path, depth.saturating_add(1)));
-                }
-                continue;
-            }
-            if !file_type.is_file()
-                || ignore_policy.excludes(relative, false)
-                || !openapi_filename(&name)
-            {
-                continue;
-            }
-            let relative = relative.to_string_lossy().replace('\\', "/");
-            candidates.push(relative);
-            if candidates.len() >= MAX_OPENAPI_CANDIDATES {
-                break;
-            }
-        }
-        if candidates.len() >= MAX_OPENAPI_CANDIDATES {
-            break;
-        }
+    for relative in discover_repository_files_matching(
+        root,
+        ignore_policy,
+        Some(MAX_OPENAPI_DISCOVERY_DEPTH.saturating_add(1)),
+        Some(MAX_OPENAPI_CANDIDATES),
+        |relative| {
+            relative
+                .file_name()
+                .and_then(|value| value.to_str())
+                .is_some_and(openapi_filename)
+        },
+    )? {
+        candidates.push(relative.to_string_lossy().replace('\\', "/"));
     }
     candidates.sort();
     candidates.dedup();
@@ -496,9 +491,20 @@ fn select_patterns(
     }
 }
 
+fn select_flag(workspace: Option<bool>, local: Option<bool>) -> (bool, ConfigSource) {
+    if let Some(value) = workspace {
+        (value, ConfigSource::WorkspaceManifest)
+    } else if let Some(value) = local {
+        (value, ConfigSource::RepositoryLocal)
+    } else {
+        (false, ConfigSource::Default)
+    }
+}
+
 fn resolve_ignore_policy(
     checkout_path: &Path,
     workspace: &RepositoryConfig,
+    workspace_use_gitignore: Option<bool>,
     local: Option<&RepositoryLocalConfig>,
 ) -> Result<IgnorePolicy, ConfigError> {
     let (excludes, excludes_source) = select_patterns(
@@ -509,11 +515,17 @@ fn resolve_ignore_policy(
         workspace.include_defaults.as_ref(),
         local.and_then(|config| config.include_defaults.as_ref()),
     );
-    IgnorePolicy::new(
+    let (use_gitignore, use_gitignore_source) = select_flag(
+        workspace_use_gitignore,
+        local.and_then(|config| config.use_gitignore),
+    );
+    IgnorePolicy::with_gitignore(
         excludes,
         excludes_source,
         include_defaults,
         include_defaults_source,
+        use_gitignore,
+        use_gitignore_source,
     )
     .map_err(|source| ConfigError::InvalidIgnorePattern {
         path: checkout_path.to_path_buf(),
@@ -526,7 +538,9 @@ fn resolve_ignore_policy(
 mod tests {
     use std::fs;
 
-    use super::{ConfigError, ConfigSource, resolve_repository_config};
+    use super::{
+        ConfigError, ConfigSource, resolve_repository_config, resolve_repository_config_with_use_gitignore
+    };
     use crate::{HttpConsumerConfig, RepositoryConfig};
 
     #[test]
@@ -604,6 +618,94 @@ mod tests {
                 ConfigSource::WorkspaceManifest,
             )
         );
+        Ok(())
+    }
+
+    #[test]
+    fn workspace_use_gitignore_should_override_repository_local_value()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let repository = tempfile::tempdir()?;
+        fs::write(
+            repository.path().join(".code-system-graph.yaml"),
+            "version: 1\nuseGitignore: true\n",
+        )?;
+        let workspace = RepositoryConfig {
+            path: ".".to_owned(),
+            openapi: None,
+            http_consumers: None,
+            integration_tests: None,
+            implementations: None,
+            excludes: None,
+            include_defaults: None,
+        };
+
+        let resolved = resolve_repository_config_with_use_gitignore(
+            repository.path(),
+            &workspace,
+            Some(false),
+        )?;
+
+        assert!(!resolved.ignore_policy.use_gitignore());
+        assert_eq!(
+            resolved.ignore_policy.use_gitignore_source(),
+            ConfigSource::WorkspaceManifest
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn repository_local_use_gitignore_should_apply_when_workspace_omits_it()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let repository = tempfile::tempdir()?;
+        fs::write(
+            repository.path().join(".code-system-graph.yaml"),
+            "version: 1\nuseGitignore: true\n",
+        )?;
+        let workspace = RepositoryConfig {
+            path: ".".to_owned(),
+            openapi: None,
+            http_consumers: None,
+            integration_tests: None,
+            implementations: None,
+            excludes: None,
+            include_defaults: None,
+        };
+
+        let resolved = resolve_repository_config(repository.path(), &workspace)?;
+
+        assert!(resolved.ignore_policy.use_gitignore());
+        assert_eq!(
+            resolved.ignore_policy.use_gitignore_source(),
+            ConfigSource::RepositoryLocal
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn openapi_auto_detection_should_respect_gitignore_when_enabled()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let repository = tempfile::tempdir()?;
+        fs::write(repository.path().join(".gitignore"), "ignored/\n")?;
+        fs::create_dir(repository.path().join("ignored"))?;
+        fs::write(repository.path().join("ignored/openapi.yaml"), "{}")?;
+        fs::write(repository.path().join("openapi.json"), "{}")?;
+        let workspace = RepositoryConfig {
+            path: ".".to_owned(),
+            openapi: None,
+            http_consumers: None,
+            integration_tests: None,
+            implementations: None,
+            excludes: None,
+            include_defaults: None,
+        };
+
+        let resolved = resolve_repository_config_with_use_gitignore(
+            repository.path(),
+            &workspace,
+            Some(true),
+        )?;
+
+        assert_eq!(resolved.openapi, vec!["openapi.json"]);
         Ok(())
     }
 
