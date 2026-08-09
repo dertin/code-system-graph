@@ -235,7 +235,7 @@ if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
 fi
 
 git tag -s "$tag" -m "Code System Graph ${tag}"
-if ! git push origin "$tag"; then
+if ! git push origin "refs/tags/${tag}:refs/tags/${tag}"; then
   git tag -d "$tag" >/dev/null 2>&1 || true
   echo "Failed to push ${tag}; removed the local tag and did not publish crates." >&2
   exit 1

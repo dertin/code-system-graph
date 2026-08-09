@@ -43,6 +43,8 @@ Versioning.
   skills plus the recognized local-binding identity before removal.
 - Staged change analysis now uses Git's empty-tree identity for an unborn checkout, allowing the
   optional strict pre-commit gate to validate a repository's initial commit.
+- Release publication now pushes an explicit tag refspec, avoiding ambiguity when a release branch
+  and its version tag share the same name.
 
 ### Release engineering
 
