@@ -168,13 +168,13 @@ pub struct ChangeSet {
     pub scope: ChangeScope,
     /// Symbolic checkout `HEAD`, when attached.
     pub checkout_head_ref: Option<String>,
-    /// Commit currently checked out before applying the requested scope.
+    /// Commit currently checked out, or the empty-tree object for an unborn checkout.
     pub checkout_head_sha: String,
     /// Scope base ref or object ID, when applicable.
     pub base_ref: Option<String>,
     /// Scope head ref or object ID, when applicable.
     pub head_ref: Option<String>,
-    /// Resolved commit for the scope head.
+    /// Resolved scope head, or the empty-tree object for an unborn local scope.
     pub head_sha: String,
     /// BLAKE3 hash of exact bounded staged Git output.
     pub staged_hash: String,
@@ -441,13 +441,6 @@ impl ChangeProvider for GitCliChangeProvider {
             canonical_worktree.join(common_path)
         };
         let canonical_common = canonicalize(&common_path)?;
-        let checkout_head_sha = self
-            .text_query(
-                &canonical_worktree,
-                &["rev-parse", "--verify", "HEAD^{commit}"],
-                cancellation,
-            )
-            .await?;
         let symbolic = self
             .text_query(
                 &canonical_worktree,
@@ -458,6 +451,31 @@ impl ChangeProvider for GitCliChangeProvider {
         let checkout_head_ref = match symbolic {
             Ok(value) => Some(value),
             Err(ChangeError::GitFailed { .. }) => None,
+            Err(error) => return Err(error),
+        };
+        let checkout_head_sha = match self
+            .text_query(
+                &canonical_worktree,
+                &["rev-parse", "--verify", "HEAD^{commit}"],
+                cancellation,
+            )
+            .await
+        {
+            Ok(commit) => commit,
+            Err(ChangeError::GitFailed { .. })
+                if checkout_head_ref.is_some()
+                    && matches!(
+                        &request.scope,
+                        ChangeScope::Unstaged | ChangeScope::Staged | ChangeScope::All
+                    ) =>
+            {
+                self.text_query(
+                    &canonical_worktree,
+                    &["hash-object", "-t", "tree", "--stdin"],
+                    cancellation,
+                )
+                .await?
+            }
             Err(error) => return Err(error),
         };
 
@@ -1787,6 +1805,28 @@ mod tests {
         git(repo.path(), &["add", "added.txt"])?;
         let set = collect(repo.path(), ChangeScope::Staged).await?;
         assert_eq!(set.files[0].status, ChangedFileStatus::Added);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn staged_scope_supports_an_unborn_checkout() -> TestResult {
+        let repo = tempfile::tempdir()?;
+        git(repo.path(), &["init", "-q"])?;
+        fs::write(repo.path().join("first.txt"), "first commit\n")?;
+        git(repo.path(), &["add", "first.txt"])?;
+
+        let set = collect(repo.path(), ChangeScope::Staged).await?;
+
+        assert!(
+            set.checkout_head_ref
+                .as_deref()
+                .is_some_and(|head| head.starts_with("refs/heads/"))
+        );
+        assert_eq!(set.checkout_head_sha, set.head_sha);
+        assert!(matches!(set.checkout_head_sha.len(), 40 | 64));
+        assert_eq!(set.files.len(), 1);
+        assert_eq!(set.files[0].status, ChangedFileStatus::Added);
+        assert_eq!(set.files[0].source, ChangeSourceLayer::Staged);
         Ok(())
     }
 

@@ -11,7 +11,7 @@ use super::filesystem::{
 };
 use super::render::render_existing_integration;
 use super::{
-    AgentPluginError, AgentPluginGeneratorBuild, AgentPluginMcpBinding, AgentPluginUninstallReport, AgentPluginUninstallRequest, BINDING_RELATIVE_PATH, INTEGRATION_RECEIPT_RELATIVE_PATH, canonicalize_directory, conflict, pretty_json, read_json_file, required_json_string, unicode_path, validate_component_name, write_local_binding
+    AgentPluginError, AgentPluginGeneratorBuild, AgentPluginMcpBinding, AgentPluginUninstallReport, AgentPluginUninstallRequest, BINDING_RELATIVE_PATH, INTEGRATION_RECEIPT_RELATIVE_PATH, canonicalize_directory, conflict, pretty_json, read_json_file, recognized_binding_generator, required_json_string, unicode_path, validate_component_name, write_local_binding
 };
 
 const RECEIPT_GENERATOR: &str = "csgraph plugin integration";
@@ -28,8 +28,10 @@ struct IntegrationReceipt {
     workspace: String,
     mcp_server_name: String,
     routing_skill: String,
+    #[serde(default)]
     managed_documents: Vec<String>,
     managed_files: BTreeMap<String, String>,
+    #[serde(default)]
     managed_local_files: BTreeMap<String, String>,
 }
 
@@ -390,12 +392,10 @@ fn load_owned_receipt(
     let plugin = read_json_file(&base.join("plugin.json"), "plugin.json")?;
     let plugin_name = required_json_string(&plugin, "plugin.json", "name")?.to_owned();
     let receipt_path = base.join(INTEGRATION_RECEIPT_RELATIVE_PATH);
-    let receipt: IntegrationReceipt =
-        serde_json::from_slice(&read_bytes(&receipt_path)?).map_err(|source| {
-            AgentPluginError::Json {
-                file: "plugin-integration.json",
-                source,
-            }
+    let mut receipt: IntegrationReceipt = serde_json::from_slice(&read_bytes(&receipt_path)?)
+        .map_err(|source| AgentPluginError::Json {
+            file: "plugin-integration.json",
+            source,
         })?;
     if receipt.schema_version != 1
         || receipt.generator != RECEIPT_GENERATOR
@@ -408,7 +408,64 @@ fn load_owned_receipt(
             "integration receipt does not own the requested plugin components",
         ));
     }
+    upgrade_legacy_receipt(base, &mut receipt)?;
     Ok((plugin_name, receipt))
+}
+
+fn upgrade_legacy_receipt(
+    base: &Path,
+    receipt: &mut IntegrationReceipt,
+) -> Result<(), AgentPluginError> {
+    if receipt.managed_documents.is_empty() {
+        receipt.managed_documents.push("mcp.json".to_owned());
+        let codex_path = base.join(".codex-plugin/plugin.json");
+        if codex_path.is_file() {
+            let codex = read_json_file(&codex_path, ".codex-plugin/plugin.json")?;
+            let (server, _) = render_existing_integration(
+                &receipt.workspace,
+                &receipt.mcp_server_name,
+                &receipt.routing_skill,
+                false,
+            )?;
+            if codex
+                .get("mcpServers")
+                .and_then(serde_json::Value::as_object)
+                .and_then(|servers| servers.get(&receipt.mcp_server_name))
+                == Some(&server)
+            {
+                receipt
+                    .managed_documents
+                    .push(".codex-plugin/plugin.json".to_owned());
+            }
+        }
+    }
+    if receipt.managed_local_files.is_empty() {
+        let binding_path = base.join(BINDING_RELATIVE_PATH);
+        let binding = read_bytes(&binding_path)?;
+        let identity: AgentPluginMcpBinding = serde_json::from_slice(&binding).map_err(|_| {
+            conflict(
+                &binding_path,
+                "legacy integration receipt has a malformed local binding",
+            )
+        })?;
+        if identity.schema_version != 1
+            || !recognized_binding_generator(&identity.generator)
+            || identity.generator_build != receipt.generator_build
+            || identity.base_plugin_name != receipt.base_plugin_name
+            || identity.base != unicode_path(base)?
+            || identity.workspace != receipt.workspace
+        {
+            return Err(conflict(
+                &binding_path,
+                "legacy integration receipt does not match the local binding identity",
+            ));
+        }
+        receipt.managed_local_files.insert(
+            "mcp-binding.json".to_owned(),
+            stable_id_bytes(MANAGED_FILE_HASH_NAMESPACE, &binding),
+        );
+    }
+    Ok(())
 }
 
 fn stage_managed_removal(

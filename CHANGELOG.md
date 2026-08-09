@@ -36,6 +36,14 @@ Versioning.
 - Plugin creation and binding failures now preserve the standard CLI exit classifications for
   invalid input, missing paths, conflicts, and internal failures.
 
+### Fixed
+
+- Existing-plugin uninstall accepts earlier version-1 integration receipts that omitted the newer
+  managed-document and local-binding ownership lists, while still verifying exact MCP entries and
+  skills plus the recognized local-binding identity before removal.
+- Staged change analysis now uses Git's empty-tree identity for an unborn checkout, allowing the
+  optional strict pre-commit gate to validate a repository's initial commit.
+
 ### Release engineering
 
 - Added schema validation, idempotency and conflict coverage, Unicode and space-path coverage,
