@@ -347,6 +347,7 @@ fn native_watch_should_reload_gitignore_before_filtering_future_events() -> anyh
     result
 }
 
+#[cfg(target_os = "linux")]
 fn next_changed_watch_summary(
     receiver: &mpsc::Receiver<Result<String, std::io::Error>>,
     previous: &SyncSummary,

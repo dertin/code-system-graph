@@ -12,6 +12,7 @@ use code_system_graph::http_server::{
     BearerToken, DEFAULT_HTTP_BIND, HttpServerConfig, create_router, serve_http_on_listener
 };
 use code_system_graph::scan_workspace;
+#[cfg(unix)]
 use code_system_graph_store_sqlite::SqliteStore;
 use reqwest::{Client, StatusCode};
 use serde_json::{Value, json};
@@ -82,6 +83,7 @@ impl Fixture {
     }
 
     fn server_config(&self) -> HttpServerConfig {
+        debug_assert!(self.temporary.path().is_dir());
         HttpServerConfig::new(&self.manifest, &self.database, &self.workspace_name)
     }
 }
