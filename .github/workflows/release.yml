@@ -255,8 +255,16 @@ jobs:
           if (-not (Test-Path (Join-Path $smoke "plugin\.local\code-system-graph\mcp-binding.json"))) {
             throw "generated portable plugin is missing its local binding"
           }
-          if (Get-ChildItem (Join-Path $smoke "plugin") -File -Recurse | Select-String -Pattern '\{\{[A-Z0-9_]+\}\}' -Quiet) {
-            throw "generated plugin contains an unresolved template variable"
+          $unresolvedTemplates = @(
+            Get-ChildItem (Join-Path $smoke "plugin") -File -Recurse | ForEach-Object {
+              $content = Get-Content -LiteralPath $_.FullName -Raw
+              if ($content -cmatch '\{\{[A-Z0-9_]+\}\}') {
+                $_.FullName
+              }
+            }
+          )
+          if ($unresolvedTemplates.Count -ne 0) {
+            throw "generated plugin contains unresolved template variables in: $($unresolvedTemplates -join ', ')"
           }
           $base = Join-Path $smoke "base-plugin"
           New-Item -ItemType Directory -Path (Join-Path $base ".codex-plugin") -Force | Out-Null
