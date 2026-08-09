@@ -18,6 +18,10 @@ const MCP_SCHEMA: &str = include_str!(
 );
 const LOCAL_BINDING: &str = ".local/code-system-graph/mcp-binding.json";
 
+fn canonical_string(path: &std::path::Path) -> anyhow::Result<String> {
+    Ok(std::fs::canonicalize(path)?.to_string_lossy().into_owned())
+}
+
 fn assert_generator_build(metadata: &serde_json::Value) {
     assert_eq!(metadata["version"], env!("CARGO_PKG_VERSION"));
     let fingerprint = metadata["binaryFingerprint"]
@@ -260,7 +264,10 @@ fn plugin_create_should_render_official_structure_and_be_idempotent() -> anyhow:
         std::fs::canonicalize(temporary.path())?.to_string_lossy()
     );
     assert!(!first.codegraph_enabled);
-    assert_eq!(first.binding, output.join(LOCAL_BINDING).to_string_lossy());
+    assert_eq!(
+        first.binding,
+        canonical_string(&output.join(LOCAL_BINDING))?
+    );
     assert_eq!(first.files.len(), 7);
 
     let plugin: serde_json::Value =
@@ -322,8 +329,8 @@ fn plugin_create_should_render_official_structure_and_be_idempotent() -> anyhow:
     assert_eq!(binding["generator"], "csgraph plugin binding");
     assert_generator_build(&binding["generatorBuild"]);
     assert_eq!(binding["workspace"], "plugin-workspace");
-    assert_eq!(binding["config"], manifest.to_string_lossy().as_ref());
-    assert_eq!(binding["database"], database.to_string_lossy().as_ref());
+    assert_eq!(binding["config"], canonical_string(&manifest)?);
+    assert_eq!(binding["database"], canonical_string(&database)?);
     assert!(!binding["codegraphEnabled"].as_bool().expect("boolean"));
     assert!(std::fs::read_to_string(output.join("LICENSE"))?.contains("Apache License"));
 
@@ -559,10 +566,7 @@ async fn generated_codegraph_profile_should_expose_explore_without_admin_tools()
     let binding_path = output.join(".local/code-system-graph/mcp-binding.json");
     let binding: serde_json::Value = serde_json::from_slice(&std::fs::read(&binding_path)?)?;
     assert!(binding["codegraphEnabled"].as_bool().expect("boolean"));
-    assert_eq!(
-        binding["codegraphBinary"],
-        binary.to_str().expect("Unicode fixture path")
-    );
+    assert_eq!(binding["codegraphBinary"], canonical_string(&binary)?);
     let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_csgraph"))
         .args(["mcp", "--binding"])
         .arg(binding_path)
@@ -632,12 +636,12 @@ fn plugin_create_should_compose_a_managed_integration_into_an_existing_plugin() 
     assert!(portable["mcpServers"]["codegraph"].is_object());
     assert!(portable["mcpServers"]["hugint-code-system-graph"].is_object());
     let binding_path = base.join(".local/code-system-graph/mcp-binding.json");
-    assert_eq!(first.binding, binding_path.to_string_lossy());
+    assert_eq!(first.binding, canonical_string(&binding_path)?);
     let binding: serde_json::Value = serde_json::from_slice(&std::fs::read(&binding_path)?)?;
     assert_eq!(binding["generator"], "csgraph plugin binding");
     assert_generator_build(&binding["generatorBuild"]);
     assert_eq!(binding["workspace"], "plugin-workspace");
-    assert_eq!(binding["database"], database.to_string_lossy().as_ref());
+    assert_eq!(binding["database"], canonical_string(&database)?);
     let receipt_path = base.join(".local/code-system-graph/plugin-integration.json");
     assert!(receipt_path.is_file());
     let receipt: serde_json::Value = serde_json::from_slice(&std::fs::read(receipt_path)?)?;
