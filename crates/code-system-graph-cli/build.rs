@@ -8,6 +8,8 @@ const COMMIT_ENV: &str = "CODE_SYSTEM_GRAPH_BUILD_GIT_COMMIT";
 const DIRTY_ENV: &str = "CODE_SYSTEM_GRAPH_BUILD_GIT_DIRTY";
 
 fn main() {
+    emit_target_linker_configuration();
+
     println!("cargo:rerun-if-env-changed={COMMIT_ENV}");
     println!("cargo:rerun-if-env-changed={DIRTY_ENV}");
 
@@ -34,6 +36,42 @@ fn main() {
     if let Some(git_dir) = git_output(manifest_dir, &["rev-parse", "--absolute-git-dir"]) {
         println!("cargo:rerun-if-changed={git_dir}/HEAD");
         println!("cargo:rerun-if-changed={git_dir}/index");
+    }
+
+    emit_worktree_rerun_triggers(manifest_dir);
+}
+
+fn emit_target_linker_configuration() {
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
+        && env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc")
+    {
+        // MSVC executables default to a 1 MiB main stack, which is insufficient for the
+        // synchronous extraction worker entered from the async CLI dispatcher.
+        println!("cargo:rustc-link-arg-bin=csgraph=/STACK:8388608");
+    }
+}
+
+fn emit_worktree_rerun_triggers(manifest_dir: &Path) {
+    let Some(worktree_root) = git_output(manifest_dir, &["rev-parse", "--show-toplevel"]) else {
+        return;
+    };
+    let worktree_root = Path::new(&worktree_root);
+    let Some(paths) = git_output(
+        worktree_root,
+        &["ls-files", "--cached", "--others", "--exclude-standard"],
+    ) else {
+        return;
+    };
+
+    // Explicit Git metadata triggers do not observe unstaged edits. Watching every materialized
+    // tracked or untracked source path keeps the embedded dirty flag aligned with the binary that
+    // Cargo is compiling. Index changes cover newly staged paths, while edits that make a new
+    // source file reachable necessarily also touch an already watched tracked file.
+    for relative in paths.lines().filter(|path| !path.is_empty()) {
+        println!(
+            "cargo:rerun-if-changed={}",
+            worktree_root.join(relative).display()
+        );
     }
 }
 
