@@ -767,6 +767,76 @@ fn plugin_uninstall_should_refuse_to_delete_a_modified_managed_skill() -> anyhow
 }
 
 #[test]
+fn plugin_uninstall_should_preserve_unowned_local_files_and_modified_bindings() -> anyhow::Result<()>
+{
+    let temporary = tempfile::tempdir()?;
+    let workspace = temporary.path().join("workspace");
+    std::fs::create_dir(&workspace)?;
+    let (manifest, database) = fixture_workspace(&workspace)?;
+    let base = fixture_base_plugin(temporary.path())?;
+    assert!(
+        bind_existing_with_cli(&base, &manifest, &database, &[])?
+            .status
+            .success()
+    );
+    let local_root = base.join(".local/code-system-graph");
+    let binding = local_root.join("mcp-binding.json");
+    let original_binding = std::fs::read(&binding)?;
+    std::fs::write(local_root.join("user-owned.txt"), "keep\n")?;
+
+    let unowned = uninstall_existing_with_cli(&base)?;
+    assert!(!unowned.status.success());
+    assert_eq!(
+        std::fs::read_to_string(local_root.join("user-owned.txt"))?,
+        "keep\n"
+    );
+    assert!(base.join("skills/hugint-system-graph/SKILL.md").is_file());
+
+    std::fs::remove_file(local_root.join("user-owned.txt"))?;
+    let mut changed: serde_json::Value = serde_json::from_slice(&original_binding)?;
+    changed["workspace"] = serde_json::json!("modified-workspace");
+    std::fs::write(&binding, serde_json::to_vec_pretty(&changed)?)?;
+    let modified = uninstall_existing_with_cli(&base)?;
+    assert!(!modified.status.success());
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&std::fs::read(&binding)?)?["workspace"],
+        "modified-workspace"
+    );
+    assert!(base.join("skills/hugint-system-graph/SKILL.md").is_file());
+    Ok(())
+}
+
+#[test]
+fn plugin_uninstall_should_ignore_a_codex_manifest_added_after_installation() -> anyhow::Result<()>
+{
+    let temporary = tempfile::tempdir()?;
+    let workspace = temporary.path().join("workspace");
+    std::fs::create_dir(&workspace)?;
+    let (manifest, database) = fixture_workspace(&workspace)?;
+    let base = fixture_base_plugin(temporary.path())?;
+    let codex_path = base.join(".codex-plugin/plugin.json");
+    let independently_added = std::fs::read(&codex_path)?;
+    std::fs::remove_file(&codex_path)?;
+    assert!(
+        bind_existing_with_cli(&base, &manifest, &database, &[])?
+            .status
+            .success()
+    );
+    std::fs::write(&codex_path, &independently_added)?;
+
+    let removed = uninstall_existing_with_cli(&base)?;
+    assert!(
+        removed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&removed.stderr)
+    );
+    assert_eq!(std::fs::read(&codex_path)?, independently_added);
+    assert!(!base.join("skills/hugint-system-graph").exists());
+    assert!(!base.join(".local/code-system-graph").exists());
+    Ok(())
+}
+
+#[test]
 fn plugin_create_should_replace_only_an_owned_existing_plugin_binding() -> anyhow::Result<()> {
     let temporary = tempfile::tempdir()?;
     let workspace = temporary.path().join("workspace");

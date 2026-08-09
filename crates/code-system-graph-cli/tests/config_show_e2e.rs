@@ -3,7 +3,7 @@
 use std::num::NonZeroUsize;
 use std::process::Command;
 
-use code_system_graph::ConfigReport;
+use code_system_graph::ExtendedConfigReport;
 use code_system_graph_core::{ExecutionPolicy, ExtractionBudgets};
 
 #[test]
@@ -26,7 +26,7 @@ fn config_show_should_report_defaults_and_selected_repository_rules() -> anyhow:
         .arg(&manifest)
         .args(["--repo", "api"])
         .output()?;
-    let report: ConfigReport = serde_json::from_slice(&output.stdout)?;
+    let report: ExtendedConfigReport = serde_json::from_slice(&output.stdout)?;
 
     assert!(
         output.status.success(),
@@ -36,10 +36,10 @@ fn config_show_should_report_defaults_and_selected_repository_rules() -> anyhow:
     assert_eq!(report.schema_version, 1);
     assert_eq!(report.workspace, "configuration");
     assert_eq!(report.extraction_budgets, ExtractionBudgets::default());
-    assert_eq!(report.execution_policy, ExecutionPolicy::default());
+    assert_eq!(report.execution_policy.base, ExecutionPolicy::default());
     assert_eq!(
         report.execution_policy_fingerprint,
-        ExecutionPolicy::default().fingerprint()
+        report.execution_policy.fingerprint()
     );
     assert_eq!(report.repositories.len(), 1);
     assert_eq!(report.repositories[0].alias, "api");
@@ -93,7 +93,7 @@ fn config_show_should_report_effective_execution_policy() -> anyhow::Result<()> 
         .args(["config", "show", "--config"])
         .arg(&manifest)
         .output()?;
-    let report: ConfigReport = serde_json::from_slice(&output.stdout)?;
+    let report: ExtendedConfigReport = serde_json::from_slice(&output.stdout)?;
 
     assert!(output.status.success());
     assert_eq!(report.execution_policy.max_scan_wall_time_ms, 28_800_000);
@@ -131,7 +131,7 @@ fn config_show_should_report_effective_budget_overrides() -> anyhow::Result<()> 
         .args(["config", "show", "--config"])
         .arg(&manifest)
         .output()?;
-    let report: ConfigReport = serde_json::from_slice(&output.stdout)?;
+    let report: ExtendedConfigReport = serde_json::from_slice(&output.stdout)?;
 
     assert!(output.status.success());
     assert_eq!(
@@ -234,7 +234,7 @@ fn config_show_should_report_repository_local_rule_source() -> anyhow::Result<()
         .args(["config", "show", "--config"])
         .arg(&manifest)
         .output()?;
-    let report: ConfigReport = serde_json::from_slice(&output.stdout)?;
+    let report: ExtendedConfigReport = serde_json::from_slice(&output.stdout)?;
 
     assert!(matches!(
         report.repositories[0]
@@ -264,7 +264,7 @@ fn config_show_should_report_repository_local_gitignore_source() -> anyhow::Resu
         .args(["config", "show", "--config"])
         .arg(&manifest)
         .output()?;
-    let report: ConfigReport = serde_json::from_slice(&output.stdout)?;
+    let report: ExtendedConfigReport = serde_json::from_slice(&output.stdout)?;
 
     assert!(output.status.success());
     assert!(report.repositories[0].ignore_policy.use_gitignore.value);

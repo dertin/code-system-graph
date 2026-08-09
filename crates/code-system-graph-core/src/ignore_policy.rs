@@ -361,6 +361,16 @@ pub fn discover_repository_files(
     policy: &IgnorePolicy,
     max_depth: Option<usize>,
 ) -> Result<Vec<PathBuf>, RepositoryDiscoveryError> {
+    discover_repository_files_matching(root, policy, max_depth, None, |_| true)
+}
+
+pub(crate) fn discover_repository_files_matching(
+    root: &Path,
+    policy: &IgnorePolicy,
+    max_depth: Option<usize>,
+    max_results: Option<usize>,
+    mut matches: impl FnMut(&Path) -> bool,
+) -> Result<Vec<PathBuf>, RepositoryDiscoveryError> {
     let mut builder = gitignore_walk_builder(root, policy.use_gitignore());
     if let Some(max_depth) = max_depth {
         builder.max_depth(Some(max_depth));
@@ -404,7 +414,13 @@ pub fn discover_repository_files(
                     root: root.to_path_buf(),
                     path: entry.path().to_path_buf(),
                 })?;
+        if !matches(relative) {
+            continue;
+        }
         files.push(relative.to_path_buf());
+        if max_results.is_some_and(|limit| files.len() >= limit) {
+            break;
+        }
     }
     files.sort();
     files.dedup();
@@ -607,6 +623,33 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    #[test]
+    fn bounded_matching_discovery_should_stop_after_the_requested_results()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let repository = tempdir()?;
+        for index in 0..40 {
+            fs::write(
+                repository.path().join(format!("openapi-{index:02}.yaml")),
+                "openapi: 3.1.0\n",
+            )?;
+        }
+        let mut visited = 0_usize;
+        let files = discover_repository_files_matching(
+            repository.path(),
+            &policy(&[], &[]),
+            None,
+            Some(32),
+            |_| {
+                visited += 1;
+                true
+            },
+        )?;
+
+        assert_eq!(files.len(), 32);
+        assert_eq!(visited, 32);
+        Ok(())
+    }
 
     fn policy(excludes: &[&str], includes: &[&str]) -> IgnorePolicy {
         IgnorePolicy::new(

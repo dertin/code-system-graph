@@ -18,7 +18,7 @@ const RECEIPT_GENERATOR: &str = "csgraph plugin integration";
 const MANAGED_FILE_HASH_NAMESPACE: &str = "agent-plugin-integration-file-v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct IntegrationReceipt {
     schema_version: u8,
     generator: String,
@@ -28,7 +28,9 @@ struct IntegrationReceipt {
     workspace: String,
     mcp_server_name: String,
     routing_skill: String,
+    managed_documents: Vec<String>,
     managed_files: BTreeMap<String, String>,
+    managed_local_files: BTreeMap<String, String>,
 }
 
 struct DocumentUpdate {
@@ -85,6 +87,7 @@ pub(super) fn install_composed_integration(
         routing_skill,
         has_codex_manifest,
     )?;
+    let mut local_files = super::binding_files(binding)?;
     let receipt = IntegrationReceipt {
         schema_version: 1,
         generator: RECEIPT_GENERATOR.to_owned(),
@@ -93,6 +96,14 @@ pub(super) fn install_composed_integration(
         workspace: workspace.to_owned(),
         mcp_server_name: mcp_server_name.to_owned(),
         routing_skill: routing_skill.to_owned(),
+        managed_documents: if has_codex_manifest {
+            vec![
+                "mcp.json".to_owned(),
+                ".codex-plugin/plugin.json".to_owned(),
+            ]
+        } else {
+            vec!["mcp.json".to_owned()]
+        },
         managed_files: skill_files
             .iter()
             .map(|(path, contents)| {
@@ -102,8 +113,16 @@ pub(super) fn install_composed_integration(
                 )
             })
             .collect(),
+        managed_local_files: local_files
+            .iter()
+            .map(|(path, contents)| {
+                (
+                    path.clone(),
+                    stable_id_bytes(MANAGED_FILE_HASH_NAMESPACE, contents),
+                )
+            })
+            .collect(),
     };
-    let mut local_files = super::binding_files(binding)?;
     local_files.insert(
         "plugin-integration.json".to_owned(),
         pretty_json(
@@ -167,33 +186,40 @@ pub fn uninstall_composed_integration(
     let base = canonicalize_directory(&request.output)?;
     let (plugin_name, receipt) = load_owned_receipt(&base, request)?;
     verify_binding_ownership(&base.join(".local/code-system-graph"))?;
+    verify_managed_local_files(&base, &receipt)?;
     verify_managed_skill(&base, &receipt)?;
-    let has_codex_manifest = base.join(".codex-plugin/plugin.json").is_file();
     let (server, _) = render_existing_integration(
         &receipt.workspace,
         &receipt.mcp_server_name,
         &receipt.routing_skill,
-        has_codex_manifest,
+        false,
     )?;
 
-    let document_updates = uninstall_document_updates(&base, &receipt.mcp_server_name, &server)?;
+    let document_updates = uninstall_document_updates(
+        &base,
+        &receipt.managed_documents,
+        &receipt.mcp_server_name,
+        &server,
+    )?;
     let staged = stage_managed_removal(&base, &receipt.routing_skill)?;
     if let Err(error) = apply_document_updates(&document_updates) {
         staged.restore();
         return Err(error);
     }
-    staged.commit()?;
+    if let Err(error) = staged.commit() {
+        rollback_document_updates(&document_updates);
+        return Err(error);
+    }
 
     let mut removed = receipt.managed_files.keys().cloned().collect::<Vec<_>>();
     removed.extend([
-        format!("mcp.json#/{}/{}", "mcpServers", receipt.mcp_server_name),
         BINDING_RELATIVE_PATH.to_owned(),
         INTEGRATION_RECEIPT_RELATIVE_PATH.to_owned(),
     ]);
-    if has_codex_manifest {
+    for document in &receipt.managed_documents {
         removed.push(format!(
-            ".codex-plugin/plugin.json#/mcpServers/{}",
-            receipt.mcp_server_name
+            "{document}#/{}/{}",
+            "mcpServers", receipt.mcp_server_name
         ));
     }
     removed.sort();
@@ -300,18 +326,30 @@ fn install_document_updates(
 
 fn uninstall_document_updates(
     base: &Path,
+    managed_documents: &[String],
     server_name: &str,
     server: &serde_json::Value,
 ) -> Result<Vec<DocumentUpdate>, AgentPluginError> {
     let mut updates = Vec::new();
-    for (relative, file) in [
-        ("mcp.json", "mcp.json"),
-        (".codex-plugin/plugin.json", ".codex-plugin/plugin.json"),
-    ] {
-        let path = base.join(relative);
-        if relative != "mcp.json" && !path.exists() {
-            continue;
+    let mut seen = std::collections::BTreeSet::new();
+    for relative in managed_documents {
+        let file = match relative.as_str() {
+            "mcp.json" => "mcp.json",
+            ".codex-plugin/plugin.json" => ".codex-plugin/plugin.json",
+            _ => {
+                return Err(conflict(
+                    base,
+                    "integration receipt contains an unsupported managed document",
+                ));
+            }
+        };
+        if !seen.insert(relative.as_str()) {
+            return Err(conflict(
+                base,
+                "integration receipt contains duplicate managed documents",
+            ));
         }
+        let path = base.join(relative);
         let original = read_bytes(&path)?;
         let rewritten = remove_server(&original, file, server_name, server)?;
         updates.push(DocumentUpdate {
@@ -319,6 +357,12 @@ fn uninstall_document_updates(
             original,
             updated: rewritten,
         });
+    }
+    if !seen.contains("mcp.json") {
+        return Err(conflict(
+            base,
+            "integration receipt does not own the portable MCP document",
+        ));
     }
     Ok(updates)
 }
@@ -403,15 +447,113 @@ impl StagedRemoval {
     }
 
     fn commit(self) -> Result<(), AgentPluginError> {
-        fs::remove_dir_all(&self.skill_backup).map_err(|source| AgentPluginError::Write {
-            path: self.skill_backup,
-            source,
-        })?;
-        fs::remove_dir_all(&self.local_backup).map_err(|source| AgentPluginError::Write {
-            path: self.local_backup,
-            source,
-        })
+        self.commit_with(|path| fs::remove_dir_all(path))
     }
+
+    fn commit_with(
+        self,
+        mut remove: impl FnMut(&Path) -> std::io::Result<()>,
+    ) -> Result<(), AgentPluginError> {
+        let skill_restore = suffixed_path(&self.skill_backup, ".restore");
+        let local_restore = suffixed_path(&self.local_backup, ".restore");
+        if let Err(error) = copy_directory(&self.skill_backup, &skill_restore) {
+            self.restore();
+            return Err(error);
+        }
+        if let Err(error) = copy_directory(&self.local_backup, &local_restore) {
+            let _ = fs::remove_dir_all(&skill_restore);
+            self.restore();
+            return Err(error);
+        }
+
+        for backup in [&self.skill_backup, &self.local_backup] {
+            if let Err(source) = remove(backup) {
+                let failed_path = backup.clone();
+                restore_after_cleanup_failure(&self.skill_backup, &skill_restore, &self.skill_root);
+                restore_after_cleanup_failure(&self.local_backup, &local_restore, &self.local_root);
+                return Err(AgentPluginError::Write {
+                    path: failed_path,
+                    source,
+                });
+            }
+        }
+        let _ = fs::remove_dir_all(skill_restore);
+        let _ = fs::remove_dir_all(local_restore);
+        Ok(())
+    }
+}
+
+fn copy_directory(source: &Path, destination: &Path) -> Result<(), AgentPluginError> {
+    fs::create_dir(destination).map_err(|source| AgentPluginError::Write {
+        path: destination.to_path_buf(),
+        source,
+    })?;
+    let result = (|| {
+        for entry in fs::read_dir(source).map_err(|error| AgentPluginError::Resolve {
+            path: source.to_path_buf(),
+            source: error,
+        })? {
+            let entry = entry.map_err(|error| AgentPluginError::Resolve {
+                path: source.to_path_buf(),
+                source: error,
+            })?;
+            let path = entry.path();
+            let target = destination.join(entry.file_name());
+            let metadata =
+                fs::symlink_metadata(&path).map_err(|source| AgentPluginError::Resolve {
+                    path: path.clone(),
+                    source,
+                })?;
+            if metadata.file_type().is_symlink() {
+                return Err(conflict(&path, "managed backups cannot contain symlinks"));
+            }
+            if metadata.is_dir() {
+                copy_directory(&path, &target)?;
+            } else if metadata.is_file() {
+                fs::copy(&path, &target).map_err(|source| AgentPluginError::Write {
+                    path: target,
+                    source,
+                })?;
+            } else {
+                return Err(conflict(
+                    &path,
+                    "managed backups must contain only regular files",
+                ));
+            }
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_dir_all(destination);
+    }
+    result
+}
+
+fn restore_after_cleanup_failure(backup: &Path, restore: &Path, target: &Path) {
+    if backup.exists() {
+        let failed = suffixed_path(backup, ".failed");
+        if fs::rename(backup, &failed).is_ok() {
+            if fs::rename(restore, target).is_ok() {
+                let _ = fs::remove_dir_all(failed);
+                return;
+            }
+            let _ = fs::rename(failed, backup);
+        }
+        if fs::rename(backup, target).is_ok() {
+            let _ = fs::remove_dir_all(restore);
+            return;
+        }
+    }
+    let _ = fs::rename(restore, target);
+}
+
+fn suffixed_path(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path
+        .file_name()
+        .expect("staged removal path has a file name")
+        .to_os_string();
+    name.push(suffix);
+    path.with_file_name(name)
 }
 
 fn read_bytes(path: &Path) -> Result<Vec<u8>, AgentPluginError> {
@@ -419,6 +561,42 @@ fn read_bytes(path: &Path) -> Result<Vec<u8>, AgentPluginError> {
         path: path.to_path_buf(),
         source,
     })
+}
+
+fn verify_managed_local_files(
+    base: &Path,
+    receipt: &IntegrationReceipt,
+) -> Result<(), AgentPluginError> {
+    let local_root = base.join(".local/code-system-graph");
+    let mut expected = BTreeMap::new();
+    for (relative, expected_hash) in &receipt.managed_local_files {
+        if relative != "mcp-binding.json" {
+            return Err(conflict(
+                &local_root,
+                "integration receipt contains an unsupported managed local file",
+            ));
+        }
+        let path = local_root.join(relative);
+        let contents = read_bytes(&path)?;
+        if stable_id_bytes(MANAGED_FILE_HASH_NAMESPACE, &contents) != *expected_hash {
+            return Err(conflict(
+                &path,
+                "managed local binding changed after installation; refusing to delete it",
+            ));
+        }
+        expected.insert(relative.clone(), contents);
+    }
+    if !expected.contains_key("mcp-binding.json") {
+        return Err(conflict(
+            &local_root,
+            "integration receipt does not own the local MCP binding",
+        ));
+    }
+    expected.insert(
+        "plugin-integration.json".to_owned(),
+        read_bytes(&base.join(INTEGRATION_RECEIPT_RELATIVE_PATH))?,
+    );
+    verify_existing(&local_root, &expected)
 }
 
 fn skill_subtree(
@@ -466,4 +644,56 @@ fn verify_managed_skill(base: &Path, receipt: &IntegrationReceipt) -> Result<(),
         &base.join(format!("skills/{}", receipt.routing_skill)),
         &files,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+    use std::fs;
+
+    use super::StagedRemoval;
+
+    #[test]
+    fn staged_removal_should_restore_both_trees_when_cleanup_fails()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temporary = tempfile::tempdir()?;
+        let skill_root = temporary.path().join("skill");
+        let skill_backup = temporary.path().join("skill.backup");
+        let local_root = temporary.path().join("local");
+        let local_backup = temporary.path().join("local.backup");
+        fs::create_dir(&skill_backup)?;
+        fs::write(skill_backup.join("SKILL.md"), "managed skill\n")?;
+        fs::create_dir(&local_backup)?;
+        fs::write(local_backup.join("mcp-binding.json"), "managed binding\n")?;
+        let staged = StagedRemoval {
+            skill_root: skill_root.clone(),
+            skill_backup,
+            local_root: local_root.clone(),
+            local_backup,
+        };
+        let calls = Cell::new(0_usize);
+
+        let result = staged.commit_with(|path| {
+            let call = calls.get();
+            calls.set(call + 1);
+            if call == 1 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "injected cleanup failure",
+                ));
+            }
+            fs::remove_dir_all(path)
+        });
+
+        assert!(result.is_err());
+        assert_eq!(
+            fs::read_to_string(skill_root.join("SKILL.md"))?,
+            "managed skill\n"
+        );
+        assert_eq!(
+            fs::read_to_string(local_root.join("mcp-binding.json"))?,
+            "managed binding\n"
+        );
+        Ok(())
+    }
 }

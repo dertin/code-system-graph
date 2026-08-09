@@ -62,9 +62,9 @@ impl TryFrom<i64> for CodeGraphCorroborationAnchorLimit {
         let limit = usize::try_from(value)
             .ok()
             .and_then(NonZeroUsize::new)
-            .ok_or(InvalidExecutionPolicy::InvalidSignedValue {
+            .ok_or(InvalidExecutionPolicy::InvalidValue {
                 field: "maxCodeGraphCorroborationAnchorsPerRepo",
-                value,
+                value: value.unsigned_abs(),
             })?;
         Ok(Self::Bounded(limit))
     }
@@ -116,10 +116,6 @@ pub struct ExecutionPolicyOverrides {
     /// Optional per-repository `CodeGraph` synchronization wall time.
     #[serde(rename = "maxCodeGraphSyncWallTimeMsPerRepo")]
     pub max_codegraph_sync_wall_time_ms_per_repo: Option<u64>,
-    /// Optional maximum source-symbol anchors corroborated through `CodeGraph` per repository.
-    /// A value of `-1` disables this count limit.
-    #[serde(rename = "maxCodeGraphCorroborationAnchorsPerRepo")]
-    pub max_codegraph_corroboration_anchors_per_repo: Option<i64>,
     /// Optional maximum worker resident memory.
     pub max_worker_memory_bytes: Option<u64>,
     /// Optional cooperative shutdown grace period.
@@ -145,11 +141,6 @@ pub struct ExecutionPolicy {
     /// Maximum wall time for one repository-local `CodeGraph` synchronization.
     #[serde(rename = "maxCodeGraphSyncWallTimeMsPerRepo")]
     pub max_codegraph_sync_wall_time_ms_per_repo: u64,
-    /// Maximum source-symbol anchors corroborated through `CodeGraph` per repository.
-    /// Serialized as `-1` when this count limit is disabled.
-    #[serde(rename = "maxCodeGraphCorroborationAnchorsPerRepo")]
-    #[schemars(with = "i64")]
-    pub max_codegraph_corroboration_anchors_per_repo: CodeGraphCorroborationAnchorLimit,
     /// Maximum resident memory accepted for one worker process.
     pub max_worker_memory_bytes: u64,
     /// Cooperative shutdown grace period before forced termination.
@@ -171,11 +162,6 @@ impl Default for ExecutionPolicy {
             max_no_progress_time_ms: DEFAULT_MAX_NO_PROGRESS_TIME_MS,
             max_codegraph_sync_wall_time_ms_per_repo:
                 DEFAULT_MAX_CODEGRAPH_SYNC_WALL_TIME_MS_PER_REPO,
-            max_codegraph_corroboration_anchors_per_repo:
-                CodeGraphCorroborationAnchorLimit::try_from(
-                    DEFAULT_MAX_CODEGRAPH_CORROBORATION_ANCHORS_PER_REPO,
-                )
-                .expect("the default CodeGraph corroboration anchor limit is valid"),
             max_worker_memory_bytes: DEFAULT_MAX_WORKER_MEMORY_BYTES,
             graceful_termination_ms: DEFAULT_GRACEFUL_TERMINATION_MS,
             watch_idle_timeout_ms: DEFAULT_WATCH_IDLE_TIMEOUT_MS,
@@ -207,9 +193,6 @@ impl ExecutionPolicy {
             apply!(max_scan_wall_time_ms);
             apply!(max_no_progress_time_ms);
             apply!(max_codegraph_sync_wall_time_ms_per_repo);
-            if let Some(value) = values.max_codegraph_corroboration_anchors_per_repo {
-                policy.max_codegraph_corroboration_anchors_per_repo = value.try_into()?;
-            }
             apply!(max_worker_memory_bytes);
             apply!(graceful_termination_ms);
             apply!(watch_idle_timeout_ms);
@@ -309,6 +292,21 @@ impl ExecutionPolicy {
     /// Returns the stable canonical fingerprint of the effective operational policy.
     #[must_use]
     pub fn fingerprint(&self) -> String {
+        let canonical = self
+            .canonical_values()
+            .into_iter()
+            .map(|(name, value)| format!("{name}={value}"))
+            .collect::<Vec<_>>()
+            .join(";");
+        stable_id("execution-policy", &canonical)
+    }
+
+    /// Returns a fingerprint that also includes the additive `CodeGraph` corroboration bound.
+    #[must_use]
+    pub fn fingerprint_with_codegraph_limit(
+        &self,
+        limit: CodeGraphCorroborationAnchorLimit,
+    ) -> String {
         let mut canonical = self
             .canonical_values()
             .into_iter()
@@ -317,8 +315,7 @@ impl ExecutionPolicy {
             .join(";");
         write!(
             canonical,
-            ";maxCodeGraphCorroborationAnchorsPerRepo={}",
-            self.max_codegraph_corroboration_anchors_per_repo
+            ";maxCodeGraphCorroborationAnchorsPerRepo={limit}"
         )
         .expect("writing to a String cannot fail");
         stable_id("execution-policy", &canonical)
@@ -335,16 +332,6 @@ pub enum InvalidExecutionPolicy {
         field: &'static str,
         /// Rejected numeric value.
         value: u64,
-    },
-    /// A signed policy value is neither a positive representable limit nor the supported sentinel.
-    #[error(
-        "execution policy `{field}` must be positive and representable, or -1 for unlimited; received {value}"
-    )]
-    InvalidSignedValue {
-        /// Manifest field containing the invalid value.
-        field: &'static str,
-        /// Rejected signed value.
-        value: i64,
     },
     /// One subordinate deadline exceeds its containing deadline.
     #[error("execution policy `{field}` ({value}) must not exceed `{maximum_field}` ({maximum})")]
@@ -616,10 +603,12 @@ mod tests {
 
         assert_eq!(policy.max_scan_wall_time_ms, 21_600_000);
         assert_eq!(
-            policy
-                .max_codegraph_corroboration_anchors_per_repo
-                .bounded()
-                .map(NonZeroUsize::get),
+            CodeGraphCorroborationAnchorLimit::try_from(
+                DEFAULT_MAX_CODEGRAPH_CORROBORATION_ANCHORS_PER_REPO
+            )
+            .expect("default anchor limit")
+            .bounded()
+            .map(NonZeroUsize::get),
             Some(50)
         );
         assert_eq!(policy.max_worker_memory_bytes, 17_179_869_184);
@@ -657,39 +646,23 @@ mod tests {
 
     #[test]
     fn corroboration_anchor_limit_should_accept_positive_or_unlimited() {
-        let bounded = ExecutionPolicy::resolve(Some(&ExecutionPolicyOverrides {
-            max_codegraph_corroboration_anchors_per_repo: Some(12),
-            ..ExecutionPolicyOverrides::default()
-        }))
-        .expect("positive anchor limit");
-        let unlimited = ExecutionPolicy::resolve(Some(&ExecutionPolicyOverrides {
-            max_codegraph_corroboration_anchors_per_repo: Some(-1),
-            ..ExecutionPolicyOverrides::default()
-        }))
-        .expect("unlimited anchor limit");
+        let bounded =
+            CodeGraphCorroborationAnchorLimit::try_from(12).expect("positive anchor limit");
+        let unlimited =
+            CodeGraphCorroborationAnchorLimit::try_from(-1).expect("unlimited anchor limit");
 
-        assert_eq!(
-            bounded
-                .max_codegraph_corroboration_anchors_per_repo
-                .bounded()
-                .map(NonZeroUsize::get),
-            Some(12)
+        assert_eq!(bounded.bounded().map(NonZeroUsize::get), Some(12));
+        assert_eq!(unlimited.bounded(), None);
+        assert_ne!(
+            ExecutionPolicy::default().fingerprint_with_codegraph_limit(bounded),
+            ExecutionPolicy::default().fingerprint_with_codegraph_limit(unlimited)
         );
         assert_eq!(
-            unlimited
-                .max_codegraph_corroboration_anchors_per_repo
-                .bounded(),
-            None
-        );
-        assert_ne!(bounded.fingerprint(), unlimited.fingerprint());
-        assert_eq!(
-            serde_json::to_value(bounded.max_codegraph_corroboration_anchors_per_repo)
-                .expect("bounded limit serializes"),
+            serde_json::to_value(bounded).expect("bounded limit serializes"),
             serde_json::json!(12)
         );
         assert_eq!(
-            serde_json::to_value(unlimited.max_codegraph_corroboration_anchors_per_repo)
-                .expect("unlimited limit serializes"),
+            serde_json::to_value(unlimited).expect("unlimited limit serializes"),
             serde_json::json!(-1)
         );
     }
@@ -697,18 +670,15 @@ mod tests {
     #[test]
     fn corroboration_anchor_limit_should_reject_zero_and_values_below_sentinel() {
         for value in [0, -2] {
-            let error = ExecutionPolicy::resolve(Some(&ExecutionPolicyOverrides {
-                max_codegraph_corroboration_anchors_per_repo: Some(value),
-                ..ExecutionPolicyOverrides::default()
-            }))
-            .expect_err("invalid anchor limit");
+            let error = CodeGraphCorroborationAnchorLimit::try_from(value)
+                .expect_err("invalid anchor limit");
 
             assert!(matches!(
                 error,
-                InvalidExecutionPolicy::InvalidSignedValue {
+                InvalidExecutionPolicy::InvalidValue {
                     field: "maxCodeGraphCorroborationAnchorsPerRepo",
                     value: observed
-                } if observed == value
+                } if observed == value.unsigned_abs()
             ));
         }
     }

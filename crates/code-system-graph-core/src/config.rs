@@ -6,8 +6,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::ignore_policy::discover_repository_files_matching;
 use crate::{
-    CapabilityDir, CapabilityError, ContractImplementationConfig, HttpConsumerConfig, IgnorePatternError, IgnorePolicy, IntegrationTestConfig, MAX_REPOSITORY_CONFIG_BYTES, RegularFileEntry, RepositoryConfig, RepositoryDiscoveryError, discover_repository_files, validate_excludes, validate_include_defaults
+    CapabilityDir, CapabilityError, ContractImplementationConfig, HttpConsumerConfig, IgnorePatternError, IgnorePolicy, IntegrationTestConfig, MAX_REPOSITORY_CONFIG_BYTES, RegularFileEntry, RepositoryConfig, RepositoryDiscoveryError, validate_excludes, validate_include_defaults
 };
 
 const LOCAL_CONFIG_NAME: &str = ".code-system-graph.yaml";
@@ -193,6 +194,22 @@ pub fn resolve_repository_config(
     checkout_path: &Path,
     workspace: &RepositoryConfig,
 ) -> Result<EffectiveRepositoryConfig, ConfigError> {
+    resolve_repository_config_with_use_gitignore(checkout_path, workspace, None)
+}
+
+/// Resolves repository configuration with an additive workspace-level `.gitignore` choice.
+///
+/// This companion API keeps [`RepositoryConfig`] exhaustively constructible for patch-version
+/// source compatibility.
+///
+/// # Errors
+///
+/// Returns the same errors as [`resolve_repository_config`].
+pub fn resolve_repository_config_with_use_gitignore(
+    checkout_path: &Path,
+    workspace: &RepositoryConfig,
+    workspace_use_gitignore: Option<bool>,
+) -> Result<EffectiveRepositoryConfig, ConfigError> {
     let checkout = CapabilityDir::open(checkout_path)
         .map_err(|error| map_capability_error(error, checkout_path, LOCAL_CONFIG_NAME))?;
     let local_relative = Path::new(LOCAL_CONFIG_NAME);
@@ -216,7 +233,12 @@ pub fn resolve_repository_config(
         }
     };
 
-    let ignore_policy = resolve_ignore_policy(checkout_path, workspace, local.as_ref())?;
+    let ignore_policy = resolve_ignore_policy(
+        checkout_path,
+        workspace,
+        workspace_use_gitignore,
+        local.as_ref(),
+    )?;
     let (openapi, openapi_source) = if let Some(openapi) = &workspace.openapi {
         (vec![openapi.clone()], ConfigSource::WorkspaceManifest)
     } else if let Some(openapi) = local.as_ref().and_then(|config| config.openapi.clone()) {
@@ -311,21 +333,19 @@ fn discover_openapi_candidates(
     ignore_policy: &IgnorePolicy,
 ) -> Result<Vec<String>, ConfigError> {
     let mut candidates = Vec::new();
-    for relative in discover_repository_files(
+    for relative in discover_repository_files_matching(
         root,
         ignore_policy,
         Some(MAX_OPENAPI_DISCOVERY_DEPTH.saturating_add(1)),
+        Some(MAX_OPENAPI_CANDIDATES),
+        |relative| {
+            relative
+                .file_name()
+                .and_then(|value| value.to_str())
+                .is_some_and(openapi_filename)
+        },
     )? {
-        let Some(name) = relative.file_name().and_then(|value| value.to_str()) else {
-            continue;
-        };
-        if !openapi_filename(name) {
-            continue;
-        }
         candidates.push(relative.to_string_lossy().replace('\\', "/"));
-        if candidates.len() >= MAX_OPENAPI_CANDIDATES {
-            break;
-        }
     }
     candidates.sort();
     candidates.dedup();
@@ -484,6 +504,7 @@ fn select_flag(workspace: Option<bool>, local: Option<bool>) -> (bool, ConfigSou
 fn resolve_ignore_policy(
     checkout_path: &Path,
     workspace: &RepositoryConfig,
+    workspace_use_gitignore: Option<bool>,
     local: Option<&RepositoryLocalConfig>,
 ) -> Result<IgnorePolicy, ConfigError> {
     let (excludes, excludes_source) = select_patterns(
@@ -495,7 +516,7 @@ fn resolve_ignore_policy(
         local.and_then(|config| config.include_defaults.as_ref()),
     );
     let (use_gitignore, use_gitignore_source) = select_flag(
-        workspace.use_gitignore,
+        workspace_use_gitignore,
         local.and_then(|config| config.use_gitignore),
     );
     IgnorePolicy::with_gitignore(
@@ -517,7 +538,9 @@ fn resolve_ignore_policy(
 mod tests {
     use std::fs;
 
-    use super::{ConfigError, ConfigSource, resolve_repository_config};
+    use super::{
+        ConfigError, ConfigSource, resolve_repository_config, resolve_repository_config_with_use_gitignore
+    };
     use crate::{HttpConsumerConfig, RepositoryConfig};
 
     #[test]
@@ -540,7 +563,6 @@ mod tests {
             implementations: None,
             excludes: None,
             include_defaults: None,
-            use_gitignore: None,
         };
 
         let resolved = resolve_repository_config(repository.path(), &workspace)?;
@@ -578,7 +600,6 @@ mod tests {
             implementations: None,
             excludes: Some(vec!["workspace/**".to_owned()]),
             include_defaults: Some(Vec::new()),
-            use_gitignore: None,
         };
 
         let resolved = resolve_repository_config(repository.path(), &workspace)?;
@@ -616,10 +637,13 @@ mod tests {
             implementations: None,
             excludes: None,
             include_defaults: None,
-            use_gitignore: Some(false),
         };
 
-        let resolved = resolve_repository_config(repository.path(), &workspace)?;
+        let resolved = resolve_repository_config_with_use_gitignore(
+            repository.path(),
+            &workspace,
+            Some(false),
+        )?;
 
         assert!(!resolved.ignore_policy.use_gitignore());
         assert_eq!(
@@ -645,7 +669,6 @@ mod tests {
             implementations: None,
             excludes: None,
             include_defaults: None,
-            use_gitignore: None,
         };
 
         let resolved = resolve_repository_config(repository.path(), &workspace)?;
@@ -674,10 +697,13 @@ mod tests {
             implementations: None,
             excludes: None,
             include_defaults: None,
-            use_gitignore: Some(true),
         };
 
-        let resolved = resolve_repository_config(repository.path(), &workspace)?;
+        let resolved = resolve_repository_config_with_use_gitignore(
+            repository.path(),
+            &workspace,
+            Some(true),
+        )?;
 
         assert_eq!(resolved.openapi, vec!["openapi.json"]);
         Ok(())
@@ -695,7 +721,6 @@ mod tests {
             implementations: None,
             excludes: Some(vec!["coverage/**".to_owned()]),
             include_defaults: Some(vec!["vendor/internal-sdk/**".to_owned()]),
-            use_gitignore: None,
         };
         let redundant = RepositoryConfig {
             excludes: Some(vec!["./coverage//./**".to_owned()]),
@@ -729,7 +754,6 @@ mod tests {
             implementations: None,
             excludes: None,
             include_defaults: Some(vec!["vendor/internal-sdk/**".to_owned()]),
-            use_gitignore: None,
         };
 
         let resolved = resolve_repository_config(repository.path(), &workspace)?;
@@ -762,7 +786,6 @@ mod tests {
             implementations: None,
             excludes: None,
             include_defaults: None,
-            use_gitignore: None,
         };
 
         let resolved = resolve_repository_config(repository.path(), &workspace)?;
@@ -792,7 +815,6 @@ mod tests {
             implementations: None,
             excludes: None,
             include_defaults: None,
-            use_gitignore: None,
         };
 
         let result = resolve_repository_config(repository.path(), &workspace);
@@ -817,7 +839,6 @@ mod tests {
             implementations: None,
             excludes: None,
             include_defaults: None,
-            use_gitignore: None,
         };
 
         let result = resolve_repository_config(repository.path(), &workspace);
@@ -845,7 +866,6 @@ mod tests {
             implementations: None,
             excludes: None,
             include_defaults: None,
-            use_gitignore: None,
         };
 
         let result = resolve_repository_config(&repository, &workspace);
@@ -875,7 +895,6 @@ mod tests {
             implementations: None,
             excludes: None,
             include_defaults: None,
-            use_gitignore: None,
         };
 
         let result = resolve_repository_config(repository.path(), &workspace);
@@ -897,7 +916,6 @@ mod tests {
             implementations: None,
             excludes: None,
             include_defaults: None,
-            use_gitignore: None,
         };
 
         let result = resolve_repository_config(repository.path(), &workspace);
@@ -917,7 +935,6 @@ mod tests {
             implementations: None,
             excludes: None,
             include_defaults: None,
-            use_gitignore: None,
         };
         let mut resolved = resolve_repository_config(repository.path(), &workspace)?;
 

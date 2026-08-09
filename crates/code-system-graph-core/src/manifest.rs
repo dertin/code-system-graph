@@ -5,7 +5,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::execution_policy::{ExecutionPolicy, ExecutionPolicyOverrides, InvalidExecutionPolicy};
+use crate::execution_policy::{
+    CodeGraphCorroborationAnchorLimit, ExecutionPolicy, ExecutionPolicyOverrides, InvalidExecutionPolicy
+};
 use crate::extraction_budget::{
     ExtractionBudgetOverrides, ExtractionBudgets, InvalidExtractionBudget
 };
@@ -57,8 +59,74 @@ pub struct RepositoryConfig {
     pub excludes: Option<Vec<String>>,
     /// Repository-relative exceptions to reactivable built-in exclusions.
     pub include_defaults: Option<Vec<String>>,
-    /// Whether automatic discovery also respects repository-contained `.gitignore` files.
-    pub use_gitignore: Option<bool>,
+}
+
+/// Additive manifest settings introduced without changing exhaustively constructible public
+/// configuration structs.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct ManifestExtensions {
+    repository_use_gitignore: BTreeMap<String, bool>,
+    max_codegraph_corroboration_anchors_per_repo: Option<i64>,
+}
+
+impl ManifestExtensions {
+    /// Returns the workspace-level `.gitignore` choice for one repository alias.
+    #[must_use]
+    pub fn repository_use_gitignore(&self, alias: &str) -> Option<bool> {
+        self.repository_use_gitignore.get(alias).copied()
+    }
+
+    /// Returns the configured `CodeGraph` corroboration bound, including `-1` for unlimited.
+    #[must_use]
+    pub const fn max_codegraph_corroboration_anchors_per_repo(&self) -> Option<i64> {
+        self.max_codegraph_corroboration_anchors_per_repo
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkspaceManifestWire {
+    version: u32,
+    name: String,
+    #[serde(rename = "allowedRoots", default)]
+    allowed_roots: Vec<String>,
+    repos: BTreeMap<String, RepositoryConfigWire>,
+    #[serde(rename = "manualLinks", default)]
+    manual_links: Vec<ManualLinkConfig>,
+    #[serde(rename = "extractionBudgets", default)]
+    extraction_budgets: Option<ExtractionBudgetOverrides>,
+    #[serde(rename = "executionPolicy", default)]
+    execution_policy: Option<ExecutionPolicyOverridesWire>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RepositoryConfigWire {
+    path: String,
+    openapi: Option<String>,
+    http_consumers: Option<Vec<HttpConsumerConfig>>,
+    integration_tests: Option<Vec<IntegrationTestConfig>>,
+    implementations: Option<Vec<ContractImplementationConfig>>,
+    excludes: Option<Vec<String>>,
+    include_defaults: Option<Vec<String>>,
+    use_gitignore: Option<bool>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ExecutionPolicyOverridesWire {
+    max_scan_wall_time_ms: Option<u64>,
+    max_no_progress_time_ms: Option<u64>,
+    #[serde(rename = "maxCodeGraphSyncWallTimeMsPerRepo")]
+    max_codegraph_sync_wall_time_ms_per_repo: Option<u64>,
+    #[serde(rename = "maxCodeGraphCorroborationAnchorsPerRepo")]
+    max_codegraph_corroboration_anchors_per_repo: Option<i64>,
+    max_worker_memory_bytes: Option<u64>,
+    graceful_termination_ms: Option<u64>,
+    watch_idle_timeout_ms: Option<u64>,
+    max_watch_session_wall_time_ms: Option<u64>,
+    min_watch_rescan_interval_ms: Option<u64>,
+    max_checkpoint_cache_bytes: Option<u64>,
 }
 
 /// Exact manual relationship or automatic-link suppression.
@@ -221,7 +289,88 @@ pub enum ManifestError {
 /// Returns [`ManifestError`] for malformed YAML, unknown keys, unsupported versions, empty
 /// fields, or an empty repository registry.
 pub fn parse_manifest(input: &str) -> Result<WorkspaceManifest, ManifestError> {
-    let manifest: WorkspaceManifest = crate::yaml::from_str(input)?;
+    parse_manifest_with_extensions(input).map(|(manifest, _)| manifest)
+}
+
+/// Parses a strict workspace manifest together with additive patch-compatible settings.
+///
+/// # Errors
+///
+/// Returns [`ManifestError`] under the same conditions as [`parse_manifest`].
+pub fn parse_manifest_with_extensions(
+    input: &str,
+) -> Result<(WorkspaceManifest, ManifestExtensions), ManifestError> {
+    let wire: WorkspaceManifestWire = crate::yaml::from_str(input)?;
+    let mut repository_use_gitignore = BTreeMap::new();
+    let repos = wire
+        .repos
+        .into_iter()
+        .map(|(alias, repository)| {
+            if let Some(value) = repository.use_gitignore {
+                repository_use_gitignore.insert(alias.clone(), value);
+            }
+            (
+                alias,
+                RepositoryConfig {
+                    path: repository.path,
+                    openapi: repository.openapi,
+                    http_consumers: repository.http_consumers,
+                    integration_tests: repository.integration_tests,
+                    implementations: repository.implementations,
+                    excludes: repository.excludes,
+                    include_defaults: repository.include_defaults,
+                },
+            )
+        })
+        .collect();
+    let (execution_policy, max_codegraph_corroboration_anchors_per_repo) = wire
+        .execution_policy
+        .map(ExecutionPolicyOverridesWire::into_parts)
+        .map_or((None, None), |(policy, limit)| (Some(policy), limit));
+    if let Some(value) = max_codegraph_corroboration_anchors_per_repo {
+        CodeGraphCorroborationAnchorLimit::try_from(value)?;
+    }
+    let manifest = WorkspaceManifest {
+        version: wire.version,
+        name: wire.name,
+        allowed_roots: wire.allowed_roots,
+        repos,
+        manual_links: wire.manual_links,
+        extraction_budgets: wire.extraction_budgets,
+        execution_policy,
+    };
+    validate_manifest(manifest).map(|manifest| {
+        (
+            manifest,
+            ManifestExtensions {
+                repository_use_gitignore,
+                max_codegraph_corroboration_anchors_per_repo,
+            },
+        )
+    })
+}
+
+impl ExecutionPolicyOverridesWire {
+    fn into_parts(self) -> (ExecutionPolicyOverrides, Option<i64>) {
+        (
+            ExecutionPolicyOverrides {
+                max_scan_wall_time_ms: self.max_scan_wall_time_ms,
+                max_no_progress_time_ms: self.max_no_progress_time_ms,
+                max_codegraph_sync_wall_time_ms_per_repo: self
+                    .max_codegraph_sync_wall_time_ms_per_repo,
+                max_worker_memory_bytes: self.max_worker_memory_bytes,
+                graceful_termination_ms: self.graceful_termination_ms,
+                watch_idle_timeout_ms: self.watch_idle_timeout_ms,
+                max_watch_session_wall_time_ms: self.max_watch_session_wall_time_ms,
+                min_watch_rescan_interval_ms: self.min_watch_rescan_interval_ms,
+                max_checkpoint_cache_bytes: self.max_checkpoint_cache_bytes,
+            },
+            self.max_codegraph_corroboration_anchors_per_repo,
+        )
+    }
+}
+
+fn validate_manifest(manifest: WorkspaceManifest) -> Result<WorkspaceManifest, ManifestError> {
     if manifest.version != 1 {
         return Err(ManifestError::UnsupportedVersion {
             found: manifest.version,
@@ -401,7 +550,9 @@ fn validate_maximum(field: &str, value: &str, maximum: usize) -> Result<(), Mani
 mod tests {
     use code_system_graph_model::EdgeKind;
 
-    use super::{MANUAL_REASON_MAX_BYTES, ManifestError, parse_manifest};
+    use super::{
+        MANUAL_REASON_MAX_BYTES, ManifestError, parse_manifest, parse_manifest_with_extensions
+    };
     use crate::{ExecutionPolicy, ExtractionBudgets, IgnorePatternError};
 
     const VALID: &str = r"
@@ -522,10 +673,6 @@ repos:
         assert_eq!(effective.max_scan_wall_time_ms, 28_800_000);
         assert_eq!(effective.max_no_progress_time_ms, 600_000);
         assert_eq!(
-            effective.max_codegraph_corroboration_anchors_per_repo,
-            ExecutionPolicy::default().max_codegraph_corroboration_anchors_per_repo
-        );
-        assert_eq!(
             effective.max_worker_memory_bytes,
             ExecutionPolicy::default().max_worker_memory_bytes
         );
@@ -590,6 +737,28 @@ repos:
         let result = parse_manifest(&input);
 
         assert!(result.is_ok(), "unexpected manifest error: {result:?}");
+    }
+
+    #[test]
+    fn parse_manifest_should_keep_additive_settings_out_of_public_structs() {
+        let input = VALID.replace(
+            "name: commerce",
+            "name: commerce\nexecutionPolicy:\n  maxCodeGraphCorroborationAnchorsPerRepo: 12",
+        );
+        let input = input.replace(
+            "    path: ../web",
+            "    path: ../web\n    useGitignore: true",
+        );
+
+        let (manifest, extensions) =
+            parse_manifest_with_extensions(&input).expect("additive settings are valid");
+
+        assert!(manifest.execution_policy.is_some());
+        assert_eq!(extensions.repository_use_gitignore("web"), Some(true));
+        assert_eq!(
+            extensions.max_codegraph_corroboration_anchors_per_repo(),
+            Some(12)
+        );
     }
 
     #[test]
