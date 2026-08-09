@@ -37,6 +37,7 @@ async fn local_changes_should_be_fingerprinted_read_only_and_source_free() -> an
         "pub fn answer() -> u32 {\n    41\n}\n",
     )?;
     git(&repository, &["init", "--quiet"])?;
+    git(&repository, &["config", "core.autocrlf", "false"])?;
     git(&repository, &["add", "."])?;
     git(
         &repository,

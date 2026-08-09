@@ -1568,6 +1568,7 @@ mod tests {
     fn repo() -> Result<TempDir, Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         git(temp.path(), &["init", "-q"])?;
+        git(temp.path(), &["config", "core.autocrlf", "false"])?;
         git(
             temp.path(),
             &["config", "user.name", "Code System Graph Test"],
