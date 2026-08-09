@@ -215,7 +215,7 @@ fi
 preflight_publish_readiness
 
 if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
-  tag_commit="$(git rev-list -n 1 "$tag")"
+  tag_commit="$(git rev-list -n 1 "refs/tags/${tag}^{commit}")"
   if [ "$tag_commit" != "$remote_head" ]; then
     echo "Tag ${tag} does not point to origin/main" >&2
     exit 1
