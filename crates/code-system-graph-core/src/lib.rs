@@ -86,7 +86,7 @@ pub use events::{
     DeliverySemantics, EventBroker, EventDocument, EventEvidenceLine, EventExtractionError, EventObservation, EventRole, EventSchemaDefinition, EventSchemaField, extract_asyncapi, parse_event_source
 };
 pub use execution_policy::{
-    ExecutionLimitExceeded, ExecutionPolicy, ExecutionPolicyOverrides, ExecutionResource, ExecutionSummary, InvalidExecutionPolicy, JobPhase, MonotonicClock, ScanJobTracker
+    CodeGraphCorroborationAnchorLimit, ExecutionLimitExceeded, ExecutionPolicy, ExecutionPolicyOverrides, ExecutionResource, ExecutionSummary, InvalidExecutionPolicy, JobPhase, MonotonicClock, ScanJobTracker
 };
 pub use extraction_budget::{
     BoundedJsonWriter, EXTRACTION_CONTRACT_VERSION, ExtractionBudgetOverrides, ExtractionBudgets, ExtractionClock, ExtractionLimitExceeded, ExtractionResource, ExtractionTracker, InvalidExtractionBudget
@@ -106,7 +106,7 @@ pub use http::{
     BoundaryRole, HttpBoundary, HttpExtractionError, extract_openapi, extract_openapi_with_tracker, normalize_http_path
 };
 pub use ignore_policy::{
-    DEFAULT_EXCLUDES, IGNORE_POLICY_VERSION, IgnorePatternError, IgnorePolicy, PROTECTED_EXCLUDES, validate_excludes, validate_include_defaults
+    DEFAULT_EXCLUDES, IGNORE_POLICY_VERSION, IgnorePatternError, IgnorePolicy, PROTECTED_EXCLUDES, RepositoryDiscoveryError, RepositoryPathMatcher, discover_repository_files, validate_excludes, validate_include_defaults
 };
 pub use impact::{
     CompatibilityInput, ContractImpact, CoverageSummary, CriticalityAssignment, CriticalityTag, EnvironmentAssignment, ImpactClassification, ImpactCompatibilityStatus, ImpactContext, ImpactDepthBucket, ImpactDirection, ImpactError, ImpactItem, ImpactOptions, ImpactPathStep, ImpactReport, ImpactRequest, ImpactTarget, LocalEnrichmentInput, LocalEnrichmentStatus, LocalImpactItem, LocalImpactSummary, RecommendedCommand, RepositoryImpact, ResolvedTarget, RiskFactor, RiskLevel, ServiceImpact, TestRecommendation, TestRecommendationSource, TruncationInfo, analyze_impact

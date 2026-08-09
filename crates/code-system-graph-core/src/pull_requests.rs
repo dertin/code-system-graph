@@ -623,6 +623,7 @@ pub struct PrHttpTransportError {
 }
 
 /// Injectable asynchronous HTTP boundary.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait PrHttpTransport: Send + Sync {
     /// Sends one bounded request.
@@ -797,6 +798,7 @@ pub enum PullRequestError {
 }
 
 /// Asynchronous provider interface.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait PullRequestProvider: Send + Sync {
     /// Returns the provider contract implemented by this client.

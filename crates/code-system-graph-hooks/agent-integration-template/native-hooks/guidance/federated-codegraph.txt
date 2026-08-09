@@ -1,0 +1,1 @@
+This task may span repositories. Use Code System Graph to find the relevant entities, relationships, contracts, and impact; use `explore` for repository-local source evidence. Follow the installed Code System Graph skill when available.

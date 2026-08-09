@@ -1,0 +1,2 @@
+- For repository-local questions, use `query` and `source_context` for persisted entities and relationships, then verify conclusions in live source.
+- For cross-repository questions, use Code System Graph to find entities, relationships, contracts, change impact, and pull-request overlap.

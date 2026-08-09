@@ -23,7 +23,7 @@ fn uninstall_on_clean_repository_without_hooks_directory_should_be_noop()
     std::fs::write(temporary.path().join(".git/HEAD"), "ref: refs/heads/main\n")?;
     let removal = uninstall(&request(temporary.path(), HostKind::Cursor))?;
     assert!(!removal.changed);
-    assert!(removal.removed_files.is_empty());
+    assert_eq!(removal.removed_files, Vec::<std::path::PathBuf>::new());
     Ok(())
 }
 

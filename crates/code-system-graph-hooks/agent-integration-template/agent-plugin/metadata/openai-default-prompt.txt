@@ -1,0 +1,1 @@
+Use ${{SKILL_NAME}} to investigate the current task with workspace graph evidence.

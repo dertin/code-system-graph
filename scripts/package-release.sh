@@ -15,7 +15,7 @@ fi
 
 mkdir -p "$DIST"
 rm -rf "$STAGE"
-mkdir -p "$STAGE/bin" "$STAGE/share/doc/code-system-graph"
+mkdir -p "$STAGE/bin" "$STAGE/share/doc/code-system-graph" "$STAGE/share/code-system-graph"
 
 CARGO_TARGET_DIR="$TARGET_DIR" cargo build \
   --manifest-path "$ROOT/Cargo.toml" \
@@ -30,6 +30,7 @@ install -m 0755 "$TARGET_DIR/$TARGET/release/code-system-graph-hooks$EXE_SUFFIX"
 install -m 0644 "$ROOT/LICENSE" "$ROOT/NOTICE" "$ROOT/THIRD_PARTY_NOTICES.md" \
   "$ROOT/README.md" "$ROOT/SECURITY.md" "$STAGE/share/doc/code-system-graph/"
 cp -R "$ROOT/docs" "$STAGE/share/doc/code-system-graph/"
+cp -R "$ROOT/crates/code-system-graph-hooks/agent-integration-template" "$STAGE/share/code-system-graph/"
 install -m 0755 "$ROOT/scripts/install.sh" "$ROOT/scripts/uninstall.sh" "$STAGE/"
 
 SBOM="$DIST/$NAME.cdx.json"

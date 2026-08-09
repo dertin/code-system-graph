@@ -2051,7 +2051,10 @@ spec:
 
         let document = extract_kubernetes("objects.yaml", input).expect("valid Kubernetes");
 
-        assert!(document.deployment_units[0].service_names.is_empty());
+        assert_eq!(
+            document.deployment_units[0].service_names,
+            Vec::<String>::new()
+        );
     }
 
     #[test]

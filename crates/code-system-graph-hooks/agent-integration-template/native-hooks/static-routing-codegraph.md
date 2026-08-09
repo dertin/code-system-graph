@@ -1,0 +1,2 @@
+- For repository-local navigation, use `explore` for symbols, call paths, implementation, and tests.
+- For cross-repository questions, use Code System Graph to find entities, relationships, contracts, change impact, and pull-request overlap; use `explore` to verify local source details.

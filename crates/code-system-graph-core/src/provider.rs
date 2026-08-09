@@ -347,6 +347,7 @@ pub enum ProviderError {
 }
 
 /// Optional boundary for repository-local code intelligence.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait LocalCodeIntelligenceProvider: Send + Sync {
     /// Returns the stable provider name.

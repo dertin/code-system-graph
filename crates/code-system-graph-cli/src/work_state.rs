@@ -1170,11 +1170,12 @@ mod tests {
                 .expect("load"),
             vec![batch.clone()]
         );
-        assert!(
+        assert_eq!(
             state
                 .load_batches(&[fingerprint("two")], "budget", "1.0.0", 1_000_000, 3)
                 .expect("load")
-                .is_empty()
+                .as_slice(),
+            &[]
         );
         assert!(!state.put_batch(&batch, 1, 4).expect("oversized skip"));
     }

@@ -143,6 +143,7 @@ pub enum ExtractorError {
 }
 
 /// Focused, deterministic contract extractor.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait BoundaryExtractor: Send + Sync {
     /// Stable extractor identity.

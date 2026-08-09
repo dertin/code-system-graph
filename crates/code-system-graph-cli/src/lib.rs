@@ -1,5 +1,6 @@
 //! Delivery-layer orchestration shared by the `Code System Graph` CLI and MCP server.
 
+mod agent_plugin;
 pub mod http_server;
 pub mod mcp;
 mod sync;
@@ -14,12 +15,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+pub use agent_plugin::{
+    AgentPluginCreateMode, AgentPluginCreateReport, AgentPluginCreateRequest, AgentPluginCreateTarget, AgentPluginError, AgentPluginMcpBinding, AgentPluginUninstallReport, AgentPluginUninstallRequest, agent_plugin_exit_code, create_agent_plugin, load_agent_plugin_mcp_binding, uninstall_composed_integration
+};
 use atomic_write_file::AtomicWriteFile;
 use code_system_graph_core::{
     AffectedTestsRequest, AnalyzerVersions, ArtifactKey, BatchAction, BatchPlanError, BitbucketProvider, ChangeAnalysisError, ChangeAnalysisOptions, ChangeError, ChangeImpactReport, ChangeProvider, ChangeRequest, ChangeScope, ChangeSet, CodeGraphConfig, CodeGraphProvider, CommunityError, ConfigDoctorInput, ConfigError, ConfigExtractionError, ContractReport, ContractRequest, CorroborationReport, DataDocument, DataExtractionError, DeclaredImplementation, DeclaredTestCase, DoctorReport, DoctorRequest, DocumentationDocument, DocumentationExtractionError, EXTRACTION_CONTRACT_VERSION, EffectiveRepositoryConfig, EventDocument, EventExtractionError, EventGraphFacts, ExecutionPolicy, ExitCode, ExportReport, ExportRequest, ExtractionBudgets, ExtractionGraphFacts, ExtractionLimitExceeded, ExtractionTracker, ExtractorBatch, ExtractorBatchPlan, FederatedGraph, FreshnessDoctorInput, GeneratedClientError, GeneratedClientMetadata, GitCliChangeProvider, GitHubProvider, GraphqlDocument, GraphqlExtractionError, GraphqlGraphFacts, HttpBoundary, HttpExtractionError, ImpactContext, ImpactError, ImpactReport, ImpactRequest, ImpactTarget, IncrementalPlan, InfrastructureDocument, InfrastructureExtractionError, IntegrityDoctorInput, InterfaceError, LinkError, LocalCodeIntelligenceProvider, LocalContextRequest, LocalContextResult, LocalEnrichmentInput, LocalEnrichmentStatus, LocalImpactItem, LocalImpactRequest, ManifestEdit, ManifestEditError, ManifestError, ManualLinkConfig, ManualLinkError, PackageGraphFacts, PackageManifest, PackageManifestError, PrAuthToken, ProtobufDocument, ProtobufExtractionError, ProtobufGraphFacts, ProviderBudget, ProviderCapability, ProviderDoctorInput, ProviderDoctorStatus, ProviderError, ProviderRequest, ProviderStatus, PullRequestCoordinates, PullRequestError, PullRequestInspectRequest, PullRequestInspection, PullRequestListPage, PullRequestListRequest, PullRequestListState, PullRequestProvider, PullRequestProviderConfig, PullRequestProviderKind, QueryError, RecommendedCommand, RegisteredWorkspace, RegistryError, ReqwestPrHttpTransport, SafeConfigDocument, SchemaDoctorInput, SearchFilters, SearchReport, SearchRequest, SourceEpistemicStatus, SourceGraphFacts, SourceLanguage, SourceObservation, SourceRole, SourceSyntaxError, SourceSyntaxLanguage, SourceWarning, SymbolAnchor, SymbolCorroboration, TraceError, TraversalReport, TraversalRequest, WorkspaceManifest, affected_link_keys, analyze_changes, analyze_communities_with_progress, analyze_impact, apply_openapi_override, classify_interface_error, commit_manifest_edit, compare_community_snapshots, corroborate_repository, declared_implementation, declared_test_case, doctor, documents_to_graph, encode_native_path, event_documents_to_graph, export_graph, extract_asyncapi, extract_codeowners, extract_data_artifact, extract_docker_compose, extract_generated_client_metadata, extract_graphql_document_with_tracker, extract_graphql_persisted_operations_with_tracker, extract_helm, extract_kubernetes, extract_markdown, extract_openapi_with_tracker, extract_package_manifest_with_tracker, extract_protobuf_with_tracker, extract_safe_config, extract_service_catalog, extract_terraform, graphql_documents_to_graph, inspect_contracts, inspect_source_syntax, link_declared_implementations_with_ambiguities, link_declared_tests_with_ambiguities, link_http_boundaries_with_ambiguities, link_registered_package_owners, load_extractor_batch_with_budgets, merge_affected_link_neighborhoods, package_manifest_to_graph, parse_event_source, parse_go_source_with_tracker, parse_graphql_source_with_tracker, parse_java_source_with_tracker, parse_javascript_source_at_path_with_tracker, parse_literal_sql_source_at_root, parse_manifest, parse_protobuf_generated_source, parse_python_source_with_tracker, parse_rust_source_with_tracker, parse_typescript_source_at_path_with_tracker, plan_extractor_batches, plan_incremental_scan, precheck_focused_source_values, preview_add_manual_link, preview_add_repository, preview_remove_repository, protobuf_documents_to_graph, register_workspace, resolve_manual_links, resolve_repository_config, search, source_observations_to_graph, store_extractor_batch, traverse
 };
 pub use code_system_graph_core::{
-    ConfigSource, DEFAULT_EXCLUDES, IgnorePolicy, PROTECTED_EXCLUDES
+    ConfigSource, DEFAULT_EXCLUDES, IgnorePolicy, PROTECTED_EXCLUDES, discover_repository_files
 };
 use code_system_graph_model::{
     ArtifactFingerprint, CheckoutId, Community, CommunityAlgorithm, CommunityConfig, CommunityDelta, CommunityId, CommunityScope, Edge, EdgeId, EdgeKind, EpistemicStatus, Evidence, EvidenceId, ExtractorRun, ExtractorRunStatus, FreshnessSummary, LinkDecision, LinkStatus, Node, NodeId, NodeKind, OverallFreshness, Provenance, RepoFreshness, RepoFreshnessState, RepoId, RepositoryRecord, StoredExtractorBatch, ToolEnvelope, ToolStatus, TraceReport, WorkspaceRecord, stable_id, stable_id_bytes
@@ -135,6 +139,9 @@ pub enum ApplicationError {
     /// Effective repository configuration could not be resolved.
     #[error(transparent)]
     Config(#[from] ConfigError),
+    /// Automatic repository discovery or an enabled `.gitignore` file failed.
+    #[error(transparent)]
+    Discovery(#[from] code_system_graph_core::RepositoryDiscoveryError),
     /// Workspace manifest mutation failed.
     #[error(transparent)]
     ManifestEdit(#[from] ManifestEditError),
@@ -267,6 +274,7 @@ pub const fn application_exit_code(error: &ApplicationError) -> ExitCode {
         | ApplicationError::ManualLink(_)
         | ApplicationError::Registry(_)
         | ApplicationError::Config(_)
+        | ApplicationError::Discovery(_)
         | ApplicationError::ManifestEdit(_)
         | ApplicationError::UnknownOverrideRepository(_)
         | ApplicationError::WorkspaceNameMismatch { .. }
@@ -397,6 +405,15 @@ pub struct ConfiguredPatterns {
     pub patterns: Vec<String>,
 }
 
+/// Configured boolean and the precedence layer that selected it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ConfiguredFlag {
+    /// Selected configuration layer.
+    pub source: ConfigSource,
+    /// Effective value.
+    pub value: bool,
+}
+
 /// Complete observable ignore policy for one registered repository.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct IgnorePolicyReport {
@@ -408,6 +425,8 @@ pub struct IgnorePolicyReport {
     pub configured_excludes: ConfiguredPatterns,
     /// Exceptions to built-in default exclusions selected from configuration.
     pub include_defaults: ConfiguredPatterns,
+    /// Whether repository-contained `.gitignore` files participate in discovery.
+    pub use_gitignore: ConfiguredFlag,
     /// Rules ordered from lowest to highest precedence.
     pub effective_rules: Vec<EffectiveIgnoreRule>,
 }
@@ -836,6 +855,10 @@ fn ignore_policy_report(policy: &IgnorePolicy) -> IgnorePolicyReport {
         include_defaults: ConfiguredPatterns {
             source: policy.include_defaults_source(),
             patterns: policy.include_defaults().to_vec(),
+        },
+        use_gitignore: ConfiguredFlag {
+            source: policy.use_gitignore_source(),
+            value: policy.use_gitignore(),
         },
         effective_rules,
     }
@@ -5156,13 +5179,14 @@ fn prepare_codegraph_jobs(
             ))
         });
         anchors.dedup();
-        if anchors.len() > 50 {
-            anchors.truncate(50);
-            setup_degradations.push(format!(
-                "CodeGraph symbol corroboration for `{}` was limited to 50 anchors",
-                repository.alias
-            ));
-        }
+        limit_codegraph_anchors(
+            &mut anchors,
+            context
+                .execution_policy
+                .max_codegraph_corroboration_anchors_per_repo,
+            &repository.alias,
+            &mut setup_degradations,
+        );
         let mut changed_files = changed_files_by_repository
             .remove(&repository.id)
             .unwrap_or_default();
@@ -5185,6 +5209,24 @@ fn prepare_codegraph_jobs(
         }
     }
     (jobs, setup_degradations)
+}
+
+fn limit_codegraph_anchors(
+    anchors: &mut Vec<SymbolAnchor>,
+    configured_limit: code_system_graph_core::CodeGraphCorroborationAnchorLimit,
+    repository: &str,
+    degradations: &mut Vec<String>,
+) {
+    let Some(limit) = configured_limit.bounded() else {
+        return;
+    };
+    let limit = limit.get();
+    if anchors.len() > limit {
+        anchors.truncate(limit);
+        degradations.push(format!(
+            "CodeGraph symbol corroboration for `{repository}` was limited to {limit} anchors"
+        ));
+    }
 }
 
 fn apply_codegraph_corroboration(graph: &mut GraphAssembly, reports: &[RepositoryCorroboration]) {
@@ -5615,67 +5657,12 @@ fn discover_focused_artifacts(
     checkout_path: &Path,
     ignore_policy: &IgnorePolicy,
 ) -> Result<Vec<(PathBuf, &'static str)>, ApplicationError> {
-    let mut pending = vec![checkout_path.to_path_buf()];
-    let canonical_checkout =
-        fs::canonicalize(checkout_path).map_err(|source| ApplicationError::ReadFile {
-            path: checkout_path.to_path_buf(),
-            source,
-        })?;
-    let mut visited = BTreeSet::new();
     let mut discovered = Vec::new();
-    while let Some(directory) = pending.pop() {
-        let canonical_directory =
-            fs::canonicalize(&directory).map_err(|source| ApplicationError::ReadFile {
-                path: directory.clone(),
-                source,
-            })?;
-        if !canonical_directory.starts_with(&canonical_checkout) {
-            return Err(ApplicationError::ArtifactOutsideCheckout {
-                path: canonical_directory,
-                checkout: canonical_checkout,
-            });
-        }
-        if !visited.insert(canonical_directory) {
-            continue;
-        }
+    for relative in discover_repository_files(checkout_path, ignore_policy, None)? {
         worker::report_progress(code_system_graph_core::JobPhase::Discovery, 1);
-        let entries = fs::read_dir(&directory).map_err(|source| ApplicationError::ReadFile {
-            path: directory.clone(),
-            source,
-        })?;
-        for entry in entries {
-            let entry = entry.map_err(|source| ApplicationError::ReadFile {
-                path: directory.clone(),
-                source,
-            })?;
-            let file_type = entry
-                .file_type()
-                .map_err(|source| ApplicationError::ReadFile {
-                    path: entry.path(),
-                    source,
-                })?;
-            if file_type.is_symlink() {
-                continue;
-            }
-            let path = entry.path();
-            let relative = path.strip_prefix(checkout_path).map_err(|_| {
-                ApplicationError::ArtifactOutsideCheckout {
-                    path: path.clone(),
-                    checkout: checkout_path.to_path_buf(),
-                }
-            })?;
-            if file_type.is_dir() {
-                if !ignore_policy.excludes(relative, true) {
-                    pending.push(path);
-                }
-                continue;
-            }
-            if !file_type.is_file() || ignore_policy.excludes(relative, false) {
-                continue;
-            }
-            for extractor in focused_extractors_for_path(&path) {
-                discovered.push((relative.to_path_buf(), extractor));
-            }
+        let path = checkout_path.join(&relative);
+        for extractor in focused_extractors_for_path(&path) {
+            discovered.push((relative.clone(), extractor));
         }
     }
     discovered.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(right.1)));
@@ -6122,6 +6109,56 @@ mod budget_regression_tests {
             accepted.is_ok(),
             "exact observation budget failed: {accepted:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod codegraph_job_tests {
+    use super::{SymbolAnchor, limit_codegraph_anchors};
+
+    fn anchors(count: usize) -> Vec<SymbolAnchor> {
+        (0..count)
+            .map(|index| SymbolAnchor {
+                symbol: format!("symbol_{index}"),
+                source_path: "src/lib.rs".to_owned(),
+                start_line: index + 1,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn configured_anchor_limit_should_truncate_and_report_effective_value() {
+        let mut anchors = anchors(4);
+        let mut degradations = Vec::new();
+
+        limit_codegraph_anchors(
+            &mut anchors,
+            2.try_into().expect("bounded test limit"),
+            "studio",
+            &mut degradations,
+        );
+
+        assert_eq!(anchors.len(), 2);
+        assert_eq!(
+            degradations,
+            ["CodeGraph symbol corroboration for `studio` was limited to 2 anchors"]
+        );
+    }
+
+    #[test]
+    fn unlimited_anchor_limit_should_preserve_every_anchor_without_degradation() {
+        let mut anchors = anchors(75);
+        let mut degradations = Vec::new();
+
+        limit_codegraph_anchors(
+            &mut anchors,
+            (-1).try_into().expect("unlimited test limit"),
+            "studio",
+            &mut degradations,
+        );
+
+        assert_eq!(anchors.len(), 75);
+        assert_eq!(degradations, Vec::<String>::new());
     }
 }
 

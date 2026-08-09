@@ -1,0 +1,51 @@
+cross-repo
+cross repo
+cross-repository
+cross repository
+multiple repos
+multiple repositories
+across repos
+across repositories
+between repos
+between repositories
+workspace-wide
+workspace wide
+repository boundary
+service boundary
+contract between
+contract across
+api boundary between
+api boundary across
+dependency between
+dependency across
+impact between
+impact across
+blast radius
+pr overlap
+pull request overlap
+overlapping pr
+overlapping pull request
+federated
+entre repos
+entre repositorios
+varios repos
+varios repositorios
+múltiples repositorios
+multiples repositorios
+a través de repositorios
+a traves de repositorios
+en todo el workspace
+límite de repositorio
+limite de repositorio
+límite de servicio
+limite de servicio
+contrato entre
+contrato a través
+contrato a traves
+api entre repositorios
+dependencia entre repos
+dependencia entre repositorios
+impacto entre
+radio de impacto
+solapamiento de pr
+solapamiento de pull request

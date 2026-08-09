@@ -1366,7 +1366,7 @@ mod tests {
             "# Billing service\nThe payments repository calls an API.\n",
         );
 
-        assert!(result.records[0].references.is_empty());
+        assert_eq!(result.records[0].references, Vec::new());
     }
 
     #[test]

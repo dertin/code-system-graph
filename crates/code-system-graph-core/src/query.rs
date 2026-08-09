@@ -1707,7 +1707,7 @@ mod tests {
         request.filters.edge_kinds = vec![EdgeKind::Validates, EdgeKind::CallsRemote];
         let report = report_or_panic(traverse(&nodes, &edges, &request));
 
-        assert!(report.paths.is_empty());
+        assert_eq!(report.paths, Vec::new());
     }
 
     #[test]

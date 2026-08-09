@@ -57,6 +57,8 @@ pub struct RepositoryConfig {
     pub excludes: Option<Vec<String>>,
     /// Repository-relative exceptions to reactivable built-in exclusions.
     pub include_defaults: Option<Vec<String>>,
+    /// Whether automatic discovery also respects repository-contained `.gitignore` files.
+    pub use_gitignore: Option<bool>,
 }
 
 /// Exact manual relationship or automatic-link suppression.
@@ -520,6 +522,10 @@ repos:
         assert_eq!(effective.max_scan_wall_time_ms, 28_800_000);
         assert_eq!(effective.max_no_progress_time_ms, 600_000);
         assert_eq!(
+            effective.max_codegraph_corroboration_anchors_per_repo,
+            ExecutionPolicy::default().max_codegraph_corroboration_anchors_per_repo
+        );
+        assert_eq!(
             effective.max_worker_memory_bytes,
             ExecutionPolicy::default().max_worker_memory_bytes
         );
@@ -543,6 +549,10 @@ repos:
             "name: commerce",
             "name: commerce\nexecutionPolicy:\n  maxScanWallTimeMs: 1000\n  maxNoProgressTimeMs: 1001\n  maxCodeGraphSyncWallTimeMsPerRepo: 1000\n  gracefulTerminationMs: 1",
         );
+        let invalid_anchor_limit = VALID.replace(
+            "name: commerce",
+            "name: commerce\nexecutionPolicy:\n  maxCodeGraphCorroborationAnchorsPerRepo: -2",
+        );
 
         assert!(matches!(
             parse_manifest(&zero),
@@ -555,6 +565,10 @@ repos:
         assert!(matches!(
             parse_manifest(&unknown),
             Err(ManifestError::InvalidYaml(_))
+        ));
+        assert!(matches!(
+            parse_manifest(&invalid_anchor_limit),
+            Err(ManifestError::InvalidExecutionPolicy(_))
         ));
         let invalid_result = parse_manifest(&invalid);
         assert!(

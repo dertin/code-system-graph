@@ -1,5 +1,6 @@
 //! End-to-end coverage for effective native discovery configuration.
 
+use std::num::NonZeroUsize;
 use std::process::Command;
 
 use code_system_graph::ConfigReport;
@@ -42,6 +43,11 @@ fn config_show_should_report_defaults_and_selected_repository_rules() -> anyhow:
     );
     assert_eq!(report.repositories.len(), 1);
     assert_eq!(report.repositories[0].alias, "api");
+    assert!(!report.repositories[0].ignore_policy.use_gitignore.value);
+    assert!(matches!(
+        report.repositories[0].ignore_policy.use_gitignore.source,
+        code_system_graph::ConfigSource::Default
+    ));
     assert_eq!(
         report.repositories[0]
             .ignore_policy
@@ -80,7 +86,7 @@ fn config_show_should_report_effective_execution_policy() -> anyhow::Result<()> 
     let manifest = temporary.path().join("code-system-graph.yaml");
     std::fs::write(
         &manifest,
-        "version: 1\nname: configuration\nexecutionPolicy:\n  maxScanWallTimeMs: 28800000\n  maxNoProgressTimeMs: 600000\nrepos:\n  api:\n    path: api\n",
+        "version: 1\nname: configuration\nexecutionPolicy:\n  maxScanWallTimeMs: 28800000\n  maxNoProgressTimeMs: 600000\n  maxCodeGraphCorroborationAnchorsPerRepo: 12\nrepos:\n  api:\n    path: api\n",
     )?;
 
     let output = Command::new(env!("CARGO_BIN_EXE_csgraph"))
@@ -92,6 +98,14 @@ fn config_show_should_report_effective_execution_policy() -> anyhow::Result<()> 
     assert!(output.status.success());
     assert_eq!(report.execution_policy.max_scan_wall_time_ms, 28_800_000);
     assert_eq!(report.execution_policy.max_no_progress_time_ms, 600_000);
+    assert_eq!(
+        report
+            .execution_policy
+            .max_codegraph_corroboration_anchors_per_repo
+            .bounded()
+            .map(NonZeroUsize::get),
+        Some(12)
+    );
     assert_eq!(
         report.execution_policy.max_worker_memory_bytes,
         ExecutionPolicy::default().max_worker_memory_bytes
@@ -227,6 +241,35 @@ fn config_show_should_report_repository_local_rule_source() -> anyhow::Result<()
             .ignore_policy
             .configured_excludes
             .source,
+        code_system_graph::ConfigSource::RepositoryLocal
+    ));
+    Ok(())
+}
+
+#[test]
+fn config_show_should_report_repository_local_gitignore_source() -> anyhow::Result<()> {
+    let temporary = tempfile::tempdir()?;
+    std::fs::create_dir_all(temporary.path().join("worker"))?;
+    std::fs::write(
+        temporary.path().join("worker/.code-system-graph.yaml"),
+        "version: 1\nuseGitignore: true\n",
+    )?;
+    let manifest = temporary.path().join("code-system-graph.yaml");
+    std::fs::write(
+        &manifest,
+        "version: 1\nname: configuration\nrepos:\n  worker:\n    path: worker\n",
+    )?;
+
+    let output = Command::new(env!("CARGO_BIN_EXE_csgraph"))
+        .args(["config", "show", "--config"])
+        .arg(&manifest)
+        .output()?;
+    let report: ConfigReport = serde_json::from_slice(&output.stdout)?;
+
+    assert!(output.status.success());
+    assert!(report.repositories[0].ignore_policy.use_gitignore.value);
+    assert!(matches!(
+        report.repositories[0].ignore_policy.use_gitignore.source,
         code_system_graph::ConfigSource::RepositoryLocal
     ));
     Ok(())

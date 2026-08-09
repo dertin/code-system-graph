@@ -18,11 +18,12 @@ blake3 = "1.8.5"
 graphql-parser = "0.4.1"
 globset = "0.4.19"
 hcl-rs = "0.19.7"
+ignore = "0.4.31"
 libc = "0.2"
 nix = { version = "0.31.3", features = ["fs"] }
 proto-parser = "1.14.3"
 pulldown-cmark = "0.13.4"
-code-system-graph-model = { version = "1.0.2", path = "../code-system-graph-model" }
+code-system-graph-model = { version = "1.0.3", path = "../code-system-graph-model" }
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls"] }
 rmcp = { version = "3.1.0", default-features = false, features = [
     "client",

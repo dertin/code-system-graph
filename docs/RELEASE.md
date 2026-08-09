@@ -1,10 +1,9 @@
-# Code System Graph 1.0.2 Release
+# Code System Graph 1.0.3 Release
 
-Code System Graph 1.0.2 is a performance and reliability maintenance release. It avoids
-republishing unchanged CodeGraph-backed snapshots, bounds focused corroboration work, preserves
-ambiguous HTTP evidence as degradations, and improves supervised-worker diagnostics. The source
-tree and package version are `1.0.2`. Continuous integration runs on GitHub at
-`https://github.com/dertin/code-system-graph`.
+Code System Graph 1.0.3 adds configurable CodeGraph corroboration bounds, opt-in Git-native ignore
+semantics, portable workspace-bound Agent Plugins, and ignored local workspace bindings for
+existing portable plugins. The source tree and package version are `1.0.3`. Continuous integration
+runs on GitHub at `https://github.com/dertin/code-system-graph`.
 
 Platform claims below require native build, test, packaging, and archive-smoke evidence from the
 release workflow.
@@ -33,6 +32,9 @@ Code System Graph 1.0.x includes:
 - deterministic linking, exact manual links and suppressions, immutable snapshots, and freshness;
 - bounded search, trace, community analysis, compatibility, impact, and change analysis;
 - opt-in CodeGraph integration through public MCP or CLI contracts;
+- configurable per-repository corroboration bounds and opt-in Git-native ignore discovery;
+- portable Agent Plugins 1.0.0 generation and ownership-checked local bindings for versioned base
+  plugins with a read-only MCP and existing routing guidance;
 - CLI, read-only MCP stdio, optional authenticated HTTP, exports, diagnostics, and host hooks;
 - exact-schema SQLite backup, restore, and integrity validation;
 - deterministic Linux package archives, CycloneDX SBOMs, and SHA-256 checksums.
@@ -83,13 +85,14 @@ GNU tar, and SHA-256 tooling. The workspace MSRV remains 1.97.1 and is validated
 
 ```text
 SOURCE_DATE_EPOCH=0 scripts/package-release.sh x86_64-unknown-linux-gnu
-scripts/smoke-install.sh dist/code-system-graph-x86_64-unknown-linux-gnu-v1.0.2
-sha256sum --check dist/code-system-graph-x86_64-unknown-linux-gnu-v1.0.2.sha256
+scripts/smoke-install.sh dist/code-system-graph-x86_64-unknown-linux-gnu-v1.0.3
+sha256sum --check dist/code-system-graph-x86_64-unknown-linux-gnu-v1.0.3.sha256
 ```
 
-The package contains `csgraph`, `code-system-graph-hooks`, public documentation, license and notice files,
-and install/uninstall scripts. The packaging command also emits a CycloneDX JSON SBOM and a
-checksum file covering the archive and SBOM.
+The package contains `csgraph`, `code-system-graph-hooks`, the visible Agent integration template
+tree (portable plugin plus native adapters), public documentation, license and notice files, and
+install/uninstall scripts. The packaging command also emits a CycloneDX JSON SBOM and a checksum
+file covering the archive and SBOM.
 
 Both binary crates declare `cargo-binstall` metadata for this archive layout. The configuration
 accepts only the official release archive and disables both QuickInstall and source-compilation
@@ -117,7 +120,7 @@ clean `main` branch aligned with `origin/main`, Cargo credentials for crates.io,
 selects `prepare`:
 
 ```text
-.github/workflows/release.sh 1.0.2 prepare
+.github/workflows/release.sh 1.0.3 prepare
 ```
 
 Preparation runs the complete publish-readiness suite and dry-runs all five packages without
@@ -125,7 +128,7 @@ creating a tag, publishing a crate, or dispatching a workflow. To perform the ir
 pass `publish` explicitly:
 
 ```text
-.github/workflows/release.sh 1.0.2 publish
+.github/workflows/release.sh 1.0.3 publish
 ```
 
 Publish mode verifies that the workspace repository matches `origin`, creates and pushes the

@@ -212,6 +212,7 @@ pub struct ChangeRequest {
 }
 
 /// Read-only source of repository changes.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait ChangeProvider: Send + Sync {
     /// Collects a bounded and fingerprinted change set.

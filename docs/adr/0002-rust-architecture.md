@@ -28,7 +28,10 @@ The initial slice starts with only crates that enforce a real boundary:
 - `code-system-graph-store-sqlite`: exact-schema initialization, fail-closed validation, and transactional persistence.
 - `code-system-graph-core`: strict manifest loading, HTTP boundary extraction, deterministic linking,
   trace application service, and provider ports.
-- `code-system-graph-cli`: process entry point and delivery adapters, including MCP stdio.
+- `code-system-graph-hooks`: shared agent integration lifecycle plus the visible
+  `agent-integration-template/` tree consumed by native adapters and portable plugin generation.
+- `code-system-graph-cli`: process entry point and delivery adapters, including MCP stdio. It
+  consumes the shared agent templates instead of owning another skill or routing-policy copy.
 
 Crates split further only when extractor, query, provider, or interface boundaries have enough
 behavior to justify independent compilation and ownership. Library errors are typed with

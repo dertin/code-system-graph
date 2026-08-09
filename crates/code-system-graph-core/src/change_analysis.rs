@@ -1688,7 +1688,7 @@ mod tests {
             &evidence_refs,
         );
 
-        assert!(result.mapping.matched_evidence_ids.is_empty());
+        assert_eq!(result.mapping.matched_evidence_ids, Vec::new());
     }
 
     #[test]
@@ -1705,7 +1705,7 @@ mod tests {
             &evidence_refs,
         );
 
-        assert!(result.mapping.matched_evidence_ids.is_empty());
+        assert_eq!(result.mapping.matched_evidence_ids, Vec::new());
     }
 
     #[test]

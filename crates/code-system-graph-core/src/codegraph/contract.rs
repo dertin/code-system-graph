@@ -293,7 +293,7 @@ mod tests {
         ))
         .expect("fixture should be valid");
 
-        assert!(map_mcp_tools(&tools).is_empty());
+        assert_eq!(map_mcp_tools(&tools), Vec::new());
     }
 
     #[test]

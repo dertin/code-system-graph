@@ -15,6 +15,7 @@ use anyhow::Context;
 use code_system_graph::{
     ApplicationError, IgnorePolicy, ScanOverrides, SyncSummary, finish_watcher_lease, heartbeat_watcher_lease, load_persisted_watch_targets, start_watcher_lease, sync_workspace_with_wall_time_cap
 };
+use code_system_graph_core::RepositoryPathMatcher;
 use notify::{Config, Event, PollWatcher, RecommendedWatcher, RecursiveMode, Watcher};
 use sysinfo::{Pid, ProcessesToUpdate, System};
 use tokio::sync::mpsc;
@@ -56,14 +57,21 @@ const WATCH_EVENT_PROTOCOL_MAX_BYTES: usize = 128;
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum WatchEventMessage {
-    Ready { schema_version: u8 },
-    Dirty { schema_version: u8 },
+    Ready {
+        schema_version: u8,
+    },
+    Dirty {
+        schema_version: u8,
+        #[serde(default)]
+        refresh_scope: bool,
+    },
 }
 
 #[derive(Debug, Default)]
 struct WatchEventState {
     initial_ready: bool,
     refresh_started: Option<Instant>,
+    refresh_scope: bool,
     failed: bool,
 }
 
@@ -211,6 +219,14 @@ impl WatchEventWorker {
     fn receiver(&mut self) -> &mut mpsc::Receiver<()> {
         &mut self.receiver
     }
+
+    fn take_scope_refresh(&self) -> anyhow::Result<bool> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("watcher protocol state was poisoned"))?;
+        Ok(std::mem::take(&mut state.refresh_scope))
+    }
 }
 
 impl Drop for WatchEventWorker {
@@ -249,8 +265,12 @@ fn spawn_watch_event_reader(
                     current.initial_ready = true;
                     current.refresh_started = None;
                 }
-                WatchEventMessage::Dirty { schema_version: 1 } => {
+                WatchEventMessage::Dirty {
+                    schema_version: 1,
+                    refresh_scope,
+                } => {
                     current.refresh_started.get_or_insert_with(Instant::now);
+                    current.refresh_scope |= refresh_scope;
                     drop(current);
                     match sender.try_send(()) {
                         Ok(()) | Err(mpsc::error::TrySendError::Full(())) => {}
@@ -290,43 +310,86 @@ struct WatchScope {
     repositories: Vec<WatchRepository>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 struct WatchRepository {
     root: PathBuf,
     ignore_policy: IgnorePolicy,
+    ignore_matcher: Arc<Mutex<RepositoryPathMatcher>>,
     explicit_paths: Vec<PathBuf>,
 }
 
 impl WatchRepository {
-    fn relevant(&self, path: &Path) -> bool {
-        path.strip_prefix(&self.root).is_ok_and(|relative| {
-            self.explicit_paths.iter().any(|explicit| {
+    fn new(root: PathBuf, ignore_policy: IgnorePolicy, explicit_paths: Vec<PathBuf>) -> Self {
+        let ignore_matcher = RepositoryPathMatcher::new(&root, ignore_policy.clone());
+        Self {
+            root,
+            ignore_policy,
+            ignore_matcher: Arc::new(Mutex::new(ignore_matcher)),
+            explicit_paths,
+        }
+    }
+
+    fn excluded(&self, relative: &Path, directory: bool) -> anyhow::Result<bool> {
+        let mut matcher = self
+            .ignore_matcher
+            .lock()
+            .map_err(|_| anyhow::anyhow!("repository ignore matcher was poisoned"))?;
+        matcher
+            .excludes(relative, directory)
+            .map_err(anyhow::Error::new)
+    }
+
+    fn relevant(&self, path: &Path) -> anyhow::Result<bool> {
+        let Ok(relative) = path.strip_prefix(&self.root) else {
+            return Ok(false);
+        };
+        if (self.ignore_policy.use_gitignore()
+            && relative
+                .file_name()
+                .is_some_and(|name| name == ".gitignore"))
+            || self.explicit_paths.iter().any(|explicit| {
                 relative == explicit
                     || explicit.starts_with(relative)
                     || relative.starts_with(explicit)
-            }) || !self.ignore_policy.excludes(relative, path.is_dir())
-        })
+            })
+        {
+            return Ok(true);
+        }
+        Ok(!self.excluded(relative, path.is_dir())?)
     }
 
     #[cfg(any(target_os = "linux", test))]
-    fn should_watch_directory(&self, path: &Path) -> bool {
-        path.strip_prefix(&self.root).is_ok_and(|relative| {
-            self.explicit_paths
-                .iter()
-                .any(|explicit| explicit.starts_with(relative))
-                || !self.ignore_policy.excludes(relative, true)
-        })
+    fn should_watch_directory(&self, path: &Path) -> anyhow::Result<bool> {
+        let Ok(relative) = path.strip_prefix(&self.root) else {
+            return Ok(false);
+        };
+        if self
+            .explicit_paths
+            .iter()
+            .any(|explicit| explicit.starts_with(relative))
+        {
+            return Ok(true);
+        }
+        Ok(!self.excluded(relative, true)?)
     }
 }
+
+impl PartialEq for WatchRepository {
+    fn eq(&self, other: &Self) -> bool {
+        self.root == other.root
+            && self.ignore_policy == other.ignore_policy
+            && self.explicit_paths == other.explicit_paths
+    }
+}
+
+impl Eq for WatchRepository {}
 
 impl WatchScope {
     fn load(config: &Path, database: &Path, workspace: &str) -> anyhow::Result<Self> {
         let mut repositories = load_persisted_watch_targets(database, workspace)?
             .into_iter()
-            .map(|target| WatchRepository {
-                root: target.path,
-                ignore_policy: target.ignore_policy,
-                explicit_paths: target.explicit_paths,
+            .map(|target| {
+                WatchRepository::new(target.path, target.ignore_policy, target.explicit_paths)
             })
             .collect::<Vec<_>>();
         repositories.sort_by(|left, right| left.root.cmp(&right.root));
@@ -337,27 +400,51 @@ impl WatchScope {
         })
     }
 
-    fn relevant_event(&self, event: &Event) -> bool {
-        event.paths.is_empty() || event.paths.iter().any(|path| self.relevant_path(path))
+    fn relevant_event(&self, event: &Event) -> anyhow::Result<bool> {
+        if event.paths.is_empty() {
+            return Ok(true);
+        }
+        for path in &event.paths {
+            if self.relevant_path(path)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
-    fn relevant_path(&self, path: &Path) -> bool {
+    fn changes_enabled_gitignore(&self, event: &Event) -> bool {
+        event.paths.iter().any(|path| {
+            path.file_name().is_some_and(|name| name == ".gitignore")
+                && self.repositories.iter().any(|repository| {
+                    repository.ignore_policy.use_gitignore()
+                        && path.strip_prefix(&repository.root).is_ok()
+                })
+        })
+    }
+
+    fn relevant_path(&self, path: &Path) -> anyhow::Result<bool> {
         if path == self.config {
-            return true;
+            return Ok(true);
         }
         if database_artifact(path, &self.database) {
-            return false;
+            return Ok(false);
         }
-        self.repositories
-            .iter()
-            .any(|repository| repository.relevant(path))
+        for repository in &self.repositories {
+            if repository.relevant(path)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     #[cfg(any(target_os = "linux", test))]
-    fn should_watch_directory(&self, path: &Path) -> bool {
-        self.repositories
-            .iter()
-            .any(|repository| repository.should_watch_directory(path))
+    fn should_watch_directory(&self, path: &Path) -> anyhow::Result<bool> {
+        for repository in &self.repositories {
+            if repository.should_watch_directory(path)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     fn watch_entries(&self) -> Vec<(PathBuf, RecursiveMode)> {
@@ -537,17 +624,22 @@ pub(crate) async fn run_watch_event_worker(
     let scope = WatchScope::load(&config, &database, &workspace)?;
     let (sender, mut receiver) = mpsc::channel(1);
     let refresh_required = Arc::new(AtomicBool::new(false));
+    let scope_refresh_required = Arc::new(AtomicBool::new(false));
     let requested_poll = poll_interval_ms.map(Duration::from_millis);
     let mut watcher = build_watcher(
         &scope,
         sender.clone(),
         Arc::clone(&refresh_required),
+        Arc::clone(&scope_refresh_required),
         requested_poll,
         &policy,
     )?;
     emit_watch_event(&WatchEventMessage::Ready { schema_version: 1 })?;
     while let Some(signal) = receiver.recv().await {
-        emit_watch_event(&WatchEventMessage::Dirty { schema_version: 1 })?;
+        emit_watch_event(&WatchEventMessage::Dirty {
+            schema_version: 1,
+            refresh_scope: scope_refresh_required.swap(false, Ordering::AcqRel),
+        })?;
         let refresh = refresh_required.swap(false, Ordering::AcqRel)
             || matches!(signal, WatchSignal::RefreshDirectories);
         if refresh {
@@ -559,6 +651,7 @@ pub(crate) async fn run_watch_event_worker(
                         &scope,
                         sender.clone(),
                         Arc::clone(&refresh_required),
+                        Arc::clone(&scope_refresh_required),
                         requested_poll.unwrap_or(DEFAULT_POLL_INTERVAL),
                         &policy,
                     )?;
@@ -728,6 +821,13 @@ pub(crate) async fn watch_workspace(
                 return Ok(());
             }
         }
+        let refresh_scope = match watcher.take_scope_refresh() {
+            Ok(refresh_scope) => refresh_scope,
+            Err(error) => {
+                finish_after_error(&database, &workspace, &owner_token, &error)?;
+                return Err(watcher_public_error(&error));
+            }
+        };
         let minimum_start =
             last_pass_started + Duration::from_millis(policy.min_watch_rescan_interval_ms);
         if Instant::now() < minimum_start {
@@ -784,7 +884,7 @@ pub(crate) async fn watch_workspace(
                 continue;
             }
         };
-        if refreshed != scope {
+        if refresh_scope || refreshed != scope {
             let replacement = match WatchEventWorker::spawn(
                 &config,
                 &database,
@@ -1045,6 +1145,7 @@ fn build_watcher(
     scope: &WatchScope,
     sender: mpsc::Sender<WatchSignal>,
     refresh_required: Arc<AtomicBool>,
+    scope_refresh_required: Arc<AtomicBool>,
     requested_poll_interval: Option<Duration>,
     policy: &code_system_graph_core::ExecutionPolicy,
 ) -> anyhow::Result<ActiveWatcher> {
@@ -1059,12 +1160,19 @@ fn build_watcher(
             scope,
             sender,
             refresh_required,
+            scope_refresh_required,
             requested_poll_interval.unwrap_or(DEFAULT_POLL_INTERVAL),
             policy,
         );
     }
 
-    match build_native_watcher(scope, sender.clone(), Arc::clone(&refresh_required), policy) {
+    match build_native_watcher(
+        scope,
+        sender.clone(),
+        Arc::clone(&refresh_required),
+        Arc::clone(&scope_refresh_required),
+        policy,
+    ) {
         Ok(watcher) => Ok(watcher),
         Err(error) if watcher_limit_exceeded(&error) => Err(error),
         Err(error) => {
@@ -1073,6 +1181,7 @@ fn build_watcher(
                 scope,
                 sender,
                 refresh_required,
+                scope_refresh_required,
                 DEFAULT_POLL_INTERVAL,
                 policy,
             )
@@ -1090,11 +1199,20 @@ fn build_native_watcher(
     scope: &WatchScope,
     sender: mpsc::Sender<WatchSignal>,
     refresh_required: Arc<AtomicBool>,
+    scope_refresh_required: Arc<AtomicBool>,
     policy: &code_system_graph_core::ExecutionPolicy,
 ) -> anyhow::Result<ActiveWatcher> {
     let callback_scope = scope.clone();
     let mut watcher = RecommendedWatcher::new(
-        move |result| forward_event(result, &callback_scope, &sender, &refresh_required),
+        move |result| {
+            forward_event(
+                result,
+                &callback_scope,
+                &sender,
+                &refresh_required,
+                &scope_refresh_required,
+            );
+        },
         Config::default().with_follow_symlinks(false),
     )
     .context("failed to create native filesystem watcher")?;
@@ -1116,6 +1234,7 @@ fn build_poll_watcher(
     scope: &WatchScope,
     sender: mpsc::Sender<WatchSignal>,
     refresh_required: Arc<AtomicBool>,
+    scope_refresh_required: Arc<AtomicBool>,
     interval: Duration,
     policy: &code_system_graph_core::ExecutionPolicy,
 ) -> anyhow::Result<ActiveWatcher> {
@@ -1125,7 +1244,15 @@ fn build_poll_watcher(
         .with_compare_contents(true)
         .with_follow_symlinks(false);
     let mut watcher = PollWatcher::new(
-        move |result| forward_event(result, &callback_scope, &sender, &refresh_required),
+        move |result| {
+            forward_event(
+                result,
+                &callback_scope,
+                &sender,
+                &refresh_required,
+                &scope_refresh_required,
+            );
+        },
         config,
     )
     .context("failed to create polling filesystem watcher")?;
@@ -1186,7 +1313,7 @@ fn add_native_watch_entries<W: Watcher>(
             let file_type = entry.file_type()?;
             if file_type.is_dir()
                 && !file_type.is_symlink()
-                && scope.should_watch_directory(&entry.path())
+                && scope.should_watch_directory(&entry.path())?
             {
                 pending.push(entry.path());
             }
@@ -1210,18 +1337,29 @@ fn forward_event(
     scope: &WatchScope,
     sender: &mpsc::Sender<WatchSignal>,
     refresh_required: &AtomicBool,
+    scope_refresh_required: &AtomicBool,
 ) {
     match result {
-        Ok(event) if scope.relevant_event(&event) => {
-            let signal = if event.kind.is_create() && event.paths.iter().any(|path| path.is_dir()) {
-                refresh_required.store(true, Ordering::Release);
-                WatchSignal::RefreshDirectories
-            } else {
-                WatchSignal::Dirty
-            };
-            let _ignored = sender.try_send(signal);
-        }
-        Ok(_) => {}
+        Ok(event) => match scope.relevant_event(&event) {
+            Ok(true) => {
+                if scope.changes_enabled_gitignore(&event) {
+                    scope_refresh_required.store(true, Ordering::Release);
+                }
+                let signal =
+                    if event.kind.is_create() && event.paths.iter().any(|path| path.is_dir()) {
+                        refresh_required.store(true, Ordering::Release);
+                        WatchSignal::RefreshDirectories
+                    } else {
+                        WatchSignal::Dirty
+                    };
+                let _ignored = sender.try_send(signal);
+            }
+            Ok(false) => {}
+            Err(error) => {
+                eprintln!("csgraph sync could not apply repository ignore policy: {error}");
+                let _ignored = sender.try_send(WatchSignal::Dirty);
+            }
+        },
         Err(error)
             if !error.paths.is_empty()
                 && error
@@ -1340,6 +1478,7 @@ mod tests {
         let state = Arc::new(Mutex::new(WatchEventState {
             initial_ready: true,
             refresh_started: Some(Instant::now()),
+            refresh_scope: false,
             failed: false,
         }));
         let input = concat!(
@@ -1376,6 +1515,7 @@ mod tests {
         let state = Arc::new(Mutex::new(WatchEventState {
             initial_ready: true,
             refresh_started: Some(original),
+            refresh_scope: false,
             failed: false,
         }));
         let input = concat!(
@@ -1415,10 +1555,54 @@ mod tests {
         let event = Event::new(notify::EventKind::Create(notify::event::CreateKind::Folder))
             .add_path(directory);
 
-        forward_event(Ok(event), &scope, &sender, &refresh_required);
+        let scope_refresh_required = AtomicBool::new(false);
+        forward_event(
+            Ok(event),
+            &scope,
+            &sender,
+            &refresh_required,
+            &scope_refresh_required,
+        );
 
         assert!(matches!(receiver.try_recv(), Ok(WatchSignal::Dirty)));
         assert!(refresh_required.swap(false, Ordering::AcqRel));
+    }
+
+    #[test]
+    fn gitignore_change_should_request_scope_rebuild_even_when_channel_is_full() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let root = temporary.path().join("repo");
+        std::fs::create_dir(&root).expect("repository root");
+        let scope = WatchScope {
+            config: temporary.path().join("code-system-graph.yaml"),
+            database: temporary.path().join("graph.db"),
+            repositories: vec![WatchRepository::new(
+                root.clone(),
+                gitignore_policy(),
+                Vec::new(),
+            )],
+        };
+        let (sender, mut receiver) = mpsc::channel(1);
+        sender
+            .try_send(WatchSignal::Dirty)
+            .expect("channel should accept prefill");
+        let refresh_required = AtomicBool::new(false);
+        let scope_refresh_required = AtomicBool::new(false);
+        let event = Event::new(notify::EventKind::Modify(notify::event::ModifyKind::Data(
+            notify::event::DataChange::Any,
+        )))
+        .add_path(root.join(".gitignore"));
+
+        forward_event(
+            Ok(event),
+            &scope,
+            &sender,
+            &refresh_required,
+            &scope_refresh_required,
+        );
+
+        assert!(matches!(receiver.try_recv(), Ok(WatchSignal::Dirty)));
+        assert!(scope_refresh_required.swap(false, Ordering::AcqRel));
     }
 
     #[test]
@@ -1464,46 +1648,98 @@ mod tests {
         .expect("built-in ignore policy")
     }
 
-    #[test]
-    fn scope_should_ignore_generated_state_and_database_sidecars() {
-        let scope = WatchScope {
-            config: PathBuf::from("/workspace/code-system-graph.yaml"),
-            database: PathBuf::from("/workspace/.state/graph.db"),
-            repositories: vec![WatchRepository {
-                root: PathBuf::from("/workspace/repo"),
-                ignore_policy: policy(&[], &[]),
-                explicit_paths: vec![PathBuf::from(".code-system-graph.yaml")],
-            }],
-        };
-        assert!(scope.relevant_path(Path::new("/workspace/repo/src/lib.rs")));
-        assert!(scope.relevant_path(Path::new("/workspace/code-system-graph.yaml")));
-        assert!(!scope.relevant_path(Path::new("/workspace/repo/.codegraph/codegraph.db-wal")));
-        assert!(!scope.relevant_path(Path::new("/workspace/.state/graph.db-wal")));
-        assert!(!scope.relevant_path(Path::new("/workspace/.state/graph.db.work-v1.db-wal")));
-        assert!(!scope.relevant_path(Path::new("/workspace/.state/graph.db.work-v1.db-shm")));
+    fn gitignore_policy() -> IgnorePolicy {
+        IgnorePolicy::with_gitignore(
+            Vec::new(),
+            code_system_graph::ConfigSource::WorkspaceManifest,
+            Vec::new(),
+            code_system_graph::ConfigSource::WorkspaceManifest,
+            true,
+            code_system_graph::ConfigSource::WorkspaceManifest,
+        )
+        .expect("Git ignore policy")
     }
 
     #[test]
-    fn scope_should_apply_custom_excludes_and_default_includes() {
+    fn scope_should_apply_gitignore_and_observe_rule_changes() -> anyhow::Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let root = temporary.path().join("repo");
+        std::fs::create_dir_all(root.join("nested"))?;
+        std::fs::write(root.join(".gitignore"), "ignored.rs\n")?;
+        std::fs::write(root.join("nested/.gitignore"), "*.rs\n!keep.rs\n")?;
+        let scope = WatchScope {
+            config: temporary.path().join("code-system-graph.yaml"),
+            database: temporary.path().join("graph.db"),
+            repositories: vec![WatchRepository::new(
+                root.clone(),
+                gitignore_policy(),
+                Vec::new(),
+            )],
+        };
+
+        assert!(!scope.relevant_path(&root.join("ignored.rs"))?);
+        assert!(!scope.relevant_path(&root.join("nested/drop.rs"))?);
+        assert!(scope.relevant_path(&root.join("nested/keep.rs"))?);
+        assert!(scope.relevant_path(&root.join("nested/.gitignore"))?);
+
+        std::fs::write(root.join(".gitignore"), "")?;
+        std::fs::write(root.join("nested/.gitignore"), "")?;
+        let refreshed = WatchScope {
+            config: temporary.path().join("code-system-graph.yaml"),
+            database: temporary.path().join("graph.db"),
+            repositories: vec![WatchRepository::new(
+                root.clone(),
+                gitignore_policy(),
+                Vec::new(),
+            )],
+        };
+        assert!(refreshed.relevant_path(&root.join("ignored.rs"))?);
+        assert!(refreshed.relevant_path(&root.join("nested/drop.rs"))?);
+        Ok(())
+    }
+
+    #[test]
+    fn scope_should_ignore_generated_state_and_database_sidecars() -> anyhow::Result<()> {
         let scope = WatchScope {
             config: PathBuf::from("/workspace/code-system-graph.yaml"),
             database: PathBuf::from("/workspace/.state/graph.db"),
-            repositories: vec![WatchRepository {
-                root: PathBuf::from("/workspace/repo"),
-                ignore_policy: policy(&["./generated//./**"], &["./vendor//internal-sdk/./**"]),
-                explicit_paths: vec![PathBuf::from("generated/explicit.yaml")],
-            }],
+            repositories: vec![WatchRepository::new(
+                PathBuf::from("/workspace/repo"),
+                policy(&[], &[]),
+                vec![PathBuf::from(".code-system-graph.yaml")],
+            )],
+        };
+        assert!(scope.relevant_path(Path::new("/workspace/repo/src/lib.rs"))?);
+        assert!(scope.relevant_path(Path::new("/workspace/code-system-graph.yaml"))?);
+        assert!(!scope.relevant_path(Path::new("/workspace/repo/.codegraph/codegraph.db-wal"))?);
+        assert!(!scope.relevant_path(Path::new("/workspace/.state/graph.db-wal"))?);
+        assert!(!scope.relevant_path(Path::new("/workspace/.state/graph.db.work-v1.db-wal"))?);
+        assert!(!scope.relevant_path(Path::new("/workspace/.state/graph.db.work-v1.db-shm"))?);
+        Ok(())
+    }
+
+    #[test]
+    fn scope_should_apply_custom_excludes_and_default_includes() -> anyhow::Result<()> {
+        let scope = WatchScope {
+            config: PathBuf::from("/workspace/code-system-graph.yaml"),
+            database: PathBuf::from("/workspace/.state/graph.db"),
+            repositories: vec![WatchRepository::new(
+                PathBuf::from("/workspace/repo"),
+                policy(&["./generated//./**"], &["./vendor//internal-sdk/./**"]),
+                vec![PathBuf::from("generated/explicit.yaml")],
+            )],
         };
 
         assert_eq!(
             (
-                scope.relevant_path(Path::new("/workspace/repo/generated/output.rs")),
-                scope.relevant_path(Path::new("/workspace/repo/vendor/internal-sdk/src/lib.rs")),
-                scope.relevant_path(Path::new("/workspace/repo/vendor/external/lib.rs")),
-                scope.relevant_path(Path::new("/workspace/repo/generated/explicit.yaml")),
+                scope.relevant_path(Path::new("/workspace/repo/generated/output.rs"))?,
+                scope.relevant_path(Path::new("/workspace/repo/vendor/internal-sdk/src/lib.rs"))?,
+                scope.relevant_path(Path::new("/workspace/repo/vendor/external/lib.rs"))?,
+                scope.relevant_path(Path::new("/workspace/repo/generated/explicit.yaml"))?,
             ),
             (false, true, false, true)
         );
+        Ok(())
     }
 
     #[test]
@@ -1518,22 +1754,14 @@ mod tests {
             config: temporary.path().join("code-system-graph.yaml"),
             database: temporary.path().join("graph.db"),
             repositories: vec![
-                WatchRepository {
-                    root: root.clone(),
-                    ignore_policy: policy(&["generated/*"], &[]),
-                    explicit_paths: Vec::new(),
-                },
-                WatchRepository {
-                    root,
-                    ignore_policy: policy(&[], &[]),
-                    explicit_paths: Vec::new(),
-                },
+                WatchRepository::new(root.clone(), policy(&["generated/*"], &[]), Vec::new()),
+                WatchRepository::new(root, policy(&[], &[]), Vec::new()),
             ],
         };
 
         assert_eq!(scope.repositories.len(), 2);
-        assert!(scope.relevant_path(&source));
-        assert!(scope.should_watch_directory(&repository));
+        assert!(scope.relevant_path(&source)?);
+        assert!(scope.should_watch_directory(&repository)?);
         Ok(())
     }
 
