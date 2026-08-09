@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
 use code_system_graph_hooks::templates::{
@@ -33,11 +34,11 @@ pub(super) fn render_files(
     let mut files = BTreeMap::new();
     files.insert(
         ".gitignore".to_owned(),
-        AGENT_PLUGIN_GITIGNORE.as_bytes().to_vec(),
+        normalized_text_bytes(AGENT_PLUGIN_GITIGNORE),
     );
     files.insert(
         "LICENSE".to_owned(),
-        AGENT_PLUGIN_LICENSE.as_bytes().to_vec(),
+        normalized_text_bytes(AGENT_PLUGIN_LICENSE),
     );
     files.insert("mcp.json".to_owned(), mcp.into_bytes());
     files.insert("plugin.json".to_owned(), plugin.into_bytes());
@@ -160,6 +161,8 @@ fn render_template(
     template: &str,
     variables: &[(&'static str, String)],
 ) -> Result<String, AgentPluginError> {
+    let template = normalize_line_endings(template);
+    let template = template.as_ref();
     let mut values = BTreeMap::new();
     for (name, value) in variables {
         if values.insert(*name, value.as_str()).is_some() {
@@ -208,6 +211,18 @@ fn render_template(
     Ok(rendered)
 }
 
+fn normalized_text_bytes(value: &str) -> Vec<u8> {
+    normalize_line_endings(value).into_owned().into_bytes()
+}
+
+fn normalize_line_endings(value: &str) -> Cow<'_, str> {
+    if value.contains('\r') {
+        Cow::Owned(value.replace("\r\n", "\n").replace('\r', "\n"))
+    } else {
+        Cow::Borrowed(value)
+    }
+}
+
 fn template_error(file: &'static str, detail: &str) -> AgentPluginError {
     AgentPluginError::Template {
         file,
@@ -253,4 +268,25 @@ pub(super) fn workspace_component_name(workspace: &str) -> String {
         .map_or(identity.as_str(), |(_, digest)| digest);
     let suffix = digest.chars().take(10).collect::<String>();
     format!("code-system-graph-{slug}-{suffix}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalize_line_endings, render_template};
+
+    #[test]
+    fn templates_should_render_with_portable_line_endings() {
+        let rendered = render_template(
+            "fixture.md",
+            "---\r\nname: {{NAME}}\r\ndescription: portable\r---\r",
+            &[("NAME", "example".to_owned())],
+        )
+        .expect("template should render");
+
+        assert_eq!(rendered, "---\nname: example\ndescription: portable\n---\n");
+        assert_eq!(
+            normalize_line_endings("already\nportable\n"),
+            "already\nportable\n"
+        );
+    }
 }
