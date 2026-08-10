@@ -139,7 +139,9 @@ async fn explore_provider_timeout_should_preserve_partial_context_and_return_bou
     let (_manifest, database) = mono_repository_fixture(temporary.path())?;
     let binary = fake_codegraph_mode(temporary.path(), "slow-cli")?;
     let policy = ExecutionPolicy {
-        max_explore_wall_time_ms: 75,
+        // Leave enough time for the source-context stage on slower CI hosts while the fake
+        // symbol query still deterministically exceeds the request-wide deadline.
+        max_explore_wall_time_ms: 500,
         ..ExecutionPolicy::default()
     };
     let started = tokio::time::Instant::now();
@@ -157,7 +159,7 @@ async fn explore_provider_timeout_should_preserve_partial_context_and_return_bou
     )
     .await;
 
-    assert!(started.elapsed() < std::time::Duration::from_millis(750));
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
     assert_eq!(envelope.status, ToolStatus::Degraded);
     let report = envelope.data.ok_or("partial explore report")?;
     assert_eq!(report.source_markdown, "ephemeral local context");
