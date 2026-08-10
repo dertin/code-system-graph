@@ -474,6 +474,23 @@ impl SqliteStore {
         cfg!(any(target_os = "linux", target_os = "macos", windows))
     }
 
+    /// Interrupts active and future `SQLite` statements when `should_interrupt` returns true.
+    ///
+    /// The callback is sampled by `SQLite` every 1,000 virtual-machine instructions and remains
+    /// installed for this store connection's lifetime.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] if `SQLite` cannot install the progress callback.
+    pub fn interrupt_queries_when<F>(&self, should_interrupt: F) -> Result<(), StoreError>
+    where
+        F: FnMut() -> bool + Send + 'static,
+    {
+        self.connection
+            .progress_handler(1_000, Some(should_interrupt))?;
+        Ok(())
+    }
+
     /// Opens an exact 1.1.0 store or initializes a new empty database.
     ///
     /// # Errors
@@ -3447,6 +3464,25 @@ mod tests {
     const LOCK_HELPER_ENV: &str = "CODE_SYSTEM_GRAPH_LOCK_HELPER";
     const LOCK_DATABASE_ENV: &str = "CODE_SYSTEM_GRAPH_LOCK_DATABASE";
     const LOCK_READY_ENV: &str = "CODE_SYSTEM_GRAPH_LOCK_READY";
+
+    #[test]
+    fn query_progress_handler_should_interrupt_expensive_reads()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temporary = tempfile::tempdir()?;
+        let store = SqliteStore::open(temporary.path().join("graph.db"))?;
+        store.interrupt_queries_when(|| true)?;
+
+        let result = store.connection.query_row(
+            "WITH RECURSIVE values_(value) AS (\
+             SELECT 1 UNION ALL SELECT value + 1 FROM values_ WHERE value < 1000000) \
+             SELECT sum(value) FROM values_",
+            [],
+            |row| row.get::<_, i64>(0),
+        );
+
+        assert!(result.is_err());
+        Ok(())
+    }
 
     fn fixture() -> (Vec<Node>, Vec<Edge>, Vec<Evidence>) {
         let evidence = Evidence {

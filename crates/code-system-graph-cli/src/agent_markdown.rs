@@ -1,91 +1,175 @@
 //! Bounded Markdown presentation for agent-facing MCP delivery.
 
+use code_system_graph_model::{FreshnessSummary, ToolStatus};
 use serde::Serialize;
 use serde_json::{Map, Value};
 
 const TRUNCATION_NOTICE: &str = "\n## Truncation\n\nAdditional result content was omitted by the effective MCP response-byte limit.\n";
 
-/// Renders one typed tool result as bounded UTF-8 Markdown without embedding a JSON envelope.
-pub(crate) fn render_tool<T: Serialize>(tool: &str, value: &T, maximum: usize) -> String {
-    let value = serde_json::to_value(value).unwrap_or_else(|error| {
-        serde_json::json!({
-            "status": "error",
-            "warnings": [format!("result serialization failed: {error}")]
-        })
-    });
+/// Renders one typed tool envelope as bounded UTF-8 Markdown without embedding a JSON envelope.
+pub(crate) fn render_envelope<T: Serialize>(
+    tool: &str,
+    schema_version: u32,
+    status: ToolStatus,
+    freshness: &FreshnessSummary,
+    warnings: &[String],
+    data: Option<&T>,
+    maximum: usize,
+) -> String {
     let mut blocks = vec![format!("# {}\n", heading(tool))];
-    if let Some(object) = value.as_object() {
-        push_control_blocks(object, &mut blocks);
-        if let Some(data) = object.get("data") {
-            blocks.push("\n## Result\n".to_owned());
-            render_value_blocks(None, data, 3, &mut blocks);
+    push_control_blocks(schema_version, status, freshness, warnings, &mut blocks);
+    let mut rendered_data = None;
+    if let Some(data) = data {
+        match serde_json::to_value(data) {
+            Ok(value) => {
+                push_report_blocks(&value, &mut blocks);
+                rendered_data = Some(value);
+            }
+            Err(error) => blocks.push(format!(
+                "\nResult serialization failed: {}\n",
+                inline(&error.to_string())
+            )),
         }
-        for (key, value) in prioritized_fields(
-            object,
-            &["schema_version", "status", "freshness", "warnings", "data"],
-        ) {
-            render_value_blocks(Some(key), value, 2, &mut blocks);
+    }
+    let compact = compact_control_block(tool, status, freshness, warnings, rendered_data.as_ref());
+    fit_blocks(blocks, maximum, Some(compact))
+}
+
+/// Renders a typed resource contract as bounded Markdown.
+pub(crate) fn render_resource<T: Serialize>(resource: &T, maximum: usize) -> String {
+    let mut blocks = vec!["# Code System Graph Resource\n".to_owned()];
+    match serde_json::to_value(resource) {
+        Ok(value) => render_value_blocks(None, &value, 2, &mut blocks),
+        Err(error) => blocks.push(format!(
+            "\nResource serialization failed: {}\n",
+            inline(&error.to_string())
+        )),
+    }
+    fit_blocks(blocks, maximum, None)
+}
+
+/// Renders the heterogeneous schema catalog with atomic fenced JSON entries.
+pub(crate) fn render_schema_catalog(value: &Value, maximum: usize) -> String {
+    let mut blocks = vec!["# Schema Catalog\n".to_owned()];
+    if let Some(object) = value.as_object() {
+        for (name, schema) in object {
+            let encoded =
+                serde_json::to_string_pretty(schema).unwrap_or_else(|_| "null".to_owned());
+            blocks.push(format!(
+                "\n## {}\n\n```json\n{}\n```\n",
+                heading(name),
+                encoded
+            ));
         }
     } else {
-        render_value_blocks(Some("result"), &value, 2, &mut blocks);
+        let text = serde_json::to_string_pretty(value).unwrap_or_else(|_| "null".to_owned());
+        blocks.push(fenced("json", &text));
     }
-    fit_blocks(blocks, maximum)
+    fit_blocks(blocks, maximum, None)
 }
 
-/// Renders a JSON resource contract as Markdown. Schema catalogs retain fenced JSON entries.
-pub(crate) fn render_resource_json(text: &str, schema_catalog: bool, maximum: usize) -> String {
-    let blocks = match serde_json::from_str::<Value>(text) {
-        Ok(value) if schema_catalog => {
-            let mut blocks = vec!["# Schema Catalog\n".to_owned()];
-            if let Some(object) = value.as_object() {
-                for (name, schema) in object {
-                    let encoded =
-                        serde_json::to_string_pretty(schema).unwrap_or_else(|_| "null".to_owned());
-                    blocks.push(format!(
-                        "\n## {}\n\n```json\n{}\n```\n",
-                        heading(name),
-                        encoded
-                    ));
-                }
-            } else {
-                blocks.push(fenced("json", text));
-            }
-            blocks
-        }
-        Ok(value) => {
-            let mut blocks = vec!["# Code System Graph Resource\n".to_owned()];
-            render_value_blocks(None, &value, 2, &mut blocks);
-            blocks
-        }
-        Err(_) => vec![
-            "# Code System Graph Resource\n".to_owned(),
-            fenced("text", text),
-        ],
+fn compact_control_block(
+    tool: &str,
+    status: ToolStatus,
+    freshness: &FreshnessSummary,
+    warnings: &[String],
+    data: Option<&Value>,
+) -> String {
+    let status = match status {
+        ToolStatus::Ok => "ok",
+        ToolStatus::Degraded => "degraded",
+        ToolStatus::Error => "error",
     };
-    fit_blocks(blocks, maximum)
+    let freshness = serde_json::to_value(freshness.overall)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_else(|| "unknown".to_owned());
+    let warning = warnings.first().map_or_else(
+        || "none".to_owned(),
+        |warning| compact_text(&inline(warning), 18),
+    );
+    let coverage = data
+        .and_then(|value| value.get("coverage"))
+        .map_or("absent", |_| "present");
+    let path = data.and_then(first_verifiable_path).map_or_else(
+        || "absent".to_owned(),
+        |path| compact_text(&inline(path), 18),
+    );
+    format!(
+        "# {}\nstatus={status} freshness={freshness} truncated=true\nwarning={warning}\ncoverage={coverage} path={path}\n",
+        compact_text(&heading(tool), 24),
+    )
 }
 
-fn push_control_blocks(object: &Map<String, Value>, blocks: &mut Vec<String>) {
-    let status = object
-        .get("status")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown");
-    let schema = object
-        .get("schema_version")
-        .and_then(Value::as_u64)
-        .map_or_else(|| "unknown".to_owned(), |value| value.to_string());
-    blocks.push(format!(
-        "\n## Status\n\n- State: `{}`\n- Delivery schema: `{}`\n",
-        inline(status),
-        schema
-    ));
-    if let Some(freshness) = object.get("freshness") {
-        blocks.push("\n## Freshness\n".to_owned());
-        render_value_blocks(None, freshness, 3, blocks);
+fn first_verifiable_path(value: &Value) -> Option<&str> {
+    match value {
+        Value::Object(object) => {
+            for key in ["path", "file_path", "root"] {
+                if let Some(path) = object.get(key).and_then(Value::as_str) {
+                    return Some(path);
+                }
+            }
+            object.values().find_map(first_verifiable_path)
+        }
+        Value::Array(values) => values.iter().find_map(first_verifiable_path),
+        _ => None,
     }
-    if let Some(warnings) = object.get("warnings") {
-        blocks.push("\n## Warnings\n".to_owned());
-        render_value_blocks(None, warnings, 3, blocks);
+}
+
+fn compact_text(value: &str, maximum: usize) -> String {
+    let value = value.replace(['\n', '\r', '\t'], " ");
+    if value.len() <= maximum {
+        return value;
+    }
+    let mut boundary = maximum;
+    while boundary > 0 && !value.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    value[..boundary].to_owned()
+}
+
+fn push_control_blocks(
+    schema_version: u32,
+    status: ToolStatus,
+    freshness: &FreshnessSummary,
+    warnings: &[String],
+    blocks: &mut Vec<String>,
+) {
+    let status = match status {
+        ToolStatus::Ok => "ok",
+        ToolStatus::Degraded => "degraded",
+        ToolStatus::Error => "error",
+    };
+    blocks.push(format!(
+        "\n## Status\n\n- State: `{status}`\n- Delivery schema: `{schema_version}`\n"
+    ));
+    blocks.push("\n## Warnings\n".to_owned());
+    let warnings = serde_json::to_value(warnings).unwrap_or(Value::Null);
+    render_value_blocks(None, &warnings, 3, blocks);
+    blocks.push("\n## Freshness\n".to_owned());
+    let freshness = serde_json::to_value(freshness).unwrap_or(Value::Null);
+    render_value_blocks(None, &freshness, 3, blocks);
+}
+
+fn push_report_blocks(value: &Value, blocks: &mut Vec<String>) {
+    let Value::Object(object) = value else {
+        blocks.push("\n## Result\n".to_owned());
+        render_value_blocks(None, value, 3, blocks);
+        return;
+    };
+    for (field, heading_name) in [("evidence", "Evidence"), ("coverage", "Coverage")] {
+        if let Some(value) = object.get(field) {
+            blocks.push(format!("\n## {heading_name}\n"));
+            render_value_blocks(None, value, 3, blocks);
+        }
+    }
+    blocks.push("\n## Result\n".to_owned());
+    for (name, value) in prioritized_fields(object, &["evidence", "coverage", "source_markdown"]) {
+        render_value_blocks(Some(name), value, 3, blocks);
+    }
+    if let Some(source) = object.get("source_markdown") {
+        blocks.push("\n## Source\n".to_owned());
+        render_value_blocks(None, source, 3, blocks);
     }
 }
 
@@ -96,14 +180,11 @@ fn prioritized_fields<'a>(
     const PRIORITY: &[&str] = &[
         "repository",
         "locations",
-        "evidence",
-        "coverage",
         "truncations",
         "next_actions",
         "resolved_symbols",
         "local_relationships",
         "federated_handoffs",
-        "source_markdown",
         "execution",
     ];
     let mut fields = object
@@ -170,18 +251,23 @@ fn compact(value: &Value) -> String {
     }
 }
 
-fn fit_blocks(blocks: Vec<String>, maximum: usize) -> String {
-    let mut output = String::new();
-    let mut truncated = false;
+fn fit_blocks(blocks: Vec<String>, maximum: usize, compact: Option<String>) -> String {
+    let complete_length = blocks
+        .iter()
+        .fold(0_usize, |length, block| length.saturating_add(block.len()));
+    if complete_length <= maximum {
+        return blocks.concat();
+    }
     let reserve = TRUNCATION_NOTICE.len().min(maximum);
+    let mut output = compact
+        .filter(|block| block.len() <= maximum.saturating_sub(reserve))
+        .unwrap_or_default();
     for block in blocks {
         if output.len().saturating_add(block.len()) <= maximum.saturating_sub(reserve) {
             output.push_str(&block);
-        } else {
-            truncated = true;
         }
     }
-    if truncated && output.len().saturating_add(TRUNCATION_NOTICE.len()) <= maximum {
+    if output.len().saturating_add(TRUNCATION_NOTICE.len()) <= maximum {
         output.push_str(TRUNCATION_NOTICE);
     }
     if output.len() > maximum {
@@ -266,22 +352,30 @@ fn safe_character(character: char) -> char {
 
 #[cfg(test)]
 mod tests {
-    use super::{render_resource_json, render_tool};
+    use code_system_graph_model::{FreshnessSummary, OverallFreshness, ToolStatus};
+
+    use super::{render_envelope, render_resource, render_schema_catalog};
+
+    fn freshness() -> FreshnessSummary {
+        FreshnessSummary {
+            overall: OverallFreshness::Fresh,
+            stale_repositories: Vec::new(),
+            reasons: Vec::new(),
+        }
+    }
 
     #[test]
     fn tool_rendering_is_bounded_utf8_markdown_without_json_envelope() {
-        let rendered = render_tool(
+        let rendered = render_envelope(
             "query",
-            &serde_json::json!({
-                "schema_version": 2,
-                "status": "ok",
-                "freshness": {"overall": "fresh"},
-                "data": {
-                    "path": "src/💡.rs",
-                    "items": ["one", "[untrusted](https://example.test)\u{202e}"]
-                },
-                "warnings": []
-            }),
+            2,
+            ToolStatus::Ok,
+            &freshness(),
+            &[],
+            Some(&serde_json::json!({
+                "path": "src/💡.rs",
+                "items": ["one", "[untrusted](https://example.test)\u{202e}"]
+            })),
             512,
         );
         assert!(rendered.len() <= 512);
@@ -293,61 +387,172 @@ mod tests {
     }
 
     #[test]
-    fn every_mcp_tool_should_match_the_markdown_delivery_golden() {
-        let value = serde_json::json!({
-            "schema_version": 2,
-            "status": "ok",
-            "freshness": {"overall": "fresh"},
-            "data": {"message": "ready"},
-            "warnings": []
-        });
-        for tool in [
-            "trace",
-            "query",
-            "explore",
-            "communities",
-            "impact",
-            "analyze_changes",
-            "analyze_pull_request",
-            "status",
-            "contracts",
-            "source_context",
-            "scan",
-            "update_workspace",
-            "write_manual_link",
-            "clean_cache",
-            "recompute_communities",
+    fn every_mcp_tool_should_render_its_report_specific_fixture() {
+        for (tool, value, expected_field) in [
+            (
+                "trace",
+                serde_json::json!({"segments": ["a -> b"]}),
+                "segments",
+            ),
+            (
+                "query",
+                serde_json::json!({"hits": [{"id": "node:a"}]}),
+                "hits",
+            ),
+            (
+                "explore",
+                serde_json::json!({"resolved_symbols": ["a"]}),
+                "resolved symbols",
+            ),
+            (
+                "communities",
+                serde_json::json!({"communities": ["one"]}),
+                "communities",
+            ),
+            ("impact", serde_json::json!({"risk": "high"}), "risk"),
+            (
+                "analyze_changes",
+                serde_json::json!({"changed_files": ["a.rs"]}),
+                "changed files",
+            ),
+            (
+                "analyze_pull_request",
+                serde_json::json!({"pull_request": 42}),
+                "pull request",
+            ),
+            (
+                "status",
+                serde_json::json!({"integrity_ok": true}),
+                "integrity ok",
+            ),
+            (
+                "contracts",
+                serde_json::json!({"contracts": ["api"]}),
+                "contracts",
+            ),
+            (
+                "source_context",
+                serde_json::json!({"evidence": ["ev:1"]}),
+                "Evidence",
+            ),
+            (
+                "scan",
+                serde_json::json!({"snapshot_id": "snapshot:1"}),
+                "snapshot id",
+            ),
+            (
+                "update_workspace",
+                serde_json::json!({"mutation": "add"}),
+                "mutation",
+            ),
+            (
+                "write_manual_link",
+                serde_json::json!({"manual_link": "edge:1"}),
+                "manual link",
+            ),
+            (
+                "clean_cache",
+                serde_json::json!({"removed_entries": 3}),
+                "removed entries",
+            ),
+            (
+                "recompute_communities",
+                serde_json::json!({"community_count": 4}),
+                "community count",
+            ),
         ] {
-            let title = tool.replace('_', " ");
-            let expected = format!(
-                "# {title}\n\n## Status\n\n- State: `ok`\n- Delivery schema: `2`\n\n## Freshness\n\n### overall\n\nfresh\n\n## Warnings\n\n_None._\n\n## Result\n\n### message\n\nready\n"
+            let rendered = render_envelope(
+                tool,
+                2,
+                ToolStatus::Ok,
+                &freshness(),
+                &[],
+                Some(&value),
+                4_096,
             );
-
-            assert_eq!(render_tool(tool, &value, 4_096), expected, "{tool}");
+            assert!(rendered.starts_with(&format!("# {}", tool.replace('_', " "))));
+            assert!(rendered.contains(expected_field), "{tool}: {rendered}");
         }
     }
 
     #[test]
     fn schema_catalog_uses_closed_json_fences() {
-        let rendered = render_resource_json(r#"{"query":{"type":"object"}}"#, true, 512);
+        let rendered =
+            render_schema_catalog(&serde_json::json!({"query": {"type": "object"}}), 512);
         assert_eq!(rendered.matches("```json").count(), 1);
         assert_eq!(rendered.matches("\n```\n").count(), 1);
     }
 
     #[test]
+    fn every_resource_shape_should_render_as_markdown() {
+        for (name, resource, expected) in [
+            (
+                "workspaces",
+                serde_json::json!({"workspaces": ["commerce"]}),
+                "workspaces",
+            ),
+            (
+                "overview",
+                serde_json::json!({"snapshot": {"id": "one"}}),
+                "snapshot",
+            ),
+            (
+                "status",
+                serde_json::json!({"status": {"integrity_ok": true}}),
+                "integrity ok",
+            ),
+            (
+                "repositories",
+                serde_json::json!({"repositories": ["api"]}),
+                "repositories",
+            ),
+            (
+                "services",
+                serde_json::json!({"entities": ["service"]}),
+                "entities",
+            ),
+            (
+                "contracts",
+                serde_json::json!({"entities": ["contract"]}),
+                "entities",
+            ),
+            (
+                "communities",
+                serde_json::json!({"communities": ["one"]}),
+                "communities",
+            ),
+            (
+                "coverage",
+                serde_json::json!({"runs": ["extractor"]}),
+                "runs",
+            ),
+            (
+                "evidence",
+                serde_json::json!({"evidence": {"id": "ev:1"}}),
+                "evidence",
+            ),
+        ] {
+            let rendered = render_resource(&resource, 4_096);
+            assert!(
+                rendered.starts_with("# Code System Graph Resource"),
+                "{name}"
+            );
+            assert!(rendered.contains(expected), "{name}: {rendered}");
+        }
+    }
+
+    #[test]
     fn truncation_should_preserve_atomic_fences_and_utf8_boundaries() {
-        let rendered = render_tool(
+        let rendered = render_envelope(
             "explore",
-            &serde_json::json!({
-                "schema_version": 2,
-                "status": "degraded",
-                "freshness": {"overall": "fresh"},
-                "warnings": ["bounded"],
-                "data": {
-                    "coverage": {"gaps": ["neighbors"]},
-                    "source_markdown": "```rust\nfn 💡() {}\n```\n".repeat(30)
-                }
-            }),
+            2,
+            ToolStatus::Degraded,
+            &freshness(),
+            &["bounded".to_owned()],
+            Some(&serde_json::json!({
+                "coverage": {"gaps": ["neighbors"]},
+                "source_markdown": "```rust\nfn 💡() {}\n```\n".repeat(30)
+            })),
             320,
         );
 
@@ -357,6 +562,64 @@ mod tests {
             rendered.matches("```text").count(),
             rendered.matches("\n```\n").count()
         );
+        assert!(rendered.contains("## Truncation"));
+    }
+
+    #[test]
+    fn exact_response_budget_should_not_trigger_truncation() {
+        let value = serde_json::json!({"message": "ready"});
+        let complete = render_envelope(
+            "query",
+            2,
+            ToolStatus::Ok,
+            &freshness(),
+            &[],
+            Some(&value),
+            4_096,
+        );
+        let exact = render_envelope(
+            "query",
+            2,
+            ToolStatus::Ok,
+            &freshness(),
+            &[],
+            Some(&value),
+            complete.len(),
+        );
+
+        assert_eq!(exact, complete);
+        assert!(!exact.contains("## Truncation"));
+    }
+
+    #[test]
+    fn minimum_response_budget_should_keep_control_and_truncation_blocks() {
+        let minimum = usize::try_from(code_system_graph_core::MIN_MCP_MARKDOWN_BYTES)
+            .expect("MCP minimum is usize-representable");
+        let rendered = render_envelope(
+            "query",
+            2,
+            ToolStatus::Degraded,
+            &FreshnessSummary {
+                overall: OverallFreshness::Stale,
+                stale_repositories: vec![code_system_graph_model::RepoId::new("repo:api")],
+                reasons: vec!["snapshot is stale".to_owned()],
+            },
+            &["provider timed out".to_owned()],
+            Some(&serde_json::json!({
+                "coverage": {"gaps": ["neighbors unavailable"]},
+                "locations": [{"path": "src/api.rs"}],
+                "hits": ["x".repeat(512)]
+            })),
+            minimum,
+        );
+
+        assert_ne!(rendered, "");
+        assert!(rendered.len() <= minimum);
+        assert!(rendered.contains("status=degraded"));
+        assert!(rendered.contains("freshness=stale"));
+        assert!(rendered.contains("provider timed out"));
+        assert!(rendered.contains("coverage=present"));
+        assert!(rendered.contains("path=src/api.rs"));
         assert!(rendered.contains("## Truncation"));
     }
 }

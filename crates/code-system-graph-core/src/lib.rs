@@ -86,7 +86,7 @@ pub use events::{
     DeliverySemantics, EventBroker, EventDocument, EventEvidenceLine, EventExtractionError, EventObservation, EventRole, EventSchemaDefinition, EventSchemaField, extract_asyncapi, parse_event_source
 };
 pub use execution_policy::{
-    CodeGraphCorroborationAnchorLimit, DEFAULT_MAX_CODEGRAPH_CORROBORATION_ANCHORS_PER_REPO, ExecutionLimitExceeded, ExecutionPolicy, ExecutionPolicyOverrides, ExecutionResource, ExecutionSummary, InvalidExecutionPolicy, JobPhase, MonotonicClock, ScanJobTracker
+    CodeGraphCorroborationAnchorLimit, DEFAULT_MAX_CODEGRAPH_CORROBORATION_ANCHORS_PER_REPO, ExecutionLimitExceeded, ExecutionPolicy, ExecutionPolicyOverrides, ExecutionResource, ExecutionSummary, InvalidExecutionPolicy, JobPhase, MIN_MCP_MARKDOWN_BYTES, MonotonicClock, ScanJobTracker
 };
 pub use extraction_budget::{
     BoundedJsonWriter, EXTRACTION_CONTRACT_VERSION, ExtractionBudgetOverrides, ExtractionBudgets, ExtractionClock, ExtractionLimitExceeded, ExtractionResource, ExtractionTracker, InvalidExtractionBudget

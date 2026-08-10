@@ -8,9 +8,9 @@ use code_system_graph_core::{
     ChangeImpactReport, ContractAction, ContractReport, ContractRequest, ImpactReport, ImpactRequest, ManualLinkConfig, PullRequestInspection, SearchReport, inspect_contracts, public_schema_catalog
 };
 use code_system_graph_model::{
-    Community, CommunityId, Evidence, FreshnessSummary, Node, NodeId, NodeKind, OverallFreshness, RepoFreshness, RepoFreshnessState, RepositoryRecord, ToolEnvelope, ToolStatus, TraceReport
+    CommunityId, Evidence, FreshnessSummary, Node, NodeId, OverallFreshness, RepoFreshness, RepoFreshnessState, ToolEnvelope, ToolStatus, TraceReport
 };
-use code_system_graph_store_sqlite::{SqliteStore, StoreError};
+use code_system_graph_store_sqlite::SqliteStore;
 use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -18,6 +18,10 @@ use serde_json::{Value, json};
 use crate::{
     ChangesInput, CommunityInput, CommunityReport, ExploreInput, ExploreReport, ManifestMutationSummary, PullRequestInput, ScanSummary, SearchInput, TraceInput
 };
+
+mod resources;
+
+pub(super) use resources::{ResourceErrorKind, read_resource, resource_uris};
 
 pub(super) const ADMIN_TOOL_NAMES: [&str; 5] = [
     "scan",
@@ -405,30 +409,6 @@ pub(super) struct CacheCleanReport {
     pub removed_entries: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct RepositoryView {
-    id: String,
-    checkout_id: String,
-    alias: String,
-    normalized_remote: Option<String>,
-    head_commit: Option<String>,
-    linked_worktree: bool,
-    working_tree_dirty: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum ResourceErrorKind {
-    Invalid,
-    Missing,
-    Internal,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct ResourceError {
-    pub kind: ResourceErrorKind,
-    pub message: String,
-}
-
 pub(super) fn status_envelope(
     database_path: &Path,
     configured_workspace: &str,
@@ -699,106 +679,6 @@ pub(super) fn configured_manifest_path(
     Ok(native_path(&path))
 }
 
-pub(super) fn resource_uris(workspace: &str) -> Vec<(String, String, String)> {
-    let prefix = format!("code-system-graph://workspace/{workspace}");
-    vec![
-        (
-            "code-system-graph://workspaces".to_owned(),
-            "workspaces".to_owned(),
-            "Configured workspace catalog.".to_owned(),
-        ),
-        (
-            format!("{prefix}/overview"),
-            "workspace-overview".to_owned(),
-            "Current immutable snapshot counts.".to_owned(),
-        ),
-        (
-            format!("{prefix}/status"),
-            "workspace-status".to_owned(),
-            "Persisted workspace integrity and freshness.".to_owned(),
-        ),
-        (
-            format!("{prefix}/repositories"),
-            "workspace-repositories".to_owned(),
-            "Credential-free repository registration metadata.".to_owned(),
-        ),
-        (
-            format!("{prefix}/services"),
-            "workspace-services".to_owned(),
-            "Bounded service entity catalog.".to_owned(),
-        ),
-        (
-            format!("{prefix}/contracts"),
-            "workspace-contracts".to_owned(),
-            "Bounded public contract entity catalog.".to_owned(),
-        ),
-        (
-            format!("{prefix}/communities"),
-            "workspace-communities".to_owned(),
-            "Bounded deterministic community catalog.".to_owned(),
-        ),
-        (
-            format!("{prefix}/schema"),
-            "schema-catalog".to_owned(),
-            "Versioned JSON Schema catalog for MCP tool inputs and results.".to_owned(),
-        ),
-        (
-            format!("{prefix}/coverage"),
-            "workspace-coverage".to_owned(),
-            "Bounded extractor and freshness coverage metadata.".to_owned(),
-        ),
-        (
-            "code-system-graph://evidence/{id}".to_owned(),
-            "evidence-metadata".to_owned(),
-            "Template URI for one evidence metadata record; replace {id} with its stable ID."
-                .to_owned(),
-        ),
-    ]
-}
-
-pub(super) fn read_resource(
-    database_path: &Path,
-    workspace: &str,
-    uri: &str,
-    policy: &code_system_graph_core::ExecutionPolicy,
-) -> Result<String, ResourceError> {
-    let item_limit = usize::try_from(policy.max_mcp_resource_items)
-        .expect("validated policy count is usize-representable");
-    let value = if uri == "code-system-graph://workspaces" {
-        json!({
-            "schema_version": 2,
-            "workspaces": [{"name": workspace, "configured": true}]
-        })
-    } else if let Some(path) = uri.strip_prefix("code-system-graph://workspace/") {
-        let (requested, resource) = path.split_once('/').ok_or_else(|| invalid_resource(uri))?;
-        validate_workspace(workspace, requested).map_err(|message| ResourceError {
-            kind: ResourceErrorKind::Invalid,
-            message,
-        })?;
-        read_workspace_resource(database_path, workspace, resource, item_limit)?
-    } else if let Some(evidence_id) = uri.strip_prefix("code-system-graph://evidence/") {
-        read_evidence_resource(database_path, workspace, evidence_id)?
-    } else {
-        return Err(invalid_resource(uri));
-    };
-    let text = serde_json::to_string_pretty(&value).map_err(|error| ResourceError {
-        kind: ResourceErrorKind::Internal,
-        message: format!("resource serialization failed: {error}"),
-    })?;
-    let maximum = if uri.ends_with("/schema") {
-        usize::try_from(policy.max_mcp_schema_catalog_bytes)
-            .expect("validated policy bytes are usize-representable")
-    } else {
-        usize::try_from(policy.max_mcp_resource_bytes)
-            .expect("validated policy bytes are usize-representable")
-    };
-    Ok(crate::agent_markdown::render_resource_json(
-        &text,
-        uri.ends_with("/schema"),
-        maximum,
-    ))
-}
-
 pub(super) fn schema_catalog() -> Value {
     let mut schemas = BTreeMap::new();
     insert_schema::<TraceInput>(&mut schemas, "trace.input");
@@ -865,165 +745,6 @@ pub(super) fn schema_catalog() -> Value {
         "schemas": schemas,
         "application_interfaces": application_interfaces
     })
-}
-
-fn read_workspace_resource(
-    database_path: &Path,
-    workspace: &str,
-    resource: &str,
-    item_limit: usize,
-) -> Result<Value, ResourceError> {
-    if resource == "schema" {
-        return Ok(schema_catalog());
-    }
-    let store = SqliteStore::open_read_only(database_path).map_err(internal_store)?;
-    match resource {
-        "overview" => {
-            let summary = store
-                .current_snapshot_summary(workspace)
-                .map_err(internal_store)?;
-            Ok(json!({
-                "schema_version": 2,
-                "workspace": workspace,
-                "snapshot": {
-                    "id": summary.snapshot_id,
-                    "nodes": summary.node_count,
-                    "edges": summary.edge_count,
-                    "evidence": summary.evidence_count
-                }
-            }))
-        }
-        "status" => {
-            let (status, freshness) =
-                load_status(database_path, workspace).map_err(internal_message)?;
-            Ok(json!({
-                "schema_version": 2,
-                "status": status,
-                "freshness": freshness
-            }))
-        }
-        "repositories" => {
-            let registry = store
-                .load_workspace_registry(workspace)
-                .map_err(internal_store)?;
-            let repositories = registry
-                .repositories
-                .iter()
-                .take(item_limit)
-                .map(repository_view)
-                .collect::<Vec<_>>();
-            Ok(json!({
-                "schema_version": 2,
-                "workspace": workspace,
-                "total": registry.repositories.len(),
-                "truncated": registry.repositories.len() > item_limit,
-                "repositories": repositories
-            }))
-        }
-        "services" => node_resource(&store, workspace, item_limit, |kind| {
-            kind == NodeKind::Service
-        }),
-        "contracts" => node_resource(&store, workspace, item_limit, is_contract),
-        "communities" => {
-            let snapshot = store
-                .load_current_community_snapshot(workspace)
-                .map_err(internal_store)?;
-            let total = snapshot.communities.len();
-            let communities = snapshot
-                .communities
-                .into_iter()
-                .take(item_limit)
-                .collect::<Vec<Community>>();
-            Ok(json!({
-                "schema_version": 2,
-                "workspace": workspace,
-                "snapshot_id": snapshot.snapshot_id,
-                "engine_version": snapshot.engine_version,
-                "config": snapshot.config,
-                "total": total,
-                "truncated": total > item_limit,
-                "communities": communities
-            }))
-        }
-        "coverage" => {
-            let runs = store
-                .load_current_extractor_runs(workspace)
-                .map_err(internal_store)?;
-            let freshness = store
-                .load_current_freshness(workspace)
-                .map_err(internal_store)?;
-            let run_total = runs.len();
-            Ok(json!({
-                "schema_version": 2,
-                "workspace": workspace,
-                "run_total": run_total,
-                "truncated": run_total > item_limit,
-                "runs": runs.into_iter().take(item_limit).collect::<Vec<_>>(),
-                "freshness": freshness_summary(&freshness)
-            }))
-        }
-        _ => Err(ResourceError {
-            kind: ResourceErrorKind::Missing,
-            message: format!("workspace resource `{resource}` was not found"),
-        }),
-    }
-}
-
-fn read_evidence_resource(
-    database_path: &Path,
-    workspace: &str,
-    evidence_id: &str,
-) -> Result<Value, ResourceError> {
-    if evidence_id.is_empty() || evidence_id == "{id}" {
-        return Err(ResourceError {
-            kind: ResourceErrorKind::Invalid,
-            message: "a concrete evidence identifier is required".to_owned(),
-        });
-    }
-    let store = SqliteStore::open_read_only(database_path).map_err(internal_store)?;
-    let evidence = store
-        .load_current_evidence(workspace)
-        .map_err(|error| match error {
-            StoreError::CurrentSnapshotMissing(_) => ResourceError {
-                kind: ResourceErrorKind::Missing,
-                message: format!("workspace `{workspace}` has no evidence snapshot"),
-            },
-            other => internal_store(other),
-        })?
-        .into_iter()
-        .find(|item| item.id.as_str() == evidence_id)
-        .ok_or_else(|| ResourceError {
-            kind: ResourceErrorKind::Missing,
-            message: format!("evidence `{evidence_id}` was not found in workspace `{workspace}`"),
-        })?;
-    Ok(json!({
-        "schema_version": 2,
-        "workspace": workspace,
-        "evidence": evidence
-    }))
-}
-
-fn node_resource(
-    store: &SqliteStore,
-    workspace: &str,
-    item_limit: usize,
-    predicate: impl Fn(NodeKind) -> bool,
-) -> Result<Value, ResourceError> {
-    let (nodes, _) = store
-        .load_current_graph(workspace)
-        .map_err(internal_store)?;
-    let selected = nodes
-        .into_iter()
-        .filter(|node| predicate(node.kind))
-        .collect::<Vec<_>>();
-    let total = selected.len();
-    Ok(json!({
-        "schema_version": 2,
-        "workspace": workspace,
-        "total": total,
-        "truncated": total > item_limit,
-        "entities": selected.into_iter().take(item_limit).collect::<Vec<_>>()
-    }))
 }
 
 fn load_status(
@@ -1107,32 +828,6 @@ fn validate_workspace(configured: &str, requested: &str) -> Result<(), String> {
     }
 }
 
-fn is_contract(kind: NodeKind) -> bool {
-    matches!(
-        kind,
-        NodeKind::HttpOperation
-            | NodeKind::GraphqlOperation
-            | NodeKind::RpcMethod
-            | NodeKind::EventChannel
-            | NodeKind::EventSchema
-            | NodeKind::DatabaseTable
-            | NodeKind::DatabaseColumn
-            | NodeKind::ConfigKey
-    )
-}
-
-fn repository_view(repository: &RepositoryRecord) -> RepositoryView {
-    RepositoryView {
-        id: repository.id.as_str().to_owned(),
-        checkout_id: repository.checkout_id.as_str().to_owned(),
-        alias: repository.alias.clone(),
-        normalized_remote: repository.normalized_remote.clone(),
-        head_commit: repository.head_commit.clone(),
-        linked_worktree: repository.is_linked_worktree,
-        working_tree_dirty: repository.working_tree_dirty,
-    }
-}
-
 fn insert_schema<T: JsonSchema>(catalog: &mut BTreeMap<String, Value>, name: &str) {
     catalog.insert(name.to_owned(), json!(schema_for!(T)));
 }
@@ -1148,24 +843,6 @@ fn error_envelope<T>(reason: &str, error: impl std::fmt::Display) -> ToolEnvelop
             reasons: vec![reason.to_owned()],
         },
         warnings: vec![error.to_string()],
-    }
-}
-
-fn invalid_resource(uri: &str) -> ResourceError {
-    ResourceError {
-        kind: ResourceErrorKind::Missing,
-        message: format!("resource `{uri}` was not found"),
-    }
-}
-
-fn internal_store(error: impl std::fmt::Display) -> ResourceError {
-    internal_message(error.to_string())
-}
-
-fn internal_message(message: String) -> ResourceError {
-    ResourceError {
-        kind: ResourceErrorKind::Internal,
-        message,
     }
 }
 

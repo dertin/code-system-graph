@@ -10,7 +10,14 @@ use code_system_graph_core::ExecutionPolicy;
 use code_system_graph_model::ToolStatus;
 
 fn fake_codegraph(directory: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let binary = directory.join("codegraph-ok");
+    fake_codegraph_mode(directory, "ok")
+}
+
+fn fake_codegraph_mode(
+    directory: &Path,
+    mode: &str,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let binary = directory.join(format!("codegraph-{mode}"));
     std::fs::copy(
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../fixtures/codegraph/fake/codegraph.py"),
@@ -122,5 +129,45 @@ async fn explore_should_select_an_explicit_alias_in_multi_repository_workspaces(
     .await;
 
     assert!(envelope.data.is_some());
+    Ok(())
+}
+
+#[tokio::test]
+async fn explore_provider_timeout_should_preserve_partial_context_and_return_bounded()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temporary = tempfile::tempdir()?;
+    let (_manifest, database) = mono_repository_fixture(temporary.path())?;
+    let binary = fake_codegraph_mode(temporary.path(), "slow-cli")?;
+    let policy = ExecutionPolicy {
+        max_explore_wall_time_ms: 75,
+        ..ExecutionPolicy::default()
+    };
+    let started = tokio::time::Instant::now();
+    let envelope = explore_repository(
+        &database,
+        "explore-test",
+        &ExploreInput {
+            workspace: "explore-test".to_owned(),
+            repository: None,
+            query: "create_order callers".to_owned(),
+            max_files: Some(4),
+        },
+        Some(binary.into_os_string()),
+        &policy,
+    )
+    .await;
+
+    assert!(started.elapsed() < std::time::Duration::from_millis(750));
+    assert_eq!(envelope.status, ToolStatus::Degraded);
+    let report = envelope.data.ok_or("partial explore report")?;
+    assert_eq!(report.source_markdown, "ephemeral local context");
+    assert!(!report.coverage.symbol_resolution);
+    assert!(
+        report
+            .coverage
+            .gaps
+            .iter()
+            .any(|gap| gap.contains("symbol resolution"))
+    );
     Ok(())
 }

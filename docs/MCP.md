@@ -7,6 +7,10 @@ containing bounded Markdown; MCP responses do not include `structuredContent` or
 source-bearing, ephemeral exception. Mutating tools are absent from discovery unless the server
 starts with the explicit administrative profile.
 
+Initialization instructions describe this Markdown-only delivery explicitly. Schema version 2
+remains the logical tool/resource contract, while fenced JSON appears only inside the schema
+catalog. Final tool, resource, and schema-catalog Markdown budgets must each be at least 256 bytes.
+
 ## `status`
 
 Returns schema, integrity, snapshot freshness, and per-checkout status for the configured workspace.
@@ -107,7 +111,9 @@ The server publishes bounded `code-system-graph://workspaces`, workspace overvie
 service, contract, community, coverage, schema-catalog, and exact evidence-metadata resources.
 Resource templates reject access to another workspace. Every resource uses `text/markdown`; the
 schema catalog embeds each generated JSON Schema in a closed fenced `json` block. Resource item
-and byte limits come from the immutable workspace policy.
+and byte limits come from the immutable workspace policy. Every resource collection reports its
+`total`, retained count, and truncation state in Markdown; status, coverage, and freshness use
+collection-specific names for the same metadata.
 
 ## Administrative profile
 

@@ -47,6 +47,8 @@ pub const DEFAULT_MAX_MCP_TOOL_RESPONSE_BYTES: u64 = 524_288;
 pub const DEFAULT_MAX_MCP_RESOURCE_ITEMS: u64 = 100;
 pub const DEFAULT_MAX_MCP_RESOURCE_BYTES: u64 = 262_144;
 pub const DEFAULT_MAX_MCP_SCHEMA_CATALOG_BYTES: u64 = 2_097_152;
+/// Smallest Markdown response budget that can retain the mandatory MCP control block.
+pub const MIN_MCP_MARKDOWN_BYTES: u64 = 256;
 
 /// Effective per-repository limit for source-symbol corroboration through `CodeGraph`.
 ///
@@ -361,8 +363,29 @@ impl ExecutionPolicy {
 
     fn validate(&self) -> Result<(), InvalidExecutionPolicy> {
         self.validate_scalar_values()?;
+        self.validate_mcp_minimums()?;
         self.validate_scan_relationships()?;
         self.validate_explore_relationships()
+    }
+
+    fn validate_mcp_minimums(&self) -> Result<(), InvalidExecutionPolicy> {
+        for (field, value) in [
+            ("maxMcpToolResponseBytes", self.max_mcp_tool_response_bytes),
+            ("maxMcpResourceBytes", self.max_mcp_resource_bytes),
+            (
+                "maxMcpSchemaCatalogBytes",
+                self.max_mcp_schema_catalog_bytes,
+            ),
+        ] {
+            if value < MIN_MCP_MARKDOWN_BYTES {
+                return Err(InvalidExecutionPolicy::BelowMinimum {
+                    field,
+                    value,
+                    minimum: MIN_MCP_MARKDOWN_BYTES,
+                });
+            }
+        }
+        Ok(())
     }
 
     fn validate_scalar_values(&self) -> Result<(), InvalidExecutionPolicy> {
@@ -647,6 +670,16 @@ pub enum InvalidExecutionPolicy {
         field: &'static str,
         /// Rejected numeric value.
         value: u64,
+    },
+    /// An MCP Markdown budget cannot retain its mandatory control block.
+    #[error("execution policy `{field}` must be at least {minimum}; received {value}")]
+    BelowMinimum {
+        /// Manifest field containing the undersized budget.
+        field: &'static str,
+        /// Rejected byte budget.
+        value: u64,
+        /// Smallest supported byte budget.
+        minimum: u64,
     },
     /// One subordinate deadline exceeds its containing deadline.
     #[error("execution policy `{field}` ({value}) must not exceed `{maximum_field}` ({maximum})")]
@@ -1013,6 +1046,42 @@ mod tests {
         .expect_err("SQLite quota overflow must fail");
 
         assert!(matches!(quota, InvalidExecutionPolicy::InvalidValue { .. }));
+    }
+
+    #[test]
+    fn mcp_markdown_budgets_should_enforce_the_control_block_minimum() {
+        for overrides in [
+            ExecutionPolicyOverrides {
+                max_mcp_tool_response_bytes: Some(MIN_MCP_MARKDOWN_BYTES - 1),
+                ..ExecutionPolicyOverrides::default()
+            },
+            ExecutionPolicyOverrides {
+                max_mcp_resource_bytes: Some(MIN_MCP_MARKDOWN_BYTES - 1),
+                ..ExecutionPolicyOverrides::default()
+            },
+            ExecutionPolicyOverrides {
+                max_mcp_schema_catalog_bytes: Some(MIN_MCP_MARKDOWN_BYTES - 1),
+                ..ExecutionPolicyOverrides::default()
+            },
+        ] {
+            assert!(matches!(
+                ExecutionPolicy::resolve(Some(&overrides)),
+                Err(InvalidExecutionPolicy::BelowMinimum {
+                    minimum: MIN_MCP_MARKDOWN_BYTES,
+                    ..
+                })
+            ));
+        }
+
+        let minimum = ExecutionPolicy::resolve(Some(&ExecutionPolicyOverrides {
+            max_mcp_tool_response_bytes: Some(MIN_MCP_MARKDOWN_BYTES),
+            max_mcp_resource_bytes: Some(MIN_MCP_MARKDOWN_BYTES),
+            max_mcp_schema_catalog_bytes: Some(MIN_MCP_MARKDOWN_BYTES),
+            max_explore_source_markdown_bytes: Some(MIN_MCP_MARKDOWN_BYTES),
+            max_explore_enrichment_bytes: Some(MIN_MCP_MARKDOWN_BYTES),
+            ..ExecutionPolicyOverrides::default()
+        }));
+        assert!(minimum.is_ok());
     }
 
     #[test]

@@ -5,9 +5,11 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use code_system_graph_core::{
-    ChangeAnalysisOptions, ExecutionPolicy, ImpactRequest, PullRequestProviderKind
+    ChangeAnalysisOptions, ChangeImpactReport, ContractReport, ExecutionPolicy, ImpactReport, ImpactRequest, PullRequestInspection, PullRequestProviderKind, SearchReport
 };
-use code_system_graph_model::{FreshnessSummary, OverallFreshness, ToolEnvelope, ToolStatus};
+use code_system_graph_model::{
+    FreshnessSummary, OverallFreshness, ToolEnvelope, ToolStatus, TraceReport
+};
 use code_system_graph_store_sqlite::{SqliteStore, StoreLock};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -25,10 +27,70 @@ use crate::{
 mod mcp_support;
 
 use mcp_support::{
-    ADMIN_TOOL_NAMES, AdminAudit, CacheCleanInput, CacheCleanReport, CommunitiesInput, ContractsInput, MARKDOWN_MIME_TYPE, ManifestAdminReport, ManualLinkWriteInput, ResourceErrorKind, SourceContextInput, WorkspaceInput, WorkspaceUpdateInput, admin_audit_envelope, admin_mutation_envelope, configured_manifest_path, contracts_envelope, read_resource, resource_uris, source_context_envelope, status_envelope
+    ADMIN_TOOL_NAMES, AdminAudit, CacheCleanInput, CacheCleanReport, CommunitiesInput, ContractsInput, GraphStatusReport, MARKDOWN_MIME_TYPE, ManifestAdminReport, ManualLinkWriteInput, ResourceErrorKind, SourceContextInput, SourceContextReport, WorkspaceInput, WorkspaceUpdateInput, admin_audit_envelope, admin_mutation_envelope, configured_manifest_path, contracts_envelope, read_resource, resource_uris, source_context_envelope, status_envelope
 };
 
 const EXPLORE_TOOL_NAME: &str = "explore";
+
+#[derive(Clone, Copy)]
+enum AgentToolResult<'a> {
+    Trace(&'a ToolEnvelope<TraceReport>),
+    Query(&'a ToolEnvelope<SearchReport>),
+    Explore(&'a ToolEnvelope<crate::ExploreReport>),
+    Communities(&'a ToolEnvelope<CommunityReport>),
+    Impact(&'a ToolEnvelope<ImpactReport>),
+    AnalyzeChanges(&'a ToolEnvelope<ChangeImpactReport>),
+    AnalyzePullRequest(&'a ToolEnvelope<PullRequestInspection>),
+    Status(&'a ToolEnvelope<GraphStatusReport>),
+    Contracts(&'a ToolEnvelope<ContractReport>),
+    SourceContext(&'a ToolEnvelope<SourceContextReport>),
+    Scan(&'a ToolEnvelope<AdminAudit<crate::ScanSummary>>),
+    UpdateWorkspace(&'a ToolEnvelope<AdminAudit<ManifestAdminReport>>),
+    WriteManualLink(&'a ToolEnvelope<AdminAudit<ManifestAdminReport>>),
+    CleanCache(&'a ToolEnvelope<AdminAudit<CacheCleanReport>>),
+    RecomputeCommunities(&'a ToolEnvelope<AdminAudit<crate::ScanSummary>>),
+}
+
+impl AgentToolResult<'_> {
+    fn render(&self, maximum: usize) -> (String, bool) {
+        macro_rules! render {
+            ($name:literal, $envelope:expr) => {{
+                let envelope = $envelope;
+                (
+                    crate::agent_markdown::render_envelope(
+                        $name,
+                        envelope.schema_version,
+                        envelope.status,
+                        &envelope.freshness,
+                        &envelope.warnings,
+                        envelope.data.as_ref(),
+                        maximum,
+                    ),
+                    envelope.status == ToolStatus::Error,
+                )
+            }};
+        }
+        match self {
+            Self::Trace(envelope) => render!("trace", envelope),
+            Self::Query(envelope) => render!("query", envelope),
+            Self::Explore(envelope) => render!("explore", envelope),
+            Self::Communities(envelope) => render!("communities", envelope),
+            Self::Impact(envelope) => render!("impact", envelope),
+            Self::AnalyzeChanges(envelope) => render!("analyze_changes", envelope),
+            Self::AnalyzePullRequest(envelope) => render!("analyze_pull_request", envelope),
+            Self::Status(envelope) => render!("status", envelope),
+            Self::Contracts(envelope) => render!("contracts", envelope),
+            Self::SourceContext(envelope) => render!("source_context", envelope),
+            Self::Scan(envelope) => render!("scan", envelope),
+            Self::UpdateWorkspace(envelope) => render!("update_workspace", envelope),
+            Self::WriteManualLink(envelope) => render!("write_manual_link", envelope),
+            Self::CleanCache(envelope) => render!("clean_cache", envelope),
+            Self::RecomputeCommunities(envelope) => {
+                render!("recompute_communities", envelope)
+            }
+        }
+    }
+}
 
 /// Trusted process-level policy for bounded local intelligence.
 #[derive(Debug, Clone, Default)]
@@ -117,15 +179,10 @@ impl CodeSystemGraphServer {
         self
     }
 
-    fn markdown_result<T: serde::Serialize>(&self, tool: &str, value: &T) -> CallToolResult {
+    fn markdown_result(&self, result: AgentToolResult<'_>) -> CallToolResult {
         let maximum = usize::try_from(self.execution_policy.max_mcp_tool_response_bytes)
             .expect("validated policy bytes are usize-representable");
-        let markdown = crate::agent_markdown::render_tool(tool, value, maximum);
-        let is_error = serde_json::to_value(value)
-            .ok()
-            .and_then(|value| value.get("status").cloned())
-            .and_then(|value| value.as_str().map(str::to_owned))
-            .is_some_and(|status| status == "error");
+        let (markdown, is_error) = result.render(maximum);
         let content = vec![ContentBlock::text(markdown)];
         if is_error {
             CallToolResult::error(content)
@@ -161,7 +218,7 @@ impl CodeSystemGraphServer {
                 warnings: vec![error.to_string()],
             },
         };
-        self.markdown_result("trace", &envelope)
+        self.markdown_result(AgentToolResult::Trace(&envelope))
     }
 
     /// Searches ranked federated entities without returning source bodies.
@@ -186,7 +243,7 @@ impl CodeSystemGraphServer {
             Ok(envelope) => envelope,
             Err(error) => error_envelope("Query inputs could not be validated.", error),
         };
-        self.markdown_result("query", &envelope)
+        self.markdown_result(AgentToolResult::Query(&envelope))
     }
 
     /// Explores bounded repository-local source and flow context without persisting source.
@@ -216,7 +273,7 @@ impl CodeSystemGraphServer {
             &self.execution_policy,
         )
         .await;
-        Ok(self.markdown_result("explore", &envelope))
+        Ok(self.markdown_result(AgentToolResult::Explore(&envelope)))
     }
 
     /// Lists, inspects, or compares persisted deterministic communities.
@@ -236,17 +293,15 @@ impl CodeSystemGraphServer {
         Parameters(input): Parameters<CommunitiesInput>,
     ) -> CallToolResult {
         if input.workspace() != self.workspace {
-            return self.markdown_result(
-                "communities",
-                &error_envelope::<CommunityReport>(
-                    "Workspace policy rejected the request.",
-                    format!(
-                        "workspace `{}` is outside this server's configured workspace `{}`",
-                        input.workspace(),
-                        self.workspace
-                    ),
+            let envelope = error_envelope::<CommunityReport>(
+                "Workspace policy rejected the request.",
+                format!(
+                    "workspace `{}` is outside this server's configured workspace `{}`",
+                    input.workspace(),
+                    self.workspace
                 ),
             );
+            return self.markdown_result(AgentToolResult::Communities(&envelope));
         }
         let envelope = match communities_workspace(
             &self.database_path,
@@ -256,7 +311,7 @@ impl CodeSystemGraphServer {
             Ok(envelope) => envelope,
             Err(error) => error_envelope("Community inputs could not be validated.", error),
         };
-        self.markdown_result("communities", &envelope)
+        self.markdown_result(AgentToolResult::Communities(&envelope))
     }
 
     /// Computes conservative impact without executing tests or repository commands.
@@ -287,7 +342,7 @@ impl CodeSystemGraphServer {
             Ok(envelope) => envelope,
             Err(error) => error_envelope("Impact inputs could not be validated.", error),
         };
-        self.markdown_result("impact", &envelope)
+        self.markdown_result(AgentToolResult::Impact(&envelope))
     }
 
     /// Inspects bounded local Git changes without modifying repository state.
@@ -318,7 +373,7 @@ impl CodeSystemGraphServer {
             Ok(envelope) => envelope,
             Err(error) => error_envelope("Change inputs could not be validated.", error),
         };
-        self.markdown_result("analyze_changes", &envelope)
+        self.markdown_result(AgentToolResult::AnalyzeChanges(&envelope))
     }
 
     /// Inspects one explicitly enabled public pull-request provider.
@@ -358,7 +413,7 @@ impl CodeSystemGraphServer {
                 error,
             ),
         };
-        self.markdown_result("analyze_pull_request", &envelope)
+        self.markdown_result(AgentToolResult::AnalyzePullRequest(&envelope))
     }
 
     /// Reports persisted snapshot health without reading repository source files.
@@ -375,7 +430,7 @@ impl CodeSystemGraphServer {
     )]
     pub async fn status(&self, Parameters(input): Parameters<WorkspaceInput>) -> CallToolResult {
         let envelope = status_envelope(&self.database_path, &self.workspace, &input.workspace);
-        self.markdown_result("status", &envelope)
+        self.markdown_result(AgentToolResult::Status(&envelope))
     }
 
     /// Lists a bounded page of contract entities from the immutable graph snapshot.
@@ -392,7 +447,7 @@ impl CodeSystemGraphServer {
     )]
     pub async fn contracts(&self, Parameters(input): Parameters<ContractsInput>) -> CallToolResult {
         let envelope = contracts_envelope(&self.database_path, &self.workspace, &input);
-        self.markdown_result("contracts", &envelope)
+        self.markdown_result(AgentToolResult::Contracts(&envelope))
     }
 
     /// Returns bounded persisted graph and evidence metadata for one entity.
@@ -412,7 +467,7 @@ impl CodeSystemGraphServer {
         Parameters(input): Parameters<SourceContextInput>,
     ) -> CallToolResult {
         let envelope = source_context_envelope(&self.database_path, &self.workspace, &input);
-        self.markdown_result("source_context", &envelope)
+        self.markdown_result(AgentToolResult::SourceContext(&envelope))
     }
 
     /// Scans and atomically publishes the configured workspace.
@@ -428,7 +483,8 @@ impl CodeSystemGraphServer {
         )
     )]
     pub async fn scan(&self, Parameters(input): Parameters<WorkspaceInput>) -> CallToolResult {
-        self.markdown_result("scan", &self.run_admin_scan(&input.workspace, "scan"))
+        let envelope = self.run_admin_scan(&input.workspace, "scan");
+        self.markdown_result(AgentToolResult::Scan(&envelope))
     }
 
     /// Adds or removes one repository entry through the constrained manifest editor.
@@ -447,7 +503,8 @@ impl CodeSystemGraphServer {
         &self,
         Parameters(input): Parameters<WorkspaceUpdateInput>,
     ) -> CallToolResult {
-        self.markdown_result("update_workspace", &self.run_workspace_update(&input))
+        let envelope = self.run_workspace_update(&input);
+        self.markdown_result(AgentToolResult::UpdateWorkspace(&envelope))
     }
 
     /// Appends one exact manual relationship declaration and republishes the workspace.
@@ -466,7 +523,8 @@ impl CodeSystemGraphServer {
         &self,
         Parameters(input): Parameters<ManualLinkWriteInput>,
     ) -> CallToolResult {
-        self.markdown_result("write_manual_link", &self.run_manual_link_write(&input))
+        let envelope = self.run_manual_link_write(&input);
+        self.markdown_result(AgentToolResult::WriteManualLink(&envelope))
     }
 
     /// Removes bounded reusable query results for the configured workspace.
@@ -485,7 +543,8 @@ impl CodeSystemGraphServer {
         &self,
         Parameters(input): Parameters<CacheCleanInput>,
     ) -> CallToolResult {
-        self.markdown_result("clean_cache", &self.run_cache_clean(&input))
+        let envelope = self.run_cache_clean(&input);
+        self.markdown_result(AgentToolResult::CleanCache(&envelope))
     }
 
     /// Recomputes communities by publishing a freshly analyzed workspace snapshot.
@@ -504,10 +563,8 @@ impl CodeSystemGraphServer {
         &self,
         Parameters(input): Parameters<WorkspaceInput>,
     ) -> CallToolResult {
-        self.markdown_result(
-            "recompute_communities",
-            &self.run_admin_scan(&input.workspace, "community_recompute"),
-        )
+        let envelope = self.run_admin_scan(&input.workspace, "community_recompute");
+        self.markdown_result(AgentToolResult::RecomputeCommunities(&envelope))
     }
 
     fn run_admin_scan(
@@ -735,12 +792,14 @@ impl ServerHandler for CodeSystemGraphServer {
     fn get_info(&self) -> ServerInfo {
         let instructions = if self.codegraph.enabled {
             "Code System Graph exposes bounded cross-repository intelligence. Tool and resource results \
-             are versioned JSON; use query for persisted entity discovery, explore for ephemeral \
+             are delivered as one bounded Markdown text block without structuredContent; schema version 2 \
+             remains the logical contract, and only the schema catalog embeds fenced JSON. Use query for persisted entity discovery, explore for ephemeral \
              repository source, source_context for source-free evidence, impact for known targets, \
              and analyze_changes for Git diffs. Administrative tools mutate state only when enabled."
         } else {
             "Code System Graph exposes bounded cross-repository intelligence. Tool and resource results \
-             are versioned JSON; use query for persisted entity discovery, source_context for source-free \
+             are delivered as one bounded Markdown text block without structuredContent; schema version 2 \
+             remains the logical contract, and only the schema catalog embeds fenced JSON. Use query for persisted entity discovery, source_context for source-free \
              evidence, impact for known targets, and analyze_changes for Git diffs. Repository-local \
              source access is unavailable because CodeGraph is disabled. Administrative tools mutate \
              state only when enabled."
@@ -813,7 +872,7 @@ mod tests {
     #[cfg(unix)]
     use rmcp::handler::server::wrapper::Parameters;
 
-    use super::{CodeSystemGraphServer, mcp_support};
+    use super::{AgentToolResult, CodeSystemGraphServer, mcp_support};
     #[cfg(unix)]
     use crate::{CODEGRAPH_DISABLED_CODE, ExploreInput, scan_workspace};
 
@@ -849,6 +908,82 @@ mod tests {
             })
         }));
         assert!(tools.iter().all(|tool| tool.output_schema.is_none()));
+    }
+
+    #[test]
+    fn every_typed_tool_variant_should_have_a_stable_markdown_golden() {
+        fn envelope<T>() -> code_system_graph_model::ToolEnvelope<T> {
+            code_system_graph_model::ToolEnvelope {
+                schema_version: 2,
+                status: code_system_graph_model::ToolStatus::Error,
+                data: None,
+                freshness: code_system_graph_model::FreshnessSummary {
+                    overall: code_system_graph_model::OverallFreshness::Unknown,
+                    stale_repositories: Vec::new(),
+                    reasons: vec!["fixture".to_owned()],
+                },
+                warnings: vec!["typed fixture".to_owned()],
+            }
+        }
+
+        macro_rules! assert_golden {
+            ($variant:ident, $report:ty, $heading:literal) => {{
+                let envelope = envelope::<$report>();
+                let (markdown, is_error) = AgentToolResult::$variant(&envelope).render(4_096);
+                let expected_prefix = concat!("# ", $heading, "\n\n## Status\n\n- State: `error`");
+                assert!(markdown.starts_with(expected_prefix), "{markdown}");
+                assert!(markdown.contains("typed fixture"));
+                assert!(is_error);
+            }};
+        }
+
+        assert_golden!(Trace, code_system_graph_model::TraceReport, "trace");
+        assert_golden!(Query, code_system_graph_core::SearchReport, "query");
+        assert_golden!(Explore, crate::ExploreReport, "explore");
+        assert_golden!(Communities, crate::CommunityReport, "communities");
+        assert_golden!(Impact, code_system_graph_core::ImpactReport, "impact");
+        assert_golden!(
+            AnalyzeChanges,
+            code_system_graph_core::ChangeImpactReport,
+            "analyze changes"
+        );
+        assert_golden!(
+            AnalyzePullRequest,
+            code_system_graph_core::PullRequestInspection,
+            "analyze pull request"
+        );
+        assert_golden!(Status, mcp_support::GraphStatusReport, "status");
+        assert_golden!(
+            Contracts,
+            code_system_graph_core::ContractReport,
+            "contracts"
+        );
+        assert_golden!(
+            SourceContext,
+            mcp_support::SourceContextReport,
+            "source context"
+        );
+        assert_golden!(Scan, mcp_support::AdminAudit<crate::ScanSummary>, "scan");
+        assert_golden!(
+            UpdateWorkspace,
+            mcp_support::AdminAudit<mcp_support::ManifestAdminReport>,
+            "update workspace"
+        );
+        assert_golden!(
+            WriteManualLink,
+            mcp_support::AdminAudit<mcp_support::ManifestAdminReport>,
+            "write manual link"
+        );
+        assert_golden!(
+            CleanCache,
+            mcp_support::AdminAudit<mcp_support::CacheCleanReport>,
+            "clean cache"
+        );
+        assert_golden!(
+            RecomputeCommunities,
+            mcp_support::AdminAudit<crate::ScanSummary>,
+            "recompute communities"
+        );
     }
 
     #[test]
@@ -938,6 +1073,10 @@ mod tests {
 
             assert_eq!(explore_advertised, codegraph_enabled);
             assert_eq!(instructions.contains("explore"), codegraph_enabled);
+            assert!(instructions.contains("bounded Markdown"));
+            assert!(instructions.contains("without structuredContent"));
+            assert!(instructions.contains("schema version 2"));
+            assert!(!instructions.contains("versioned JSON"));
         }
 
         let source_context = disabled

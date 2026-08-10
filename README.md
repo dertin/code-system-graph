@@ -277,6 +277,8 @@ codex mcp add code-system-graph -- \
 MCP tools return one bounded Markdown text block and resources use `text/markdown`. HTTP and CLI
 retain typed schema-v2 JSON. Explore is the only source-bearing response and combines ephemeral
 source, symbols, callers/callees, federated evidence handoffs, coverage, and grounded next actions.
+Final MCP tool, resource, and schema-catalog budgets must each be at least 256 bytes so status and
+truncation controls remain representable.
 
 For clients that support [Agent Plugins](https://agent-plugins.org/), generate one portable,
 workspace-bound package plus its ignored local binding instead of configuring MCP and routing

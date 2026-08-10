@@ -250,8 +250,7 @@ fn duplicate_http_providers_should_degrade_without_aborting_unrelated_links() ->
 }
 
 #[test]
-fn execution_policy_change_should_not_invalidate_batches_or_require_full_scan() -> anyhow::Result<()>
-{
+fn scan_execution_policy_change_should_publish_a_new_snapshot() -> anyhow::Result<()> {
     let temporary = tempfile::tempdir()?;
     std::fs::create_dir(temporary.path().join("api"))?;
     std::fs::write(
@@ -277,8 +276,16 @@ fn execution_policy_change_should_not_invalidate_batches_or_require_full_scan() 
         },
     )?;
 
-    assert!(changed_policy.reused_snapshot);
-    assert_eq!(changed_policy.snapshot_id, initial.snapshot_id);
+    assert!(!changed_policy.reused_snapshot);
+    assert_ne!(changed_policy.snapshot_id, initial.snapshot_id);
+
+    std::fs::write(
+        &manifest,
+        "version: 1\nname: operational-policy\nexecutionPolicy:\n  maxScanWallTimeMs: 28800000\n  maxNoProgressTimeMs: 600000\n  maxMcpToolResponseBytes: 600000\nrepos:\n  api:\n    path: api\n    openapi: openapi.yaml\n",
+    )?;
+    let changed_delivery = scan_workspace(&manifest, &database)?;
+    assert!(changed_delivery.reused_snapshot);
+    assert_eq!(changed_delivery.snapshot_id, changed_policy.snapshot_id);
     Ok(())
 }
 

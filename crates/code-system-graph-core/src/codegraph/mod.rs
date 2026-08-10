@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Component, Path};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -55,6 +55,19 @@ pub struct CodeGraphProvider {
     mcp_circuits: Mutex<BTreeMap<RepoId, tokio::time::Instant>>,
     cli_version: Mutex<Option<String>>,
     closed: AtomicBool,
+    active_processes: Arc<AtomicUsize>,
+    maximum_concurrency_observed: Arc<AtomicUsize>,
+}
+
+struct ProviderPermit {
+    _permit: OwnedSemaphorePermit,
+    active_processes: Arc<AtomicUsize>,
+}
+
+impl Drop for ProviderPermit {
+    fn drop(&mut self) {
+        self.active_processes.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 struct CliProbe {
@@ -88,7 +101,15 @@ impl CodeGraphProvider {
             mcp_circuits: Mutex::new(BTreeMap::new()),
             cli_version: Mutex::new(None),
             closed: AtomicBool::new(false),
+            active_processes: Arc::new(AtomicUsize::new(0)),
+            maximum_concurrency_observed: Arc::new(AtomicUsize::new(0)),
         })
+    }
+
+    /// Returns the maximum number of provider operations that simultaneously held process permits.
+    #[must_use]
+    pub fn maximum_concurrency_observed(&self) -> usize {
+        self.maximum_concurrency_observed.load(Ordering::Acquire)
     }
 
     /// Reads the structured local-index status without starting MCP or modifying the index.
@@ -115,7 +136,7 @@ impl CodeGraphProvider {
         &self,
         request: &ProviderRequest,
         deadline: tokio::time::Instant,
-    ) -> Result<OwnedSemaphorePermit, ProviderError> {
+    ) -> Result<ProviderPermit, ProviderError> {
         validate_request(request)?;
         if self.closed.load(Ordering::Acquire) {
             return Err(ProviderError::InvalidRequest(
@@ -126,9 +147,17 @@ impl CodeGraphProvider {
             biased;
             () = request.cancellation.cancelled() => Err(ProviderError::Cancelled),
             () = tokio::time::sleep_until(deadline) => Err(timeout_error()),
-            permit = self.permits.clone().acquire_owned() => permit.map_err(|_| {
-                ProviderError::InvalidRequest("provider has already been shut down".to_owned())
-            }),
+            permit = self.permits.clone().acquire_owned() => {
+                let permit = permit.map_err(|_| {
+                    ProviderError::InvalidRequest("provider has already been shut down".to_owned())
+                })?;
+                let active = self.active_processes.fetch_add(1, Ordering::AcqRel) + 1;
+                self.maximum_concurrency_observed.fetch_max(active, Ordering::AcqRel);
+                Ok(ProviderPermit {
+                    _permit: permit,
+                    active_processes: self.active_processes.clone(),
+                })
+            },
         }
     }
 
@@ -624,6 +653,7 @@ fn degradation_from_error(error: &ProviderError) -> ProviderDegradation {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::sync::atomic::Ordering;
 
     use code_system_graph_model::RepoId;
     use tokio_util::sync::CancellationToken;
@@ -666,5 +696,41 @@ mod tests {
         .await;
 
         assert_eq!(result, Err(ProviderError::Cancelled));
+    }
+
+    #[tokio::test]
+    async fn provider_should_measure_held_process_permits() {
+        let provider = CodeGraphProvider::new(CodeGraphConfig {
+            max_concurrent_processes: 2,
+            ..CodeGraphConfig::default()
+        })
+        .expect("valid provider config");
+        let request = ProviderRequest {
+            repo_id: RepoId::new("repo:test"),
+            project_path: PathBuf::from("/tmp"),
+            budget: ProviderBudget::default(),
+            cancellation: CancellationToken::new(),
+        };
+        assert_eq!(provider.maximum_concurrency_observed(), 0);
+
+        let first = provider
+            .enter(
+                &request,
+                tokio::time::Instant::now() + std::time::Duration::from_secs(1),
+            )
+            .await
+            .expect("first permit");
+        assert_eq!(provider.maximum_concurrency_observed(), 1);
+        let second = provider
+            .enter(
+                &request,
+                tokio::time::Instant::now() + std::time::Duration::from_secs(1),
+            )
+            .await
+            .expect("second permit");
+        assert_eq!(provider.maximum_concurrency_observed(), 2);
+
+        drop((first, second));
+        assert_eq!(provider.active_processes.load(Ordering::Acquire), 0);
     }
 }

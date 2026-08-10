@@ -358,11 +358,13 @@ request; internal transport negotiation consumes the shared deadline and bytes b
 operation count. `maxMcpToolResponseBytes` applies after Markdown rendering. Resource rendering
 uses its own item and byte limits, with a separate schema-catalog ceiling. Reducing a value may
 produce explicit gaps or truncations but cannot be overridden upward by a request, environment
-variable, repository-local file, or CLI argument.
+variable, repository-local file, or CLI argument. The three final MCP Markdown byte limits must be
+at least 256 bytes so every response can retain its mandatory control and truncation block.
 
 `csgraph config show` emits schema v2, every default/effective value, origin
 `global_manifest`, `scan_fingerprint`, and `agent_delivery_fingerprint`. Scan-affecting limits,
-including the corroboration bound, change the scan fingerprint. Explore, Query, MCP-tool, and MCP
+including the corroboration bound, change the scan fingerprint and publish a new snapshot identity
+on the next scan. Explore, Query, MCP-tool, and MCP
 resource delivery limits change only the agent-delivery fingerprint, so they do not invalidate
 snapshots, extractor batches, checkpoints, or deterministic scan results.
 
