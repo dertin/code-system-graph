@@ -661,6 +661,10 @@ mod tests {
     use super::{CodeGraphConfig, CodeGraphProvider, validate_changed_files};
     use crate::{ProviderBudget, ProviderError, ProviderRequest};
 
+    fn absolute_project_path() -> PathBuf {
+        std::env::current_dir().expect("test process should expose an absolute current directory")
+    }
+
     #[test]
     fn provider_should_reject_zero_process_budget() {
         let result = CodeGraphProvider::new(CodeGraphConfig {
@@ -688,7 +692,7 @@ mod tests {
             &provider,
             ProviderRequest {
                 repo_id: RepoId::new("repo:test"),
-                project_path: PathBuf::from("/tmp"),
+                project_path: absolute_project_path(),
                 budget: ProviderBudget::default(),
                 cancellation,
             },
@@ -707,7 +711,7 @@ mod tests {
         .expect("valid provider config");
         let request = ProviderRequest {
             repo_id: RepoId::new("repo:test"),
-            project_path: PathBuf::from("/tmp"),
+            project_path: absolute_project_path(),
             budget: ProviderBudget::default(),
             cancellation: CancellationToken::new(),
         };
