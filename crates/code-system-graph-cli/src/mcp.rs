@@ -5,29 +5,27 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use code_system_graph_core::{
-    ChangeAnalysisOptions, ChangeImpactReport, ContractReport, ImpactReport, ImpactRequest, LocalContextResult, PullRequestInspection, PullRequestProviderKind, SearchReport
+    ChangeAnalysisOptions, ExecutionPolicy, ImpactRequest, PullRequestProviderKind
 };
-use code_system_graph_model::{
-    FreshnessSummary, OverallFreshness, ToolEnvelope, ToolStatus, TraceReport
-};
+use code_system_graph_model::{FreshnessSummary, OverallFreshness, ToolEnvelope, ToolStatus};
 use code_system_graph_store_sqlite::{SqliteStore, StoreLock};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
-    Implementation, ListResourcesResult, PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult, Resource, ResourceContents, ServerCapabilities, ServerInfo
+    CallToolResult, ContentBlock, Implementation, ListResourcesResult, PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult, Resource, ResourceContents, ServerCapabilities, ServerInfo
 };
 use rmcp::service::{RequestContext, RoleServer};
-use rmcp::{ErrorData as McpError, Json, ServerHandler, tool, tool_handler, tool_router};
+use rmcp::{ErrorData as McpError, ServerHandler, tool, tool_handler, tool_router};
 
 use crate::{
-    CODEGRAPH_DISABLED_CODE, CODEGRAPH_DISABLED_MESSAGE, ChangesInput, CommunityReport, ExploreInput, PullRequestInput, ScanOverrides, SearchInput, TraceInput, add_manual_link_to_manifest, add_repository_to_manifest, analyze_workspace_changes, communities_workspace, explore_repository, impact_workspace, impact_workspace_with_codegraph, inspect_pull_request, remove_repository_from_manifest, scan_workspace_with_overrides, search_workspace, trace_workspace
+    CODEGRAPH_DISABLED_CODE, CODEGRAPH_DISABLED_MESSAGE, ChangesInput, CommunityReport, ExploreInput, PullRequestInput, ScanOverrides, SearchInput, TraceInput, add_manual_link_to_manifest, add_repository_to_manifest, analyze_workspace_changes, communities_workspace, explore_repository, impact_workspace, impact_workspace_with_codegraph, inspect_pull_request, remove_repository_from_manifest, scan_workspace_with_overrides, search_workspace_with_policy, trace_workspace
 };
 
 #[path = "mcp_support/mod.rs"]
 mod mcp_support;
 
 use mcp_support::{
-    ADMIN_TOOL_NAMES, AdminAudit, CacheCleanInput, CacheCleanReport, CommunitiesInput, ContractsInput, GraphStatusReport, JSON_MIME_TYPE, ManifestAdminReport, ManualLinkWriteInput, ResourceErrorKind, SourceContextInput, SourceContextReport, WorkspaceInput, WorkspaceUpdateInput, admin_audit_envelope, admin_mutation_envelope, configured_manifest_path, contracts_envelope, read_resource, resource_uris, source_context_envelope, status_envelope
+    ADMIN_TOOL_NAMES, AdminAudit, CacheCleanInput, CacheCleanReport, CommunitiesInput, ContractsInput, MARKDOWN_MIME_TYPE, ManifestAdminReport, ManualLinkWriteInput, ResourceErrorKind, SourceContextInput, WorkspaceInput, WorkspaceUpdateInput, admin_audit_envelope, admin_mutation_envelope, configured_manifest_path, contracts_envelope, read_resource, resource_uris, source_context_envelope, status_envelope
 };
 
 const EXPLORE_TOOL_NAME: &str = "explore";
@@ -48,6 +46,7 @@ pub struct CodeSystemGraphServer {
     codegraph: CodeGraphPolicy,
     github_pull_requests_enabled: bool,
     bitbucket_pull_requests_enabled: bool,
+    execution_policy: ExecutionPolicy,
     tool_router: ToolRouter<Self>,
 }
 
@@ -68,6 +67,7 @@ impl CodeSystemGraphServer {
             codegraph: CodeGraphPolicy::default(),
             github_pull_requests_enabled: false,
             bitbucket_pull_requests_enabled: false,
+            execution_policy: ExecutionPolicy::default(),
             tool_router,
         }
     }
@@ -102,6 +102,13 @@ impl CodeSystemGraphServer {
         self
     }
 
+    /// Applies the validated immutable workspace execution policy.
+    #[must_use]
+    pub fn with_execution_policy(mut self, policy: ExecutionPolicy) -> Self {
+        self.execution_policy = policy;
+        self
+    }
+
     /// Enables selected public pull-request providers while retaining per-request consent.
     #[must_use]
     pub fn with_pull_request_providers(mut self, github: bool, bitbucket: bool) -> Self {
@@ -110,10 +117,27 @@ impl CodeSystemGraphServer {
         self
     }
 
+    fn markdown_result<T: serde::Serialize>(&self, tool: &str, value: &T) -> CallToolResult {
+        let maximum = usize::try_from(self.execution_policy.max_mcp_tool_response_bytes)
+            .expect("validated policy bytes are usize-representable");
+        let markdown = crate::agent_markdown::render_tool(tool, value, maximum);
+        let is_error = serde_json::to_value(value)
+            .ok()
+            .and_then(|value| value.get("status").cloned())
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .is_some_and(|status| status == "error");
+        let content = vec![ContentBlock::text(markdown)];
+        if is_error {
+            CallToolResult::error(content)
+        } else {
+            CallToolResult::success(content)
+        }
+    }
+
     /// Traces a bounded path through the current federated snapshot.
     #[tool(
         name = "trace",
-        description = "Finds a bounded, explainable path between two persisted entities across repository boundaries. Use when both endpoint identifiers are known; use query first to discover identifiers. Returns a versioned ToolEnvelope containing trace segments and freshness metadata.",
+        description = "Finds a bounded, explainable path between two persisted entities across repository boundaries. Use when both endpoint identifiers are known; use query first to discover identifiers. Returns bounded Markdown with trace segments and freshness metadata.",
         annotations(
             title = "Cross-repository path trace",
             read_only_hint = true,
@@ -122,14 +146,11 @@ impl CodeSystemGraphServer {
             open_world_hint = false
         )
     )]
-    pub async fn trace(
-        &self,
-        Parameters(input): Parameters<TraceInput>,
-    ) -> Json<ToolEnvelope<TraceReport>> {
-        match trace_workspace(&self.database_path, &self.workspace, &input) {
-            Ok(envelope) => Json(envelope),
-            Err(error) => Json(ToolEnvelope {
-                schema_version: 1,
+    pub async fn trace(&self, Parameters(input): Parameters<TraceInput>) -> CallToolResult {
+        let envelope = match trace_workspace(&self.database_path, &self.workspace, &input) {
+            Ok(envelope) => envelope,
+            Err(error) => ToolEnvelope {
+                schema_version: 2,
                 status: ToolStatus::Error,
                 data: None,
                 freshness: FreshnessSummary {
@@ -138,14 +159,15 @@ impl CodeSystemGraphServer {
                     reasons: vec!["Trace inputs could not be validated.".to_owned()],
                 },
                 warnings: vec![error.to_string()],
-            }),
-        }
+            },
+        };
+        self.markdown_result("trace", &envelope)
     }
 
     /// Searches ranked federated entities without returning source bodies.
     #[tool(
         name = "query",
-        description = "Searches persisted architecture entities, contracts, and communities across the workspace without returning source bodies. Use to discover entity identifiers before trace, source_context, or impact. Returns a versioned ToolEnvelope containing ranked matches and freshness metadata.",
+        description = "Searches persisted architecture entities, contracts, and communities across the workspace without returning source bodies. Use to discover entity identifiers before trace, source_context, or impact. Returns bounded Markdown with ranked matches and freshness metadata.",
         annotations(
             title = "Federated entity search",
             read_only_hint = true,
@@ -154,23 +176,23 @@ impl CodeSystemGraphServer {
             open_world_hint = false
         )
     )]
-    pub async fn query(
-        &self,
-        Parameters(input): Parameters<SearchInput>,
-    ) -> Json<ToolEnvelope<SearchReport>> {
-        match search_workspace(&self.database_path, &self.workspace, &input) {
-            Ok(envelope) => Json(envelope),
-            Err(error) => Json(error_envelope(
-                "Query inputs could not be validated.",
-                error,
-            )),
-        }
+    pub async fn query(&self, Parameters(input): Parameters<SearchInput>) -> CallToolResult {
+        let envelope = match search_workspace_with_policy(
+            &self.database_path,
+            &self.workspace,
+            &input,
+            &self.execution_policy,
+        ) {
+            Ok(envelope) => envelope,
+            Err(error) => error_envelope("Query inputs could not be validated.", error),
+        };
+        self.markdown_result("query", &envelope)
     }
 
     /// Explores bounded repository-local source and flow context without persisting source.
     #[tool(
         name = "explore",
-        description = "Retrieves bounded, ephemeral repository-local source and call-flow context through CodeGraph. Use for symbols, callers, callees, tests, and implementation details; use query for persisted cross-repository entities. Returns a versioned ToolEnvelope containing source-bearing local context that is never persisted.",
+        description = "Retrieves bounded, ephemeral repository-local source and call-flow context through CodeGraph. Use for symbols, callers, callees, tests, and implementation details; use query for persisted cross-repository entities. Returns bounded Markdown with source-bearing local context that is never persisted.",
         annotations(
             title = "Repository source exploration",
             read_only_hint = true,
@@ -182,25 +204,25 @@ impl CodeSystemGraphServer {
     pub async fn explore(
         &self,
         Parameters(input): Parameters<ExploreInput>,
-    ) -> Result<Json<ToolEnvelope<LocalContextResult>>, McpError> {
+    ) -> Result<CallToolResult, McpError> {
         if !self.codegraph.enabled {
             return Err(codegraph_disabled_error());
         }
-        Ok(Json(
-            explore_repository(
-                &self.database_path,
-                &self.workspace,
-                &input,
-                self.codegraph.binary.clone(),
-            )
-            .await,
-        ))
+        let envelope = explore_repository(
+            &self.database_path,
+            &self.workspace,
+            &input,
+            self.codegraph.binary.clone(),
+            &self.execution_policy,
+        )
+        .await;
+        Ok(self.markdown_result("explore", &envelope))
     }
 
     /// Lists, inspects, or compares persisted deterministic communities.
     #[tool(
         name = "communities",
-        description = "Lists, shows, or compares deterministic persisted communities using one explicit action. Use for inferred service boundaries, memberships, metrics, and snapshot comparisons; use query for general entity search. Returns a versioned ToolEnvelope containing a CommunityReport and freshness metadata.",
+        description = "Lists, shows, or compares deterministic persisted communities using one explicit action. Use for inferred service boundaries, memberships, metrics, and snapshot comparisons; use query for general entity search. Returns bounded Markdown with community results and freshness metadata.",
         annotations(
             title = "Community inspection",
             read_only_hint = true,
@@ -212,34 +234,35 @@ impl CodeSystemGraphServer {
     pub async fn communities(
         &self,
         Parameters(input): Parameters<CommunitiesInput>,
-    ) -> Json<ToolEnvelope<CommunityReport>> {
+    ) -> CallToolResult {
         if input.workspace() != self.workspace {
-            return Json(error_envelope(
-                "Workspace policy rejected the request.",
-                format!(
-                    "workspace `{}` is outside this server's configured workspace `{}`",
-                    input.workspace(),
-                    self.workspace
+            return self.markdown_result(
+                "communities",
+                &error_envelope::<CommunityReport>(
+                    "Workspace policy rejected the request.",
+                    format!(
+                        "workspace `{}` is outside this server's configured workspace `{}`",
+                        input.workspace(),
+                        self.workspace
+                    ),
                 ),
-            ));
+            );
         }
-        match communities_workspace(
+        let envelope = match communities_workspace(
             &self.database_path,
             &self.workspace,
             &input.application_input(),
         ) {
-            Ok(envelope) => Json(envelope),
-            Err(error) => Json(error_envelope(
-                "Community inputs could not be validated.",
-                error,
-            )),
-        }
+            Ok(envelope) => envelope,
+            Err(error) => error_envelope("Community inputs could not be validated.", error),
+        };
+        self.markdown_result("communities", &envelope)
     }
 
     /// Computes conservative impact without executing tests or repository commands.
     #[tool(
         name = "impact",
-        description = "Analyzes bounded upstream or downstream effects and conservative risk for one persisted graph target across repositories. Use for a known entity; use analyze_changes for staged, worktree, or committed Git changes. Returns a versioned ToolEnvelope containing an ImpactReport, freshness metadata, and optional ephemeral CodeGraph enrichment.",
+        description = "Analyzes bounded upstream or downstream effects and conservative risk for one persisted graph target across repositories. Use for a known entity; use analyze_changes for staged, worktree, or committed Git changes. Returns bounded Markdown with impact, freshness, and optional ephemeral CodeGraph enrichment.",
         annotations(
             title = "Cross-repository impact analysis",
             read_only_hint = true,
@@ -248,10 +271,7 @@ impl CodeSystemGraphServer {
             open_world_hint = false
         )
     )]
-    pub async fn impact(
-        &self,
-        Parameters(input): Parameters<ImpactRequest>,
-    ) -> Json<ToolEnvelope<ImpactReport>> {
+    pub async fn impact(&self, Parameters(input): Parameters<ImpactRequest>) -> CallToolResult {
         let result = if self.codegraph.enabled {
             impact_workspace_with_codegraph(
                 &self.database_path,
@@ -263,19 +283,17 @@ impl CodeSystemGraphServer {
         } else {
             impact_workspace(&self.database_path, &self.workspace, &input)
         };
-        match result {
-            Ok(envelope) => Json(envelope),
-            Err(error) => Json(error_envelope(
-                "Impact inputs could not be validated.",
-                error,
-            )),
-        }
+        let envelope = match result {
+            Ok(envelope) => envelope,
+            Err(error) => error_envelope("Impact inputs could not be validated.", error),
+        };
+        self.markdown_result("impact", &envelope)
     }
 
     /// Inspects bounded local Git changes without modifying repository state.
     #[tool(
         name = "analyze_changes",
-        description = "Analyzes fingerprinted staged, worktree, or committed local Git changes and maps them to conservative graph impact. Use for repository diffs; use impact for one known persisted target. Returns a versioned ToolEnvelope containing a ChangeImpactReport and freshness metadata without modifying Git state.",
+        description = "Analyzes fingerprinted staged, worktree, or committed local Git changes and maps them to conservative graph impact. Use for repository diffs; use impact for one known persisted target. Returns bounded Markdown with change impact and freshness metadata without modifying Git state.",
         annotations(
             title = "Local change impact analysis",
             read_only_hint = true,
@@ -287,8 +305,8 @@ impl CodeSystemGraphServer {
     pub async fn analyze_changes(
         &self,
         Parameters(input): Parameters<ChangesInput>,
-    ) -> Json<ToolEnvelope<ChangeImpactReport>> {
-        match analyze_workspace_changes(
+    ) -> CallToolResult {
+        let envelope = match analyze_workspace_changes(
             &self.database_path,
             &self.workspace,
             &input,
@@ -297,18 +315,16 @@ impl CodeSystemGraphServer {
         )
         .await
         {
-            Ok(envelope) => Json(envelope),
-            Err(error) => Json(error_envelope(
-                "Change inputs could not be validated.",
-                error,
-            )),
-        }
+            Ok(envelope) => envelope,
+            Err(error) => error_envelope("Change inputs could not be validated.", error),
+        };
+        self.markdown_result("analyze_changes", &envelope)
     }
 
     /// Inspects one explicitly enabled public pull-request provider.
     #[tool(
         name = "analyze_pull_request",
-        description = "Fetches and analyzes one consented GitHub or Bitbucket Cloud pull request from a provider enabled at server startup. Use for remote pull-request metadata and changed-file context; use analyze_changes for local Git state. Returns a versioned ToolEnvelope containing a PullRequestInspection and provider freshness metadata.",
+        description = "Fetches and analyzes one consented GitHub or Bitbucket Cloud pull request from a provider enabled at server startup. Use for remote pull-request metadata and changed-file context; use analyze_changes for local Git state. Returns bounded Markdown with pull-request inspection and provider freshness metadata.",
         annotations(
             title = "Pull request analysis",
             read_only_hint = true,
@@ -320,7 +336,7 @@ impl CodeSystemGraphServer {
     pub async fn analyze_pull_request(
         &self,
         Parameters(input): Parameters<PullRequestInput>,
-    ) -> Json<ToolEnvelope<PullRequestInspection>> {
+    ) -> CallToolResult {
         let (enabled, token, basic_auth_username) = match input.provider {
             PullRequestProviderKind::GitHub => (
                 self.github_pull_requests_enabled,
@@ -334,19 +350,21 @@ impl CodeSystemGraphServer {
             ),
             PullRequestProviderKind::BitbucketDataCenter => (false, None, None),
         };
-        match inspect_pull_request(&input, enabled, token, basic_auth_username).await {
-            Ok(envelope) => Json(envelope),
-            Err(error) => Json(error_envelope(
+        let envelope = match inspect_pull_request(&input, enabled, token, basic_auth_username).await
+        {
+            Ok(envelope) => envelope,
+            Err(error) => error_envelope(
                 "Pull-request inputs or provider response could not be validated.",
                 error,
-            )),
-        }
+            ),
+        };
+        self.markdown_result("analyze_pull_request", &envelope)
     }
 
     /// Reports persisted snapshot health without reading repository source files.
     #[tool(
         name = "status",
-        description = "Reports persisted graph health, freshness, and current snapshot metadata for the configured workspace. Use to verify workspace readiness before other analysis; not for entity search. Returns a versioned ToolEnvelope containing a source-free GraphStatusReport.",
+        description = "Reports persisted graph health, freshness, and current snapshot metadata for the configured workspace. Use to verify workspace readiness before other analysis; not for entity search. Returns bounded source-free Markdown.",
         annotations(
             title = "Workspace graph status",
             read_only_hint = true,
@@ -355,21 +373,15 @@ impl CodeSystemGraphServer {
             open_world_hint = false
         )
     )]
-    pub async fn status(
-        &self,
-        Parameters(input): Parameters<WorkspaceInput>,
-    ) -> Json<ToolEnvelope<GraphStatusReport>> {
-        Json(status_envelope(
-            &self.database_path,
-            &self.workspace,
-            &input.workspace,
-        ))
+    pub async fn status(&self, Parameters(input): Parameters<WorkspaceInput>) -> CallToolResult {
+        let envelope = status_envelope(&self.database_path, &self.workspace, &input.workspace);
+        self.markdown_result("status", &envelope)
     }
 
     /// Lists a bounded page of contract entities from the immutable graph snapshot.
     #[tool(
         name = "contracts",
-        description = "Lists, shows, validates, diffs, or explains persisted contracts using one explicit action. Use for API, event, database, package, and infrastructure contract analysis; use query for non-contract entities. Returns a versioned ToolEnvelope containing a ContractReport and freshness metadata.",
+        description = "Lists, shows, validates, diffs, or explains persisted contracts using one explicit action. Use for API, event, database, package, and infrastructure contract analysis; use query for non-contract entities. Returns bounded Markdown with contract results and freshness metadata.",
         annotations(
             title = "Contract inspection and validation",
             read_only_hint = true,
@@ -378,21 +390,15 @@ impl CodeSystemGraphServer {
             open_world_hint = false
         )
     )]
-    pub async fn contracts(
-        &self,
-        Parameters(input): Parameters<ContractsInput>,
-    ) -> Json<ToolEnvelope<ContractReport>> {
-        Json(contracts_envelope(
-            &self.database_path,
-            &self.workspace,
-            &input,
-        ))
+    pub async fn contracts(&self, Parameters(input): Parameters<ContractsInput>) -> CallToolResult {
+        let envelope = contracts_envelope(&self.database_path, &self.workspace, &input);
+        self.markdown_result("contracts", &envelope)
     }
 
     /// Returns bounded persisted graph and evidence metadata for one entity.
     #[tool(
         name = "source_context",
-        description = "Returns bounded, source-free persisted graph context and evidence metadata for one exact entity. Use after query to explain relationships and provenance without source bodies. It does not return implementation source. Returns a versioned ToolEnvelope containing a SourceContextReport and freshness metadata.",
+        description = "Returns bounded, source-free persisted graph context and evidence metadata for one exact entity. Use after query to explain relationships and provenance without source bodies. It does not return implementation source. Returns bounded Markdown with evidence and freshness metadata.",
         annotations(
             title = "Persisted entity context",
             read_only_hint = true,
@@ -404,18 +410,15 @@ impl CodeSystemGraphServer {
     pub async fn source_context(
         &self,
         Parameters(input): Parameters<SourceContextInput>,
-    ) -> Json<ToolEnvelope<SourceContextReport>> {
-        Json(source_context_envelope(
-            &self.database_path,
-            &self.workspace,
-            &input,
-        ))
+    ) -> CallToolResult {
+        let envelope = source_context_envelope(&self.database_path, &self.workspace, &input);
+        self.markdown_result("source_context", &envelope)
     }
 
     /// Scans and atomically publishes the configured workspace.
     #[tool(
         name = "scan",
-        description = "Scans the configured workspace and atomically publishes a new persisted graph snapshot. Use only in the enabled admin profile after repository or configuration changes; use status for a read-only health check. Returns an audited ToolEnvelope containing a ScanSummary, snapshot identity, freshness, and visible CodeGraph degradations.",
+        description = "Scans the configured workspace and atomically publishes a new persisted graph snapshot. Use only in the enabled admin profile after repository or configuration changes; use status for a read-only health check. Returns bounded audited Markdown with scan, snapshot, freshness, and visible CodeGraph degradation details.",
         annotations(
             title = "Publish workspace snapshot",
             read_only_hint = false,
@@ -424,17 +427,14 @@ impl CodeSystemGraphServer {
             open_world_hint = false
         )
     )]
-    pub async fn scan(
-        &self,
-        Parameters(input): Parameters<WorkspaceInput>,
-    ) -> Json<ToolEnvelope<AdminAudit<crate::ScanSummary>>> {
-        Json(self.run_admin_scan(&input.workspace, "scan"))
+    pub async fn scan(&self, Parameters(input): Parameters<WorkspaceInput>) -> CallToolResult {
+        self.markdown_result("scan", &self.run_admin_scan(&input.workspace, "scan"))
     }
 
     /// Adds or removes one repository entry through the constrained manifest editor.
     #[tool(
         name = "update_workspace",
-        description = "Adds or removes one repository registration in the configured workspace manifest, then validates and rescans it. Use only in the enabled admin profile for constrained workspace membership changes; use scan when membership is unchanged. Returns an audited ToolEnvelope containing the manifest mutation, backup metadata, and ScanSummary.",
+        description = "Adds or removes one repository registration in the configured workspace manifest, then validates and rescans it. Use only in the enabled admin profile for constrained workspace membership changes; use scan when membership is unchanged. Returns bounded audited Markdown with mutation, backup, and scan details.",
         annotations(
             title = "Update workspace repositories",
             read_only_hint = false,
@@ -446,14 +446,14 @@ impl CodeSystemGraphServer {
     pub async fn update_workspace(
         &self,
         Parameters(input): Parameters<WorkspaceUpdateInput>,
-    ) -> Json<ToolEnvelope<AdminAudit<ManifestAdminReport>>> {
-        Json(self.run_workspace_update(&input))
+    ) -> CallToolResult {
+        self.markdown_result("update_workspace", &self.run_workspace_update(&input))
     }
 
     /// Appends one exact manual relationship declaration and republishes the workspace.
     #[tool(
         name = "write_manual_link",
-        description = "Adds or suppresses one exact manual graph relationship in the configured manifest, then validates and rescans it. Use only in the enabled admin profile when an operator must record a reasoned relationship decision. Returns an audited ToolEnvelope containing the manifest mutation, backup metadata, and ScanSummary.",
+        description = "Adds or suppresses one exact manual graph relationship in the configured manifest, then validates and rescans it. Use only in the enabled admin profile when an operator must record a reasoned relationship decision. Returns bounded audited Markdown with mutation, backup, and scan details.",
         annotations(
             title = "Write manual relationship",
             read_only_hint = false,
@@ -465,14 +465,14 @@ impl CodeSystemGraphServer {
     pub async fn write_manual_link(
         &self,
         Parameters(input): Parameters<ManualLinkWriteInput>,
-    ) -> Json<ToolEnvelope<AdminAudit<ManifestAdminReport>>> {
-        Json(self.run_manual_link_write(&input))
+    ) -> CallToolResult {
+        self.markdown_result("write_manual_link", &self.run_manual_link_write(&input))
     }
 
     /// Removes bounded reusable query results for the configured workspace.
     #[tool(
         name = "clean_cache",
-        description = "Removes reusable query-summary cache entries for the configured workspace without changing graph snapshots. Use only in the enabled admin profile to invalidate cached query results; not to rescan source. Returns an audited ToolEnvelope containing the number of removed entries and current snapshot identity.",
+        description = "Removes reusable query-summary cache entries for the configured workspace without changing graph snapshots. Use only in the enabled admin profile to invalidate cached query results; not to rescan source. Returns bounded audited Markdown with removed-entry and snapshot details.",
         annotations(
             title = "Clear query cache",
             read_only_hint = false,
@@ -484,14 +484,14 @@ impl CodeSystemGraphServer {
     pub async fn clean_cache(
         &self,
         Parameters(input): Parameters<CacheCleanInput>,
-    ) -> Json<ToolEnvelope<AdminAudit<CacheCleanReport>>> {
-        Json(self.run_cache_clean(&input))
+    ) -> CallToolResult {
+        self.markdown_result("clean_cache", &self.run_cache_clean(&input))
     }
 
     /// Recomputes communities by publishing a freshly analyzed workspace snapshot.
     #[tool(
         name = "recompute_communities",
-        description = "Rescans the configured workspace and deterministically recomputes communities in a newly published snapshot. Use only in the enabled admin profile when community results must be refreshed; use communities for read-only inspection. Returns an audited ToolEnvelope containing the ScanSummary, snapshot identity, and freshness metadata.",
+        description = "Rescans the configured workspace and deterministically recomputes communities in a newly published snapshot. Use only in the enabled admin profile when community results must be refreshed; use communities for read-only inspection. Returns bounded audited Markdown with scan, snapshot, and freshness details.",
         annotations(
             title = "Recompute workspace communities",
             read_only_hint = false,
@@ -503,8 +503,11 @@ impl CodeSystemGraphServer {
     pub async fn recompute_communities(
         &self,
         Parameters(input): Parameters<WorkspaceInput>,
-    ) -> Json<ToolEnvelope<AdminAudit<crate::ScanSummary>>> {
-        Json(self.run_admin_scan(&input.workspace, "community_recompute"))
+    ) -> CallToolResult {
+        self.markdown_result(
+            "recompute_communities",
+            &self.run_admin_scan(&input.workspace, "community_recompute"),
+        )
     }
 
     fn run_admin_scan(
@@ -703,7 +706,7 @@ impl CodeSystemGraphServer {
 
 fn error_envelope<T>(reason: &str, error: impl std::fmt::Display) -> ToolEnvelope<T> {
     ToolEnvelope {
-        schema_version: 1,
+        schema_version: 2,
         status: ToolStatus::Error,
         data: None,
         freshness: FreshnessSummary {
@@ -765,7 +768,7 @@ impl ServerHandler for CodeSystemGraphServer {
             .map(|(uri, name, description)| {
                 Resource::new(uri, name)
                     .with_description(description)
-                    .with_mime_type(JSON_MIME_TYPE)
+                    .with_mime_type(MARKDOWN_MIME_TYPE)
             })
             .collect();
         Ok(ListResourcesResult::with_all_items(resources).with_ttl_ms(1_000))
@@ -777,9 +780,14 @@ impl ServerHandler for CodeSystemGraphServer {
         _context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResponse, McpError> {
         let uri = request.uri;
-        match read_resource(&self.database_path, &self.workspace, &uri) {
+        match read_resource(
+            &self.database_path,
+            &self.workspace,
+            &uri,
+            &self.execution_policy,
+        ) {
             Ok(text) => Ok(ReadResourceResult::new(vec![
-                ResourceContents::text(text, uri).with_mime_type(JSON_MIME_TYPE),
+                ResourceContents::text(text, uri).with_mime_type(MARKDOWN_MIME_TYPE),
             ])
             .into()),
             Err(error) => match error.kind {
@@ -799,6 +807,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
 
+    use code_system_graph_core::ExecutionPolicy;
     use code_system_graph_store_sqlite::SqliteStore;
     use rmcp::ServerHandler;
     #[cfg(unix)]
@@ -839,6 +848,7 @@ mod tests {
                     && annotations.destructive_hint == Some(false)
             })
         }));
+        assert!(tools.iter().all(|tool| tool.output_schema.is_none()));
     }
 
     #[test]
@@ -888,7 +898,7 @@ mod tests {
                 workspace: "commerce-platform".to_owned(),
                 repository: Some("orders".to_owned()),
                 query: "create_order callers".to_owned(),
-                max_files: 4,
+                max_files: Some(4),
             }))
             .await;
         let Err(error) = result else {
@@ -990,6 +1000,7 @@ mod tests {
             &PathBuf::from("missing.db"),
             "commerce",
             "code-system-graph://workspace/payments/status",
+            &ExecutionPolicy::default(),
         );
 
         assert!(error.is_err());
@@ -1000,18 +1011,18 @@ mod tests {
     }
 
     #[test]
-    fn resource_read_should_return_versioned_source_free_json()
+    fn resource_read_should_return_versioned_source_free_markdown()
     -> Result<(), Box<dyn std::error::Error>> {
         let text = mcp_support::read_resource(
             &PathBuf::from("missing.db"),
             "commerce",
             "code-system-graph://workspaces",
+            &ExecutionPolicy::default(),
         )
         .map_err(|error| std::io::Error::other(error.message))?;
-        let value: serde_json::Value = serde_json::from_str(&text)?;
-
-        assert_eq!(value["schema_version"], 1);
-        assert_eq!(value["workspaces"][0]["name"], "commerce");
+        assert!(text.starts_with("# Code System Graph Resource"));
+        assert!(text.contains("commerce"));
+        assert!(text.contains("schema version"));
         assert!(!text.contains("source_body"));
         Ok(())
     }
@@ -1022,6 +1033,7 @@ mod tests {
             &PathBuf::from("missing.db"),
             "commerce",
             "code-system-graph://evidence/{id}",
+            &ExecutionPolicy::default(),
         );
 
         assert!(error.is_err_and(|error| {
@@ -1040,6 +1052,7 @@ mod tests {
             &database,
             "commerce",
             "code-system-graph://evidence/evidence:missing",
+            &ExecutionPolicy::default(),
         );
 
         assert!(error.is_err_and(|error| {
@@ -1072,7 +1085,7 @@ mod tests {
         ] {
             assert!(catalog["schemas"].get(name).is_some(), "missing {name}");
         }
-        assert_eq!(catalog["schema_version"], 1);
+        assert_eq!(catalog["schema_version"], 2);
         assert!(catalog["application_interfaces"]["schemas"].is_array());
         assert!(serde_json::to_vec(&catalog)?.len() <= 2 * 1024 * 1024);
         Ok(())

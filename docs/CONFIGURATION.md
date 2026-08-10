@@ -307,6 +307,27 @@ executionPolicy:
   maxWatchSessionWallTimeMs: 86400000
   minWatchRescanIntervalMs: 10000
   maxCheckpointCacheBytes: 10737418240
+
+  maxExploreWallTimeMs: 8000
+  maxExploreCodeGraphOperations: 8
+  maxExploreConcurrentCodeGraphProcesses: 2
+  maxExploreSourceFiles: 25
+  maxExploreResolvedSymbols: 5
+  maxExploreAnchors: 3
+  maxExploreNeighborsPerDirection: 8
+  maxExploreLocalRelationships: 48
+  maxExploreFederatedHandoffsPerAnchor: 10
+  maxExploreFederatedHandoffs: 30
+  maxExploreEvidenceLocationsPerHandoff: 4
+  maxExploreSourceMarkdownBytes: 262144
+  maxExploreEnrichmentBytes: 65536
+  maxAgentNextActionsPerResponse: 12
+  maxQueryRepositorySuggestions: 20
+
+  maxMcpToolResponseBytes: 524288
+  maxMcpResourceItems: 100
+  maxMcpResourceBytes: 262144
+  maxMcpSchemaCatalogBytes: 2097152
 ```
 
 The defaults allow six hours and 16 GiB per worker, five minutes without verified completed work,
@@ -321,11 +342,29 @@ All values must be positive and representable except
 repository. Unlimited corroboration remains subject to scan/provider time, memory, and request
 budgets. The independent changed-file ceiling remains 1,024. The no-progress and per-repository CodeGraph
 deadlines cannot exceed the pass deadline; the termination grace cannot exceed the no-progress
-deadline; and watcher sub-deadlines cannot exceed the session deadline. Raising values explicitly
+deadline; and watcher sub-deadlines cannot exceed the session deadline. Explore anchors cannot
+exceed resolved symbols, child-process concurrency cannot exceed provider operations, local
+relationships cannot exceed `anchors × 2 × neighbors`, total handoffs cannot exceed
+`anchors × handoffsPerAnchor`, and source/enrichment byte budgets cannot exceed the final MCP tool
+response budget. Every multiplication and numeric conversion is checked. Raising values explicitly
 authorizes greater maximum CPU, memory, or cloud-agent cost. Like extraction budgets, this block is
 accepted only from a global manifest outside every analyzed checkout; it is rejected in repository
 local configuration and has no environment or CLI equivalent. Changing it does not invalidate
 deterministic extractor batches.
+
+Explore budgets use milliseconds, item counts, or decoded UTF-8 Markdown bytes as indicated by
+their names. One provider operation is one public context, symbol-resolution, caller, or callee
+request; internal transport negotiation consumes the shared deadline and bytes but not the
+operation count. `maxMcpToolResponseBytes` applies after Markdown rendering. Resource rendering
+uses its own item and byte limits, with a separate schema-catalog ceiling. Reducing a value may
+produce explicit gaps or truncations but cannot be overridden upward by a request, environment
+variable, repository-local file, or CLI argument.
+
+`csgraph config show` emits schema v2, every default/effective value, origin
+`global_manifest`, `scan_fingerprint`, and `agent_delivery_fingerprint`. Scan-affecting limits,
+including the corroboration bound, change the scan fingerprint. Explore, Query, MCP-tool, and MCP
+resource delivery limits change only the agent-delivery fingerprint, so they do not invalidate
+snapshots, extractor batches, checkpoints, or deterministic scan results.
 
 ## Optional features
 
@@ -347,6 +386,7 @@ For MCP:
 
 ```bash
 csgraph mcp \
+  --config code-system-graph.yaml \
   --codegraph \
   --workspace commerce \
   --database .code-system-graph/code-system-graph.db
@@ -380,6 +420,7 @@ workspace mutations:
 
 ```bash
 csgraph mcp \
+  --config code-system-graph.yaml \
   --admin \
   --workspace commerce \
   --database .code-system-graph/code-system-graph.db

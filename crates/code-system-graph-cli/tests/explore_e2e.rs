@@ -6,6 +6,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use code_system_graph::{ExploreInput, explore_repository, scan_workspace};
+use code_system_graph_core::ExecutionPolicy;
 use code_system_graph_model::ToolStatus;
 
 fn fake_codegraph(directory: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
@@ -50,16 +51,18 @@ async fn explore_should_default_to_the_only_registered_repository()
             workspace: "explore-test".to_owned(),
             repository: None,
             query: "create_order callers".to_owned(),
-            max_files: 4,
+            max_files: Some(4),
         },
         Some(binary.into_os_string()),
+        &ExecutionPolicy::default(),
     )
     .await;
 
-    assert_eq!(
-        envelope.data.map(|result| result.content),
-        Some("ephemeral local context".to_owned())
-    );
+    let report = envelope.data.ok_or("explore report")?;
+    assert_eq!(report.source_markdown, "ephemeral local context");
+    assert_eq!(report.resolved_symbols.len(), 1);
+    assert_eq!(report.local_relationships.len(), 2);
+    assert_eq!(report.execution.provider_operations, 4);
     Ok(())
 }
 
@@ -78,9 +81,10 @@ async fn explore_should_require_an_alias_for_multi_repository_workspaces()
             workspace: "commerce-platform".to_owned(),
             repository: None,
             query: "create order".to_owned(),
-            max_files: 4,
+            max_files: Some(4),
         },
         None,
+        &ExecutionPolicy::default(),
     )
     .await;
 
@@ -110,9 +114,10 @@ async fn explore_should_select_an_explicit_alias_in_multi_repository_workspaces(
             workspace: "commerce-platform".to_owned(),
             repository: Some("api".to_owned()),
             query: "create order".to_owned(),
-            max_files: 4,
+            max_files: Some(4),
         },
         Some(binary.into_os_string()),
+        &ExecutionPolicy::default(),
     )
     .await;
 

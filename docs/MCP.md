@@ -1,8 +1,9 @@
 # MCP Surface
 
 Code System Graph exposes a small read-only-by-default stdio MCP surface and advertises the server
-name `code_system_graph` during initialization. Every tool returns a versioned JSON envelope and
-uses server-enforced bounds. Persisted graph tools exclude source bodies; `explore` is the explicit
+name `code_system_graph` during initialization. Every tool returns exactly one `text` content block
+containing bounded Markdown; MCP responses do not include `structuredContent` or result
+`outputSchema`. Persisted graph tools exclude source bodies; `explore` is the explicit
 source-bearing, ephemeral exception. Mutating tools are absent from discovery unless the server
 starts with the explicit administrative profile.
 
@@ -30,7 +31,9 @@ paths include coverage gaps rather than asserting independence.
 ## `query`
 
 Searches current graph entities using exact, normalized, FTS5, scope, centrality, community,
-evidence-quality, and freshness signals. Every hit includes a score decomposition. Inputs support
+evidence-quality, and freshness signals. Every hit includes a score decomposition. Zero-hit
+responses explain that Query searches persisted entities rather than code bodies and recommend
+`explore` when the question names a registered alias. Inputs support
 bounded pagination and graph-entity filters. Each hit includes a stable `NodeId`; clients select
 the intended hit and pass that identifier to `trace`. The server does not silently choose
 between close or ambiguous candidates.
@@ -39,9 +42,13 @@ between close or ambiguous candidates.
 
 Delegates one focused repository-local symbol, flow, architecture, or implementation question to
 the public CodeGraph adapter. `repository` may be omitted only when the workspace has exactly one
-registered repository. `max_files` defaults to 12 and is capped at 25; timeout is five seconds and
-retained output is capped at 256 KiB. The returned `data.content` may contain source and exists only
-in the response. Code System Graph never persists, caches, logs, or audits it. Set
+registered repository. Omitted `max_files` resolves to `min(12, maxExploreSourceFiles)`; an
+explicit value may reduce that limit but cannot raise it. Explore returns repository identity and
+freshness, source Markdown, resolved symbols, callers/callees, persisted federated handoffs,
+coverage gaps, deterministic next actions, effective limits, provider operation counts,
+concurrency, retained bytes, and degradations. `source_markdown` may contain source and exists only
+in the response. Code System Graph never persists, caches, logs, or audits it, although the MCP
+host may retain requests and responses in its own history. Set
 `CODE_SYSTEM_GRAPH_CODEGRAPH_BINARY` on the trusted server process to select a non-default executable.
 
 ## `communities`
@@ -84,21 +91,23 @@ responses are discarded.
 - Search limits are at most 100 results.
 - Community limits are at most 100 communities.
 - Trace depth is capped by the server.
-- Local exploration is capped at 25 files, 256 KiB, and five seconds.
+- Local exploration uses the effective global `executionPolicy` budgets documented in
+  [Configuration](CONFIGURATION.md); tool inputs can only request less work.
 - FTS input is bound as a quoted phrase, not arbitrary FTS syntax.
 - No tool initializes, synchronizes, installs, upgrades, or reads internal CodeGraph storage.
 - Remote providers are disabled by default, HTTPS-only, allowlisted, bounded, and redirect-free.
 - Bitbucket Data Center is not implemented.
-- Tool errors use structured envelopes and do not write protocol noise to stdout.
+- Tool errors retain status, freshness, warnings, coverage, verifiable locations, truncations, and
+  next actions in Markdown and do not write protocol noise to stdout.
 - Resources are constrained to the configured workspace and expose source-free metadata only.
 
 ## Resources and schemas
 
 The server publishes bounded `code-system-graph://workspaces`, workspace overview, status, repository,
 service, contract, community, coverage, schema-catalog, and exact evidence-metadata resources.
-Resource templates reject access to another workspace. The schema catalog is generated from the
-public Rust request and report types. Normal resources are capped at 256 KiB; the complete schema
-catalog has a separate 2 MiB hard cap.
+Resource templates reject access to another workspace. Every resource uses `text/markdown`; the
+schema catalog embeds each generated JSON Schema in a closed fenced `json` block. Resource item
+and byte limits come from the immutable workspace policy.
 
 ## Administrative profile
 
@@ -130,6 +139,9 @@ records identify the workspace, operation, timestamp, and resulting state withou
 secret values, or credentials.
 
 ## Server CodeGraph policy
+
+Direct MCP mode requires `--config`; binding mode loads the canonical manifest path stored in the
+binding. Both MCP and HTTP validate the global manifest and workspace name before serving.
 
 Start `csgraph mcp` or `csgraph serve` with `--codegraph` to enable automatic impact enrichment
 and scan corroboration. `--codegraph-binary <path>` selects a trusted executable. Trusted

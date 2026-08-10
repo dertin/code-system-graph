@@ -33,13 +33,13 @@ fn config_show_should_report_defaults_and_selected_repository_rules() -> anyhow:
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(report.schema_version, 1);
+    assert_eq!(report.schema_version, 2);
     assert_eq!(report.workspace, "configuration");
     assert_eq!(report.extraction_budgets, ExtractionBudgets::default());
-    assert_eq!(report.execution_policy.base, ExecutionPolicy::default());
+    assert_eq!(report.execution_policy, ExecutionPolicy::default());
     assert_eq!(
-        report.execution_policy_fingerprint,
-        report.execution_policy.fingerprint()
+        report.scan_fingerprint,
+        report.execution_policy.scan_fingerprint()
     );
     assert_eq!(report.repositories.len(), 1);
     assert_eq!(report.repositories[0].alias, "api");
@@ -111,8 +111,8 @@ fn config_show_should_report_effective_execution_policy() -> anyhow::Result<()> 
         ExecutionPolicy::default().max_worker_memory_bytes
     );
     assert_eq!(
-        report.execution_policy_fingerprint,
-        report.execution_policy.fingerprint()
+        report.scan_fingerprint,
+        report.execution_policy.scan_fingerprint()
     );
     Ok(())
 }

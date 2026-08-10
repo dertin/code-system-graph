@@ -9,7 +9,7 @@ use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
 /// Availability state reported by a local intelligence provider.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderStatus {
     /// Provider and repository index are ready.
@@ -143,7 +143,7 @@ pub struct ResolveSymbolsRequest {
 }
 
 /// Direction used for local neighbor traversal.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum LocalNeighborDirection {
     /// Functions or methods that call the anchor.
@@ -210,7 +210,7 @@ pub struct ProviderExecution {
 }
 
 /// Exact local symbol returned by a compatible provider contract.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ResolvedSymbol {
     /// Local provider symbol identifier; never treated as a global identity.
     pub local_id: Option<String>,
@@ -238,7 +238,7 @@ pub struct ResolveSymbolsResult {
 }
 
 /// One bounded caller or callee.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct LocalNeighbor {
     /// Local symbol name.
     pub name: String,

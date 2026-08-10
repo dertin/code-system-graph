@@ -14,7 +14,7 @@ use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension, TransactionB
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-const WORK_SCHEMA_VERSION: &str = "1.0.0";
+const WORK_SCHEMA_VERSION: &str = "1.1.0";
 const SQLITE_ARTIFACT_SUFFIXES: [&str; 4] = ["", "-wal", "-shm", "-journal"];
 
 enum WorkOpenError {

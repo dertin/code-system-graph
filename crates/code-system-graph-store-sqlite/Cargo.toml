@@ -13,7 +13,7 @@ categories = ["database", "development-tools"]
 
 [dependencies]
 blake3 = "1.8.5"
-code-system-graph-model = { version = "1.0.3", path = "../code-system-graph-model" }
+code-system-graph-model = { version = "1.1.0", path = "../code-system-graph-model" }
 rusqlite = { version = "0.40.1", features = ["backup", "bundled"] }
 same-file = "1.0.6"
 serde_json = "1.0.151"

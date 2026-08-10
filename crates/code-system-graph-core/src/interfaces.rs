@@ -15,11 +15,11 @@ use crate::{
 };
 
 /// Schema version shared by the application-layer contracts in this module.
-pub const INTERFACE_SCHEMA_VERSION: u32 = 1;
+pub const INTERFACE_SCHEMA_VERSION: u32 = 2;
 /// Result version shared by the application-layer reports in this module.
-pub const INTERFACE_RESULT_VERSION: u32 = 1;
+pub const INTERFACE_RESULT_VERSION: u32 = 2;
 /// Version of reusable delivery metadata.
-pub const DELIVERY_METADATA_VERSION: u32 = 1;
+pub const DELIVERY_METADATA_VERSION: u32 = 2;
 /// Hard maximum number of nodes accepted by one graph export.
 pub const MAX_EXPORT_NODES: usize = 100_000;
 /// Hard maximum number of edges accepted by one graph export.

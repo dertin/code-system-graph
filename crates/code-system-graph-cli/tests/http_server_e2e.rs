@@ -233,6 +233,11 @@ async fn loopback_should_serve_anonymous_health_and_status() -> anyhow::Result<(
         .get("x-code-system-graph-version")
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned);
+    let schema_header = health
+        .headers()
+        .get("x-code-system-graph-schema-version")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
     let content_type_policy = health
         .headers()
         .get("x-content-type-options")
@@ -249,6 +254,7 @@ async fn loopback_should_serve_anonymous_health_and_status() -> anyhow::Result<(
             health_body["status"].as_str(),
             version_header.as_deref(),
             content_type_policy.as_deref(),
+            schema_header.as_deref(),
             cors_header_present,
             status_status,
             status_body["data"]["workspace"].as_str(),
@@ -258,6 +264,7 @@ async fn loopback_should_serve_anonymous_health_and_status() -> anyhow::Result<(
             Some("ok"),
             Some(env!("CARGO_PKG_VERSION")),
             Some("nosniff"),
+            Some("2"),
             false,
             StatusCode::OK,
             Some(server.fixture.workspace_name.as_str()),
@@ -359,10 +366,10 @@ async fn explore_route_should_return_ephemeral_local_context() -> anyhow::Result
     assert_eq!(
         (
             status,
-            body["data"]["content"].as_str(),
+            body["data"]["source_markdown"].as_str(),
             body["schema_version"].as_u64()
         ),
-        (StatusCode::OK, Some("ephemeral local context"), Some(1))
+        (StatusCode::OK, Some("ephemeral local context"), Some(2))
     );
     let target = SqliteStore::open_read_only(&server.fixture.database)?
         .load_current_graph(&server.fixture.workspace_name)?

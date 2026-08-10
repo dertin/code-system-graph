@@ -8,8 +8,15 @@ use code_system_graph::scan_workspace;
 use code_system_graph_store_sqlite::SqliteStore;
 use rmcp::ServiceExt;
 use rmcp::model::{
-    CallToolRequestParams, ClientCapabilities, ClientInfo, Implementation, ReadResourceRequestParams, ResourceContents
+    CallToolRequestParams, CallToolResult, ClientCapabilities, ClientInfo, ContentBlock, Implementation, ReadResourceRequestParams, ResourceContents
 };
+
+fn tool_text(result: &CallToolResult) -> &str {
+    match result.content.first() {
+        Some(ContentBlock::Text(content)) => &content.text,
+        _ => panic!("tool result did not contain one text block"),
+    }
+}
 
 #[cfg(unix)]
 fn fake_codegraph(directory: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
@@ -35,6 +42,8 @@ async fn stdio_should_initialize_without_noise_and_hide_admin_tools() -> anyhow:
     let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_csgraph"))
         .args([
             "mcp",
+            "--config",
+            fixture.to_string_lossy().as_ref(),
             "--database",
             database.to_string_lossy().as_ref(),
             "--workspace",
@@ -79,9 +88,8 @@ async fn stdio_should_initialize_without_noise_and_hide_admin_tools() -> anyhow:
     let ResourceContents::TextResourceContents { text, .. } = &schema.contents[0] else {
         panic!("schema resource was not textual");
     };
-    let schema: serde_json::Value = serde_json::from_str(text)?;
-    assert!(schema["schemas"].is_object());
-    assert!(schema["application_interfaces"]["schemas"].is_array());
+    assert!(text.starts_with("# Schema Catalog"));
+    assert!(text.contains("```json"));
 
     let contracts =
         service
@@ -94,7 +102,9 @@ async fn stdio_should_initialize_without_noise_and_hide_admin_tools() -> anyhow:
             ))
             .await?;
     assert_ne!(contracts.is_error, Some(true));
-    assert!(contracts.structured_content.is_some());
+    assert!(contracts.structured_content.is_none());
+    assert_eq!(contracts.content.len(), 1);
+    assert!(tool_text(&contracts).starts_with("# contracts"));
 
     let _ = service.close().await;
     let status = tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await??;
@@ -132,6 +142,8 @@ async fn stdio_explore_should_proxy_bounded_ephemeral_codegraph_context() -> any
     let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_csgraph"))
         .args([
             "mcp",
+            "--config",
+            manifest.to_string_lossy().as_ref(),
             "--database",
             database.to_string_lossy().as_ref(),
             "--workspace",
@@ -164,13 +176,8 @@ async fn stdio_explore_should_proxy_bounded_ephemeral_codegraph_context() -> any
             ))
             .await?;
 
-    assert_eq!(
-        explored
-            .structured_content
-            .as_ref()
-            .and_then(|value| value["data"]["content"].as_str()),
-        Some("ephemeral local context")
-    );
+    assert!(explored.structured_content.is_none());
+    assert!(tool_text(&explored).contains("ephemeral local context"));
     let impact = service
         .call_tool(
             CallToolRequestParams::new("impact").with_arguments(serde_json::from_value(
@@ -182,12 +189,8 @@ async fn stdio_explore_should_proxy_bounded_ephemeral_codegraph_context() -> any
         )
         .await?;
     assert_ne!(impact.is_error, Some(true));
-    assert!(
-        impact
-            .structured_content
-            .as_ref()
-            .is_some_and(|value| value["data"]["local_impact_summaries"].is_array())
-    );
+    assert!(impact.structured_content.is_none());
+    assert!(tool_text(&impact).contains("local impact summaries"));
     let _ = service.close().await;
     let status = tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await??;
     assert!(status.success());
@@ -235,6 +238,8 @@ async fn explicit_admin_stdio_should_apply_bounded_audited_mutations() -> anyhow
     let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_csgraph"));
     command.args([
         "mcp",
+        "--config",
+        manifest.to_string_lossy().as_ref(),
         "--database",
         database.to_string_lossy().as_ref(),
         "--workspace",
@@ -287,13 +292,8 @@ async fn explicit_admin_stdio_should_apply_bounded_audited_mutations() -> anyhow
         )
         .await?;
     assert_ne!(manual.is_error, Some(true));
-    assert_ne!(
-        manual
-            .structured_content
-            .as_ref()
-            .map(|value| &value["status"]),
-        Some(&serde_json::Value::String("error".to_owned()))
-    );
+    assert!(manual.structured_content.is_none());
+    assert!(!tool_text(&manual).contains("State: `error`"));
 
     let update = service
         .call_tool(
@@ -326,12 +326,8 @@ async fn explicit_admin_stdio_should_apply_bounded_audited_mutations() -> anyhow
         )
         .await?;
     assert_ne!(scan.is_error, Some(true));
-    assert_ne!(
-        scan.structured_content
-            .as_ref()
-            .map(|value| &value["status"]),
-        Some(&serde_json::Value::String("error".to_owned()))
-    );
+    assert!(scan.structured_content.is_none());
+    assert!(!tool_text(&scan).contains("State: `error`"));
 
     let _ = service.close().await;
     let status = tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await??;

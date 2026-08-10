@@ -92,6 +92,7 @@ because an agent may start outside the workspace directory:
 ```bash
 codex mcp add code-system-graph -- \
   csgraph mcp \
+  --config /absolute/path/to/commerce/code-system-graph.yaml \
   --codegraph \
   --workspace commerce \
   --database /absolute/path/to/commerce/.code-system-graph/code-system-graph.db

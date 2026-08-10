@@ -29,7 +29,7 @@ use sysinfo::{Pid, ProcessesToUpdate, System};
 use thiserror::Error;
 
 const INITIAL_SCHEMA: &str = include_str!("../migrations/0001_initial.sql");
-const LATEST_SCHEMA_VERSION: i64 = 1;
+const LATEST_SCHEMA_VERSION: i64 = 2;
 
 /// Returns the newest on-disk schema version supported by this binary.
 #[must_use]
@@ -474,7 +474,7 @@ impl SqliteStore {
         cfg!(any(target_os = "linux", target_os = "macos", windows))
     }
 
-    /// Opens an exact 1.0.0 store or initializes a new empty database.
+    /// Opens an exact 1.1.0 store or initializes a new empty database.
     ///
     /// # Errors
     ///
@@ -489,7 +489,7 @@ impl SqliteStore {
         })
     }
 
-    /// Creates a validated online backup of the exact 1.0.0 schema.
+    /// Creates a validated online backup of the exact 1.1.0 schema.
     ///
     /// A source on read-only media is treated as immutable only when no `SQLite` sidecars exist.
     ///
@@ -501,7 +501,7 @@ impl SqliteStore {
         backup_restore::backup_file(access_lock.database_path(), destination)
     }
 
-    /// Restores a validated backup with the exact 1.0.0 schema.
+    /// Restores a validated backup with the exact 1.1.0 schema.
     ///
     /// The existing destination is first preserved as a non-overwriting safety backup.
     /// Restore is refused while another [`SqliteStore`] has the destination open.
@@ -541,7 +541,7 @@ impl SqliteStore {
     ///
     /// # Errors
     ///
-    /// Returns [`StoreError`] if the database is absent, corrupt, or not the exact 1.0.0 schema.
+    /// Returns [`StoreError`] if the database is absent, corrupt, or not the exact 1.1.0 schema.
     pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let path = path.as_ref();
         let access_lock = StoreAccessLock::shared(path)?;
@@ -4105,7 +4105,7 @@ mod tests {
     fn fresh_database_should_apply_initial_schema() {
         let result = SqliteStore::in_memory().and_then(|store| store.schema_version());
 
-        assert!(matches!(result, Ok(1)));
+        assert!(matches!(result, Ok(2)));
     }
 
     #[test]
@@ -4133,7 +4133,7 @@ mod tests {
             |row| row.get::<_, i64>(0),
         )?;
 
-        assert_eq!((store.schema_version()?, table_count), (1, 12));
+        assert_eq!((store.schema_version()?, table_count), (2, 12));
         Ok(())
     }
 
@@ -4145,7 +4145,7 @@ mod tests {
         super::validate_exact_schema(&connection)?;
         super::validate_exact_schema(&connection)?;
 
-        assert_eq!(super::schema_version(&connection)?, 1);
+        assert_eq!(super::schema_version(&connection)?, 2);
         Ok(())
     }
 
@@ -4224,6 +4224,22 @@ mod tests {
         let result = SqliteStore::from_connection(connection);
 
         assert!(matches!(result, Err(StoreError::InvalidSchema)));
+    }
+
+    #[test]
+    fn exact_schema_should_reject_structurally_current_v1_database()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut connection = rusqlite::Connection::open_in_memory()?;
+        super::initialize_empty_schema(&mut connection)?;
+        connection.execute(
+            "UPDATE schema_metadata SET version = 1 WHERE version = ?1",
+            [super::LATEST_SCHEMA_VERSION],
+        )?;
+
+        let result = SqliteStore::from_connection(connection);
+
+        assert!(matches!(result, Err(StoreError::InvalidSchema)));
+        Ok(())
     }
 
     #[test]
@@ -4400,10 +4416,10 @@ mod tests {
         let database = temporary.path().join("store.db");
 
         let initial = SqliteStore::open(&database)?;
-        assert_eq!(initial.schema_version()?, 1);
+        assert_eq!(initial.schema_version()?, 2);
         drop(initial);
         let repeated = SqliteStore::open(&database)?;
-        assert_eq!(repeated.schema_version()?, 1);
+        assert_eq!(repeated.schema_version()?, 2);
         Ok(())
     }
 
@@ -4803,7 +4819,7 @@ mod tests {
             workspace_name: "commerce".to_owned(),
             snapshot_id: "snapshot:query-cache".to_owned(),
             input_fingerprint: "query:one".to_owned(),
-            result_summary_json: br#"{"schema_version":1}"#.to_vec(),
+            result_summary_json: br#"{"schema_version":2}"#.to_vec(),
             stored_at_unix_ms: 100,
             expires_at_unix_ms: Some(200),
         };

@@ -1,5 +1,6 @@
 //! Delivery-layer orchestration shared by the `Code System Graph` CLI and MCP server.
 
+mod agent_markdown;
 mod agent_plugin;
 pub mod http_server;
 pub mod mcp;
@@ -20,7 +21,7 @@ pub use agent_plugin::{
 };
 use atomic_write_file::AtomicWriteFile;
 use code_system_graph_core::{
-    AffectedTestsRequest, AnalyzerVersions, ArtifactKey, BatchAction, BatchPlanError, BitbucketProvider, ChangeAnalysisError, ChangeAnalysisOptions, ChangeError, ChangeImpactReport, ChangeProvider, ChangeRequest, ChangeScope, ChangeSet, CodeGraphConfig, CodeGraphCorroborationAnchorLimit, CodeGraphProvider, CommunityError, ConfigDoctorInput, ConfigError, ConfigExtractionError, ContractReport, ContractRequest, CorroborationReport, DEFAULT_MAX_CODEGRAPH_CORROBORATION_ANCHORS_PER_REPO, DataDocument, DataExtractionError, DeclaredImplementation, DeclaredTestCase, DoctorReport, DoctorRequest, DocumentationDocument, DocumentationExtractionError, EXTRACTION_CONTRACT_VERSION, EffectiveRepositoryConfig, EventDocument, EventExtractionError, EventGraphFacts, ExecutionPolicy, ExitCode, ExportReport, ExportRequest, ExtractionBudgets, ExtractionGraphFacts, ExtractionLimitExceeded, ExtractionTracker, ExtractorBatch, ExtractorBatchPlan, FederatedGraph, FreshnessDoctorInput, GeneratedClientError, GeneratedClientMetadata, GitCliChangeProvider, GitHubProvider, GraphqlDocument, GraphqlExtractionError, GraphqlGraphFacts, HttpBoundary, HttpExtractionError, ImpactContext, ImpactError, ImpactReport, ImpactRequest, ImpactTarget, IncrementalPlan, InfrastructureDocument, InfrastructureExtractionError, IntegrityDoctorInput, InterfaceError, LinkError, LocalCodeIntelligenceProvider, LocalContextRequest, LocalContextResult, LocalEnrichmentInput, LocalEnrichmentStatus, LocalImpactItem, LocalImpactRequest, ManifestEdit, ManifestEditError, ManifestError, ManualLinkConfig, ManualLinkError, PackageGraphFacts, PackageManifest, PackageManifestError, PrAuthToken, ProtobufDocument, ProtobufExtractionError, ProtobufGraphFacts, ProviderBudget, ProviderCapability, ProviderDoctorInput, ProviderDoctorStatus, ProviderError, ProviderRequest, ProviderStatus, PullRequestCoordinates, PullRequestError, PullRequestInspectRequest, PullRequestInspection, PullRequestListPage, PullRequestListRequest, PullRequestListState, PullRequestProvider, PullRequestProviderConfig, PullRequestProviderKind, QueryError, RecommendedCommand, RegisteredWorkspace, RegistryError, ReqwestPrHttpTransport, SafeConfigDocument, SchemaDoctorInput, SearchFilters, SearchReport, SearchRequest, SourceEpistemicStatus, SourceGraphFacts, SourceLanguage, SourceObservation, SourceRole, SourceSyntaxError, SourceSyntaxLanguage, SourceWarning, SymbolAnchor, SymbolCorroboration, TraceError, TraversalReport, TraversalRequest, WorkspaceManifest, affected_link_keys, analyze_changes, analyze_communities_with_progress, analyze_impact, apply_openapi_override, classify_interface_error, commit_manifest_edit, compare_community_snapshots, corroborate_repository, declared_implementation, declared_test_case, doctor, documents_to_graph, encode_native_path, event_documents_to_graph, export_graph, extract_asyncapi, extract_codeowners, extract_data_artifact, extract_docker_compose, extract_generated_client_metadata, extract_graphql_document_with_tracker, extract_graphql_persisted_operations_with_tracker, extract_helm, extract_kubernetes, extract_markdown, extract_openapi_with_tracker, extract_package_manifest_with_tracker, extract_protobuf_with_tracker, extract_safe_config, extract_service_catalog, extract_terraform, graphql_documents_to_graph, inspect_contracts, inspect_source_syntax, link_declared_implementations_with_ambiguities, link_declared_tests_with_ambiguities, link_http_boundaries_with_ambiguities, link_registered_package_owners, load_extractor_batch_with_budgets, merge_affected_link_neighborhoods, package_manifest_to_graph, parse_event_source, parse_go_source_with_tracker, parse_graphql_source_with_tracker, parse_java_source_with_tracker, parse_javascript_source_at_path_with_tracker, parse_literal_sql_source_at_root, parse_manifest, parse_manifest_with_extensions, parse_protobuf_generated_source, parse_python_source_with_tracker, parse_rust_source_with_tracker, parse_typescript_source_at_path_with_tracker, plan_extractor_batches, plan_incremental_scan, precheck_focused_source_values, preview_add_manual_link, preview_add_repository, preview_remove_repository, protobuf_documents_to_graph, register_workspace, resolve_manual_links, resolve_repository_config, resolve_repository_config_with_use_gitignore, search, source_observations_to_graph, store_extractor_batch, traverse
+    AffectedTestsRequest, AgentNextAction, AnalyzerVersions, ArtifactKey, BatchAction, BatchPlanError, BitbucketProvider, ChangeAnalysisError, ChangeAnalysisOptions, ChangeError, ChangeImpactReport, ChangeProvider, ChangeRequest, ChangeScope, ChangeSet, CodeGraphConfig, CodeGraphProvider, CommunityError, ConfigDoctorInput, ConfigError, ConfigExtractionError, ContractReport, ContractRequest, CorroborationReport, DataDocument, DataExtractionError, DeclaredImplementation, DeclaredTestCase, DoctorReport, DoctorRequest, DocumentationDocument, DocumentationExtractionError, EXTRACTION_CONTRACT_VERSION, EffectiveRepositoryConfig, EventDocument, EventExtractionError, EventGraphFacts, ExecutionPolicy, ExitCode, ExportReport, ExportRequest, ExtractionBudgets, ExtractionGraphFacts, ExtractionLimitExceeded, ExtractionTracker, ExtractorBatch, ExtractorBatchPlan, FederatedGraph, FreshnessDoctorInput, GeneratedClientError, GeneratedClientMetadata, GitCliChangeProvider, GitHubProvider, GraphqlDocument, GraphqlExtractionError, GraphqlGraphFacts, HttpBoundary, HttpExtractionError, ImpactContext, ImpactError, ImpactReport, ImpactRequest, ImpactTarget, IncrementalPlan, InfrastructureDocument, InfrastructureExtractionError, IntegrityDoctorInput, InterfaceError, LinkError, LocalCodeIntelligenceProvider, LocalContextRequest, LocalEnrichmentInput, LocalEnrichmentStatus, LocalImpactItem, LocalImpactRequest, LocalNeighbor, LocalNeighborDirection, LocalNeighborsRequest, ManifestEdit, ManifestEditError, ManifestError, ManualLinkConfig, ManualLinkError, PackageGraphFacts, PackageManifest, PackageManifestError, PrAuthToken, ProtobufDocument, ProtobufExtractionError, ProtobufGraphFacts, ProviderBudget, ProviderCapability, ProviderDoctorInput, ProviderDoctorStatus, ProviderExecution, ProviderRequest, ProviderStatus, PullRequestCoordinates, PullRequestError, PullRequestInspectRequest, PullRequestInspection, PullRequestListPage, PullRequestListRequest, PullRequestListState, PullRequestProvider, PullRequestProviderConfig, PullRequestProviderKind, QueryError, RecommendedCommand, RegisteredWorkspace, RegistryError, ReqwestPrHttpTransport, ResolvedSymbol, SafeConfigDocument, SchemaDoctorInput, SearchFilters, SearchReport, SearchRequest, SourceEpistemicStatus, SourceGraphFacts, SourceLanguage, SourceObservation, SourceRole, SourceSyntaxError, SourceSyntaxLanguage, SourceWarning, SymbolAnchor, SymbolCorroboration, TraceError, TraversalReport, TraversalRequest, WorkspaceManifest, affected_link_keys, analyze_changes, analyze_communities_with_progress, analyze_impact, apply_openapi_override, classify_interface_error, commit_manifest_edit, compare_community_snapshots, corroborate_repository, declared_implementation, declared_test_case, doctor, documents_to_graph, encode_native_path, event_documents_to_graph, export_graph, extract_asyncapi, extract_codeowners, extract_data_artifact, extract_docker_compose, extract_generated_client_metadata, extract_graphql_document_with_tracker, extract_graphql_persisted_operations_with_tracker, extract_helm, extract_kubernetes, extract_markdown, extract_openapi_with_tracker, extract_package_manifest_with_tracker, extract_protobuf_with_tracker, extract_safe_config, extract_service_catalog, extract_terraform, graphql_documents_to_graph, inspect_contracts, inspect_source_syntax, link_declared_implementations_with_ambiguities, link_declared_tests_with_ambiguities, link_http_boundaries_with_ambiguities, link_registered_package_owners, load_extractor_batch_with_budgets, merge_affected_link_neighborhoods, package_manifest_to_graph, parse_event_source, parse_go_source_with_tracker, parse_graphql_source_with_tracker, parse_java_source_with_tracker, parse_javascript_source_at_path_with_tracker, parse_literal_sql_source_at_root, parse_manifest, parse_manifest_with_extensions, parse_protobuf_generated_source, parse_python_source_with_tracker, parse_rust_source_with_tracker, parse_typescript_source_at_path_with_tracker, plan_extractor_batches, plan_incremental_scan, precheck_focused_source_values, preview_add_manual_link, preview_add_repository, preview_remove_repository, protobuf_documents_to_graph, register_workspace, resolve_manual_links, resolve_repository_config, resolve_repository_config_with_use_gitignore, search, source_observations_to_graph, store_extractor_batch, traverse
 };
 pub use code_system_graph_core::{
     ConfigSource, DEFAULT_EXCLUDES, IgnorePolicy, PROTECTED_EXCLUDES, discover_repository_files
@@ -309,6 +310,30 @@ pub(crate) fn load_execution_policy(
         .map_err(Into::into)
 }
 
+/// Loads the immutable global execution policy for a delivery server and verifies its workspace.
+///
+/// # Errors
+///
+/// Returns [`ApplicationError`] when the manifest is invalid, untrusted, or names another
+/// workspace.
+pub fn load_server_execution_policy(
+    config_path: &Path,
+    expected_workspace: &str,
+) -> Result<ExecutionPolicy, ApplicationError> {
+    let manifest_source = read_file(config_path)?;
+    let manifest = parse_manifest(&manifest_source)?;
+    validate_global_policy_source(config_path, &manifest)?;
+    if manifest.name != expected_workspace {
+        return Err(ApplicationError::Initialization(format!(
+            "workspace name `{expected_workspace}` does not match manifest name `{}`",
+            manifest.name
+        )));
+    }
+    ExecutionPolicy::resolve(manifest.execution_policy.as_ref())
+        .map_err(ManifestError::from)
+        .map_err(Into::into)
+}
+
 /// Observable result of a successful scan.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ScanSummary {
@@ -453,40 +478,18 @@ pub struct ConfigReport {
     pub extraction_budgets: ExtractionBudgets,
     /// Effective global supervised-execution policy, including applied defaults.
     pub execution_policy: ExecutionPolicy,
-    /// Canonical fingerprint of the effective supervised-execution policy.
-    pub execution_policy_fingerprint: String,
+    /// Canonical fingerprint of scan-affecting operational limits.
+    pub scan_fingerprint: String,
+    /// Canonical fingerprint of ephemeral agent-delivery limits.
+    pub agent_delivery_fingerprint: String,
+    /// Trusted source of the effective policy.
+    pub execution_policy_origin: String,
     /// Effective per-repository configuration in alias order.
     pub repositories: Vec<RepositoryConfigReport>,
 }
 
-/// Additive execution-policy view used by the CLI without expanding [`ExecutionPolicy`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct ExecutionPolicyReport {
-    /// Patch-compatible base execution policy.
-    #[serde(flatten)]
-    pub base: ExecutionPolicy,
-    /// Effective `CodeGraph` corroboration bound.
-    #[serde(rename = "maxCodeGraphCorroborationAnchorsPerRepo")]
-    #[schemars(with = "i64")]
-    pub max_codegraph_corroboration_anchors_per_repo: CodeGraphCorroborationAnchorLimit,
-}
-
-impl std::ops::Deref for ExecutionPolicyReport {
-    type Target = ExecutionPolicy;
-
-    fn deref(&self) -> &Self::Target {
-        &self.base
-    }
-}
-
-impl ExecutionPolicyReport {
-    /// Returns the canonical fingerprint of every effective policy value in this report.
-    #[must_use]
-    pub fn fingerprint(&self) -> String {
-        self.base
-            .fingerprint_with_codegraph_limit(self.max_codegraph_corroboration_anchors_per_repo)
-    }
-}
+/// Effective execution-policy view emitted by configuration reporting.
+pub type ExecutionPolicyReport = ExecutionPolicy;
 
 /// Extended configuration report emitted by `csgraph config show`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -499,8 +502,12 @@ pub struct ExtendedConfigReport {
     pub extraction_budgets: ExtractionBudgets,
     /// Effective global supervised-execution policy, including additive patch settings.
     pub execution_policy: ExecutionPolicyReport,
-    /// Canonical fingerprint of the complete effective supervised-execution policy.
-    pub execution_policy_fingerprint: String,
+    /// Canonical fingerprint of scan-affecting operational limits.
+    pub scan_fingerprint: String,
+    /// Canonical fingerprint of ephemeral agent-delivery limits.
+    pub agent_delivery_fingerprint: String,
+    /// Trusted source of the effective policy.
+    pub execution_policy_origin: String,
     /// Effective per-repository configuration in alias order.
     pub repositories: Vec<RepositoryConfigReport>,
 }
@@ -711,13 +718,120 @@ pub struct ExploreInput {
     /// Focused symbol, flow, architecture, or implementation question.
     pub query: String,
     /// Maximum source files returned by the local provider.
-    #[serde(default = "default_explore_max_files")]
-    #[schemars(range(min = 1, max = 25))]
-    pub max_files: usize,
+    #[serde(default)]
+    #[schemars(range(min = 1))]
+    pub max_files: Option<usize>,
 }
 
-const fn default_explore_max_files() -> usize {
-    12
+/// Repository identity and freshness attached to an Explore response.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ExploreRepositoryContext {
+    /// Registered alias.
+    pub alias: String,
+    /// Stable repository identity.
+    pub repo_id: RepoId,
+    /// Canonical checkout display path.
+    pub root: String,
+    /// Current Git revision when available.
+    pub revision: Option<String>,
+    /// Persisted freshness for this repository.
+    pub freshness: RepoFreshnessState,
+}
+
+/// One local caller/callee relationship discovered ephemerally.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ExploreLocalRelationship {
+    /// Exact anchor selected for traversal.
+    pub anchor: String,
+    /// Direction relative to the anchor.
+    pub direction: LocalNeighborDirection,
+    /// Bounded neighboring symbol.
+    pub neighbor: LocalNeighbor,
+}
+
+/// Verifiable persisted evidence location used by a federated handoff.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ExploreEvidenceLocation {
+    /// Repository containing the evidence.
+    pub repo_id: RepoId,
+    /// Repository-relative path.
+    pub path: String,
+    /// Optional inclusive first line.
+    pub start_line: Option<u32>,
+    /// Optional inclusive last line.
+    pub end_line: Option<u32>,
+}
+
+/// Navigation from a local source anchor to a persisted federated entity.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ExploreFederatedHandoff {
+    /// Local source anchor correlated with persisted evidence.
+    pub anchor: String,
+    /// Real persisted entity identifier.
+    pub node_id: NodeId,
+    /// Human-readable persisted entity label.
+    pub label: String,
+    /// Owning remote repository, when known.
+    pub remote_repository: Option<ExploreRepositoryContext>,
+    /// Confirmed, inferred, or ambiguous evidence state.
+    pub status: EpistemicStatus,
+    /// Persisted relationship confidence.
+    pub confidence: f32,
+    /// Bounded navigable evidence locations.
+    pub evidence: Vec<ExploreEvidenceLocation>,
+}
+
+/// Exact execution accounting and applied bounds for Explore.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ExploreExecution {
+    /// Effective immutable workspace policy.
+    pub effective_policy: ExecutionPolicy,
+    /// Public provider operations started.
+    pub provider_operations: usize,
+    /// Maximum concurrent provider operations observed.
+    pub maximum_concurrency_observed: usize,
+    /// Provider output bytes retained across successful operations.
+    pub retained_bytes: usize,
+    /// Per-operation provider metadata in completion order.
+    pub operations: Vec<ProviderExecution>,
+    /// Non-fatal budget, timeout, or provider degradations.
+    pub degradations: Vec<String>,
+}
+
+/// Coverage and exact truncation accounting for Explore.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ExploreCoverage {
+    /// Whether source context was attempted and retained.
+    pub source_context: bool,
+    /// Whether symbol resolution was attempted.
+    pub symbol_resolution: bool,
+    /// Number of anchors traversed in both directions.
+    pub anchors_traversed: usize,
+    /// Explicit incomplete coverage reasons.
+    pub gaps: Vec<String>,
+    /// Stable names of limits that truncated work or output.
+    pub truncations: Vec<String>,
+}
+
+/// Complete ephemeral, bounded agent-facing Explore result.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ExploreReport {
+    /// Selected repository identity and freshness.
+    pub repository: ExploreRepositoryContext,
+    /// Untrusted provider Markdown containing source; never persisted by this server.
+    pub source_markdown: String,
+    /// Bounded exact local symbols.
+    pub resolved_symbols: Vec<ResolvedSymbol>,
+    /// Bounded local caller/callee relationships.
+    pub local_relationships: Vec<ExploreLocalRelationship>,
+    /// Bounded correlations into persisted federated entities.
+    pub federated_handoffs: Vec<ExploreFederatedHandoff>,
+    /// Coverage and truncation facts.
+    pub coverage: ExploreCoverage,
+    /// Deterministic next navigation using real IDs only.
+    pub next_actions: Vec<AgentNextAction>,
+    /// Effective limits and observed consumption.
+    pub execution: ExploreExecution,
 }
 
 /// Explicit remote pull-request inspection input shared by CLI and MCP.
@@ -794,7 +908,6 @@ struct WorkspaceContext {
     repository_configs: BTreeMap<String, EffectiveRepositoryConfig>,
     extraction_budgets: ExtractionBudgets,
     execution_policy: ExecutionPolicy,
-    codegraph_corroboration_anchor_limit: CodeGraphCorroborationAnchorLimit,
 }
 
 /// Resolves and reports native discovery exclusions without opening a graph database.
@@ -810,10 +923,12 @@ pub fn show_config(
     let context = load_workspace_context(config_path, &ScanOverrides::default())?;
     let repositories = config_report_repositories(&context, selected_repository)?;
     Ok(ConfigReport {
-        schema_version: 1,
+        schema_version: 2,
         workspace: context.manifest.name,
         extraction_budgets: context.extraction_budgets,
-        execution_policy_fingerprint: context.execution_policy.fingerprint(),
+        scan_fingerprint: context.execution_policy.scan_fingerprint(),
+        agent_delivery_fingerprint: context.execution_policy.agent_delivery_fingerprint(),
+        execution_policy_origin: "global_manifest".to_owned(),
         execution_policy: context.execution_policy,
         repositories,
     })
@@ -830,19 +945,14 @@ pub fn show_extended_config(
 ) -> Result<ExtendedConfigReport, ApplicationError> {
     let context = load_workspace_context(config_path, &ScanOverrides::default())?;
     let repositories = config_report_repositories(&context, selected_repository)?;
-    let fingerprint = context
-        .execution_policy
-        .fingerprint_with_codegraph_limit(context.codegraph_corroboration_anchor_limit);
     Ok(ExtendedConfigReport {
-        schema_version: 1,
+        schema_version: 2,
         workspace: context.manifest.name,
         extraction_budgets: context.extraction_budgets,
-        execution_policy: ExecutionPolicyReport {
-            base: context.execution_policy,
-            max_codegraph_corroboration_anchors_per_repo: context
-                .codegraph_corroboration_anchor_limit,
-        },
-        execution_policy_fingerprint: fingerprint,
+        scan_fingerprint: context.execution_policy.scan_fingerprint(),
+        agent_delivery_fingerprint: context.execution_policy.agent_delivery_fingerprint(),
+        execution_policy_origin: "global_manifest".to_owned(),
+        execution_policy: context.execution_policy,
         repositories,
     })
 }
@@ -1786,7 +1896,7 @@ pub fn trace_workspace(
         ToolStatus::Degraded
     };
     Ok(ToolEnvelope {
-        schema_version: 1,
+        schema_version: 2,
         status,
         data: Some(report),
         freshness,
@@ -1805,9 +1915,23 @@ pub fn search_workspace(
     workspace: &str,
     input: &SearchInput,
 ) -> Result<ToolEnvelope<SearchReport>, ApplicationError> {
+    search_workspace_with_policy(database_path, workspace, input, &ExecutionPolicy::default())
+}
+
+/// Searches with the immutable workspace policy used by a long-lived delivery server.
+///
+/// # Errors
+///
+/// Returns the same failures as [`search_workspace`].
+pub fn search_workspace_with_policy(
+    database_path: &Path,
+    workspace: &str,
+    input: &SearchInput,
+    policy: &ExecutionPolicy,
+) -> Result<ToolEnvelope<SearchReport>, ApplicationError> {
     let store = SqliteStore::open_read_only(database_path)?;
     let snapshot = store.current_snapshot_summary(workspace)?;
-    let input_json = serde_json::to_vec(input)
+    let input_json = serde_json::to_vec(&(input, policy.agent_delivery_fingerprint()))
         .map_err(|error| ApplicationError::Initialization(error.to_string()))?;
     let input_fingerprint = stable_id_bytes("query-cache", &input_json);
     let now_unix_ms = current_unix_millis();
@@ -1852,7 +1976,15 @@ pub fn search_workspace(
         offset: input.offset,
         limit: input.limit,
     };
-    let report = search(&nodes, &request)?;
+    let mut report = search(&nodes, &request)?;
+    let registry = store.load_workspace_registry(workspace)?;
+    report.next_actions = query_next_actions(workspace, input, &report, &registry, policy);
+    if report.hits.is_empty() {
+        report.coverage.gaps.push(
+            "Query searches persisted architecture entities and contracts, not source-code bodies; use Explore for implementation text."
+                .to_owned(),
+        );
+    }
     let status = if report.coverage.gaps.is_empty() && freshness.overall == OverallFreshness::Fresh
     {
         ToolStatus::Ok
@@ -1860,7 +1992,7 @@ pub fn search_workspace(
         ToolStatus::Degraded
     };
     let envelope = ToolEnvelope {
-        schema_version: 1,
+        schema_version: 2,
         status,
         data: Some(report),
         freshness,
@@ -1884,6 +2016,60 @@ pub fn search_workspace(
         });
     }
     Ok(envelope)
+}
+
+fn query_next_actions(
+    workspace: &str,
+    input: &SearchInput,
+    report: &SearchReport,
+    registry: &WorkspaceRecord,
+    policy: &ExecutionPolicy,
+) -> Vec<AgentNextAction> {
+    let maximum = usize::try_from(policy.max_agent_next_actions_per_response)
+        .expect("validated policy count is usize-representable");
+    let repository_maximum = usize::try_from(policy.max_query_repository_suggestions)
+        .expect("validated policy count is usize-representable");
+    let mut actions = report
+        .hits
+        .iter()
+        .take(maximum)
+        .map(|hit| AgentNextAction {
+            tool: "source_context".to_owned(),
+            arguments: BTreeMap::from([
+                ("workspace".to_owned(), workspace.to_owned()),
+                ("node_id".to_owned(), hit.node.id.as_str().to_owned()),
+            ]),
+            rationale: format!("Inspect persisted evidence for `{}`.", hit.node.label),
+        })
+        .collect::<Vec<_>>();
+    if report.hits.is_empty() {
+        let normalized = input.query.to_lowercase();
+        actions.extend(
+            registry
+                .repositories
+                .iter()
+                .filter(|repository| {
+                    normalized
+                        .split_whitespace()
+                        .any(|token| token == repository.alias.to_lowercase())
+                })
+                .take(repository_maximum)
+                .map(|repository| AgentNextAction {
+                    tool: "explore".to_owned(),
+                    arguments: BTreeMap::from([
+                        ("workspace".to_owned(), workspace.to_owned()),
+                        ("repository".to_owned(), repository.alias.clone()),
+                        ("query".to_owned(), input.query.clone()),
+                    ]),
+                    rationale: format!(
+                        "Explore source in the recognized repository alias `{}`.",
+                        repository.alias
+                    ),
+                }),
+        );
+    }
+    actions.truncate(maximum);
+    actions
 }
 
 /// Executes an advanced bounded traversal against the current immutable graph.
@@ -1919,7 +2105,7 @@ pub fn traverse_workspace(
         ToolStatus::Degraded
     };
     Ok(ToolEnvelope {
-        schema_version: 1,
+        schema_version: 2,
         status,
         data: Some(report),
         freshness,
@@ -1993,7 +2179,7 @@ pub fn communities_workspace(
         ToolStatus::Degraded
     };
     Ok(ToolEnvelope {
-        schema_version: 1,
+        schema_version: 2,
         status,
         data: Some(report),
         freshness,
@@ -2006,22 +2192,38 @@ pub fn communities_workspace(
 
 /// Explores one registered checkout through bounded, ephemeral local code intelligence.
 ///
-/// The returned [`LocalContextResult::content`] may contain source code and must never be
+/// The returned [`ExploreReport::source_markdown`] may contain source code and must never be
 /// persisted, logged, cached, or included in audit records.
+///
+/// # Panics
+///
+/// Panics if `policy` was manually constructed with a count or byte limit that cannot be
+/// represented by the current platform. Server entry points always pass a validated, resolved
+/// policy.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the Explore lifecycle keeps budget accounting, partial results, and coverage reporting in one auditable sequence"
+)]
 pub async fn explore_repository(
     database_path: &Path,
     workspace: &str,
     input: &ExploreInput,
     binary: Option<std::ffi::OsString>,
-) -> ToolEnvelope<LocalContextResult> {
+    policy: &ExecutionPolicy,
+) -> ToolEnvelope<ExploreReport> {
     if input.workspace != workspace {
         return explore_error_envelope(format!(
             "workspace `{}` is outside this server's configured workspace `{workspace}`",
             input.workspace
         ));
     }
-    if !(1..=25).contains(&input.max_files) {
-        return explore_error_envelope("max_files must be between 1 and 25".to_owned());
+    let source_file_limit = usize::try_from(policy.max_explore_source_files)
+        .expect("validated policy count is usize-representable");
+    let max_files = input.max_files.unwrap_or(source_file_limit.min(12));
+    if max_files == 0 || max_files > source_file_limit {
+        return explore_error_envelope(format!(
+            "max_files must be between 1 and the effective workspace limit ({source_file_limit})"
+        ));
     }
 
     let store = match SqliteStore::open_read_only(database_path) {
@@ -2037,6 +2239,14 @@ pub async fn explore_repository(
         Err(error) => return explore_error_envelope(error.to_string()),
     };
     let freshness = freshness_summary(&persisted_freshness);
+    let graph = match store.load_current_graph(workspace) {
+        Ok(graph) => graph,
+        Err(error) => return explore_error_envelope(error.to_string()),
+    };
+    let evidence = match store.load_current_evidence(workspace) {
+        Ok(evidence) => evidence,
+        Err(error) => return explore_error_envelope(error.to_string()),
+    };
     let requested_alias = input
         .repository
         .as_deref()
@@ -2049,7 +2259,13 @@ pub async fn explore_repository(
         }
     };
 
-    let mut config = CodeGraphConfig::default();
+    let mut config = CodeGraphConfig {
+        max_concurrent_processes: usize::try_from(
+            policy.max_explore_concurrent_codegraph_processes,
+        )
+        .expect("validated policy count is usize-representable"),
+        ..CodeGraphConfig::default()
+    };
     if let Some(binary) = binary {
         config.binary = binary;
     }
@@ -2063,24 +2279,607 @@ pub async fn explore_repository(
             );
         }
     };
-    let result = provider
+    let deadline =
+        tokio::time::Instant::now() + Duration::from_millis(policy.max_explore_wall_time_ms);
+    let cancellation = CancellationToken::new();
+    let project_path = native_relative_path(&repository.canonical_path);
+    let mut operations = Vec::new();
+    let mut degradations = Vec::new();
+    let mut truncations = Vec::new();
+    let mut gaps = Vec::new();
+    let mut provider_operations = 0_usize;
+    let operation_limit = usize::try_from(policy.max_explore_codegraph_operations)
+        .expect("validated policy count is usize-representable");
+    let source_bytes = usize::try_from(policy.max_explore_source_markdown_bytes)
+        .expect("validated policy bytes are usize-representable");
+    let enrichment_bytes = usize::try_from(policy.max_explore_enrichment_bytes)
+        .expect("validated policy bytes are usize-representable");
+    let mut enrichment_retained_bytes = 0_usize;
+    let resolved_limit = usize::try_from(policy.max_explore_resolved_symbols)
+        .expect("validated policy count is usize-representable");
+
+    provider_operations += 1;
+    let source_result = provider
         .build_local_context(LocalContextRequest {
-            request: ProviderRequest {
-                repo_id: repository.id.clone(),
-                project_path: native_relative_path(&repository.canonical_path),
-                budget: ProviderBudget {
-                    timeout: Duration::from_secs(5),
-                    max_output_bytes: 256 * 1024,
-                    max_items: 25,
-                },
-                cancellation: CancellationToken::new(),
-            },
+            request: explore_provider_request(
+                repository,
+                &project_path,
+                source_bytes,
+                max_files,
+                deadline,
+                &cancellation,
+            ),
             query: input.query.clone(),
-            max_files: input.max_files,
+            max_files,
         })
         .await;
+    let mut source_markdown = String::new();
+    let source_context = match source_result {
+        Ok(result) => {
+            source_markdown = truncate_utf8_owned(result.content, source_bytes);
+            if result.execution.truncated {
+                truncations.push("maxExploreSourceMarkdownBytes".to_owned());
+            }
+            degradations.extend(
+                result
+                    .execution
+                    .degradations
+                    .iter()
+                    .map(|item| item.message.clone()),
+            );
+            operations.push(result.execution);
+            true
+        }
+        Err(error) => {
+            gaps.push(format!("source context unavailable: {error}"));
+            false
+        }
+    };
+
+    let mut resolved_symbols = Vec::new();
+    let mut symbol_resolution = false;
+    if provider_operations < operation_limit && tokio::time::Instant::now() < deadline {
+        provider_operations += 1;
+        match provider
+            .resolve_symbols(code_system_graph_core::ResolveSymbolsRequest {
+                request: explore_provider_request(
+                    repository,
+                    &project_path,
+                    enrichment_bytes,
+                    resolved_limit,
+                    deadline,
+                    &cancellation,
+                ),
+                query: input.query.clone(),
+            })
+            .await
+        {
+            Ok(mut result) => {
+                symbol_resolution = true;
+                if result.symbols.len() > resolved_limit || result.execution.truncated {
+                    truncations.push("maxExploreResolvedSymbols".to_owned());
+                }
+                result.symbols.truncate(resolved_limit);
+                resolved_symbols = result.symbols;
+                enrichment_retained_bytes = enrichment_retained_bytes
+                    .saturating_add(result.execution.output_bytes)
+                    .min(enrichment_bytes);
+                degradations.extend(
+                    result
+                        .execution
+                        .degradations
+                        .iter()
+                        .map(|item| item.message.clone()),
+                );
+                operations.push(result.execution);
+            }
+            Err(error) => gaps.push(format!("symbol resolution unavailable: {error}")),
+        }
+    } else {
+        gaps.push("symbol resolution skipped because the Explore deadline or operation budget was exhausted".to_owned());
+    }
+
+    if resolved_symbols.is_empty() {
+        resolved_symbols = fallback_explore_anchors(&source_markdown, resolved_limit);
+        if resolved_symbols.is_empty() {
+            gaps.push(
+                "no Explore anchors were available from structured symbol resolution or recognized CodeGraph blast-radius entries"
+                    .to_owned(),
+            );
+        } else {
+            gaps.push(
+                "structured symbol anchors were unavailable; strict fallback anchors were derived from explicit CodeGraph blast-radius entries"
+                    .to_owned(),
+            );
+        }
+    }
+
+    let anchor_limit = usize::try_from(policy.max_explore_anchors)
+        .expect("validated policy count is usize-representable");
+    let anchors = select_explore_anchors(&resolved_symbols, anchor_limit);
+    let neighbor_limit = usize::try_from(policy.max_explore_neighbors_per_direction)
+        .expect("validated policy count is usize-representable");
+    let relationship_limit = usize::try_from(policy.max_explore_local_relationships)
+        .expect("validated policy count is usize-representable");
+    let mut local_relationships = Vec::new();
+    let mut anchors_traversed = 0_usize;
+    let mut maximum_concurrency_observed = 1_usize;
+    for anchor in &anchors {
+        if provider_operations.saturating_add(2) > operation_limit
+            || tokio::time::Instant::now() >= deadline
+        {
+            gaps.push(format!(
+                "neighbors for `{}` skipped because the Explore deadline or operation budget was exhausted",
+                anchor.name
+            ));
+            break;
+        }
+        let remaining = enrichment_bytes.saturating_sub(enrichment_retained_bytes);
+        if remaining < 2 {
+            truncations.push("maxExploreEnrichmentBytes".to_owned());
+            break;
+        }
+        provider_operations += 2;
+        maximum_concurrency_observed = 2;
+        let symbol = anchor
+            .qualified_name
+            .clone()
+            .unwrap_or_else(|| anchor.name.clone());
+        let incoming_request = LocalNeighborsRequest {
+            request: explore_provider_request(
+                repository,
+                &project_path,
+                remaining / 2,
+                neighbor_limit,
+                deadline,
+                &cancellation,
+            ),
+            symbol: symbol.clone(),
+            direction: LocalNeighborDirection::Callers,
+        };
+        let outgoing_request = LocalNeighborsRequest {
+            request: explore_provider_request(
+                repository,
+                &project_path,
+                remaining - (remaining / 2),
+                neighbor_limit,
+                deadline,
+                &cancellation,
+            ),
+            symbol: symbol.clone(),
+            direction: LocalNeighborDirection::Callees,
+        };
+        let (incoming_result, outgoing_result) = tokio::join!(
+            provider.get_local_neighbors(incoming_request),
+            provider.get_local_neighbors(outgoing_request)
+        );
+        let mut completed_direction = false;
+        for result in [incoming_result, outgoing_result] {
+            match result {
+                Ok(mut result) => {
+                    completed_direction = true;
+                    if result.neighbors.len() > neighbor_limit || result.execution.truncated {
+                        truncations.push("maxExploreNeighborsPerDirection".to_owned());
+                    }
+                    result.neighbors.truncate(neighbor_limit);
+                    enrichment_retained_bytes = enrichment_retained_bytes
+                        .saturating_add(result.execution.output_bytes)
+                        .min(enrichment_bytes);
+                    local_relationships.extend(result.neighbors.into_iter().map(|neighbor| {
+                        ExploreLocalRelationship {
+                            anchor: symbol.clone(),
+                            direction: result.direction,
+                            neighbor,
+                        }
+                    }));
+                    degradations.extend(
+                        result
+                            .execution
+                            .degradations
+                            .iter()
+                            .map(|item| item.message.clone()),
+                    );
+                    operations.push(result.execution);
+                }
+                Err(error) => gaps.push(format!("neighbors for `{symbol}` degraded: {error}")),
+            }
+        }
+        anchors_traversed += usize::from(completed_direction);
+        if local_relationships.len() >= relationship_limit {
+            local_relationships.truncate(relationship_limit);
+            truncations.push("maxExploreLocalRelationships".to_owned());
+            break;
+        }
+    }
+
+    let repository_contexts = registry
+        .repositories
+        .iter()
+        .map(|item| {
+            (
+                item.id.clone(),
+                explore_repository_context(item, &persisted_freshness),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let federated_handoffs = correlate_explore_handoffs(
+        repository,
+        &anchors,
+        &graph.0,
+        &graph.1,
+        &evidence,
+        &repository_contexts,
+        policy,
+        &mut truncations,
+    );
+    let next_actions = explore_next_actions(workspace, repository, &federated_handoffs, policy);
     let shutdown = provider.shutdown().await;
-    explore_result_envelope(result, shutdown, freshness)
+    if let Err(error) = shutdown {
+        degradations.push(format!("CodeGraph shutdown degraded: {error}"));
+    }
+    truncations.sort();
+    truncations.dedup();
+    gaps.sort();
+    gaps.dedup();
+    degradations.sort();
+    degradations.dedup();
+    let status = if gaps.is_empty()
+        && degradations.is_empty()
+        && freshness.overall == OverallFreshness::Fresh
+    {
+        ToolStatus::Ok
+    } else {
+        ToolStatus::Degraded
+    };
+    let retained_bytes = operations.iter().map(|item| item.output_bytes).sum();
+    ToolEnvelope {
+        schema_version: 2,
+        status,
+        data: Some(ExploreReport {
+            repository: explore_repository_context(repository, &persisted_freshness),
+            source_markdown,
+            resolved_symbols,
+            local_relationships,
+            federated_handoffs,
+            coverage: ExploreCoverage {
+                source_context,
+                symbol_resolution,
+                anchors_traversed,
+                gaps,
+                truncations,
+            },
+            next_actions,
+            execution: ExploreExecution {
+                effective_policy: policy.clone(),
+                provider_operations,
+                maximum_concurrency_observed,
+                retained_bytes,
+                operations,
+                degradations: degradations.clone(),
+            },
+        }),
+        freshness,
+        warnings: degradations,
+    }
+}
+
+fn explore_provider_request(
+    repository: &RepositoryRecord,
+    project_path: &Path,
+    max_output_bytes: usize,
+    max_items: usize,
+    deadline: tokio::time::Instant,
+    cancellation: &CancellationToken,
+) -> ProviderRequest {
+    ProviderRequest {
+        repo_id: repository.id.clone(),
+        project_path: project_path.to_path_buf(),
+        budget: ProviderBudget {
+            timeout: deadline
+                .saturating_duration_since(tokio::time::Instant::now())
+                .max(Duration::from_millis(1)),
+            max_output_bytes: max_output_bytes.max(1),
+            max_items: max_items.max(1),
+        },
+        cancellation: cancellation.clone(),
+    }
+}
+
+fn truncate_utf8_owned(mut value: String, maximum: usize) -> String {
+    if value.len() <= maximum {
+        return value;
+    }
+    let mut boundary = maximum;
+    while boundary > 0 && !value.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    value.truncate(boundary);
+    value
+}
+
+fn fallback_explore_anchors(source_markdown: &str, maximum: usize) -> Vec<ResolvedSymbol> {
+    let mut in_blast_radius = false;
+    let mut anchors = Vec::new();
+    for line in source_markdown.lines() {
+        if line.starts_with("**Blast radius") && line.ends_with("**") {
+            in_blast_radius = true;
+            continue;
+        }
+        if in_blast_radius && line.starts_with("**") && line.ends_with("**") {
+            break;
+        }
+        if !in_blast_radius || anchors.len() == maximum {
+            continue;
+        }
+        let Some(entry) = line.strip_prefix("- `") else {
+            continue;
+        };
+        let Some((name, location)) = entry.split_once("` (") else {
+            continue;
+        };
+        let Some((location, suffix)) = location.split_once(')') else {
+            continue;
+        };
+        if !suffix.is_empty() && !suffix.starts_with(" — ") {
+            continue;
+        }
+        let Some((path, line)) = location.rsplit_once(':') else {
+            continue;
+        };
+        let Ok(start_line) = line.parse::<usize>() else {
+            continue;
+        };
+        let path = path.trim_start_matches("./");
+        let safe_path = !path.is_empty()
+            && Path::new(path).is_relative()
+            && Path::new(path).components().all(|component| {
+                matches!(
+                    component,
+                    std::path::Component::Normal(_) | std::path::Component::CurDir
+                )
+            });
+        if name.is_empty()
+            || start_line == 0
+            || !safe_path
+            || name.chars().any(char::is_control)
+            || path.chars().any(char::is_control)
+        {
+            continue;
+        }
+        anchors.push(ResolvedSymbol {
+            local_id: None,
+            name: name.to_owned(),
+            qualified_name: None,
+            kind: "unknown".to_owned(),
+            file_path: path.to_owned(),
+            start_line,
+            score: None,
+        });
+    }
+    anchors
+}
+
+fn select_explore_anchors(symbols: &[ResolvedSymbol], maximum: usize) -> Vec<ResolvedSymbol> {
+    let mut ranked = symbols.to_vec();
+    ranked.sort_by(|left, right| {
+        right
+            .score
+            .unwrap_or(f64::NEG_INFINITY)
+            .total_cmp(&left.score.unwrap_or(f64::NEG_INFINITY))
+            .then_with(|| left.file_path.cmp(&right.file_path))
+            .then_with(|| left.start_line.cmp(&right.start_line))
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    let mut selected = Vec::new();
+    let mut files = BTreeSet::new();
+    for symbol in &ranked {
+        if selected.len() == maximum {
+            break;
+        }
+        if files.insert(symbol.file_path.clone()) {
+            selected.push(symbol.clone());
+        }
+    }
+    for symbol in ranked {
+        if selected.len() == maximum {
+            break;
+        }
+        if !selected.iter().any(|item| {
+            item.file_path == symbol.file_path
+                && item.start_line == symbol.start_line
+                && item.name == symbol.name
+        }) {
+            selected.push(symbol);
+        }
+    }
+    selected
+}
+
+fn explore_repository_context(
+    repository: &RepositoryRecord,
+    freshness: &[RepoFreshness],
+) -> ExploreRepositoryContext {
+    ExploreRepositoryContext {
+        alias: repository.alias.clone(),
+        repo_id: repository.id.clone(),
+        root: repository.canonical_path.display.clone(),
+        revision: repository.head_commit.clone(),
+        freshness: freshness
+            .iter()
+            .find(|item| item.repo_id == repository.id)
+            .map_or(RepoFreshnessState::Unknown, |item| item.state),
+    }
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "handoff correlation explicitly receives each immutable evidence domain and applies all related bounds in one pass"
+)]
+fn correlate_explore_handoffs(
+    repository: &RepositoryRecord,
+    anchors: &[ResolvedSymbol],
+    nodes: &[Node],
+    edges: &[Edge],
+    evidence: &[Evidence],
+    repositories: &BTreeMap<RepoId, ExploreRepositoryContext>,
+    policy: &ExecutionPolicy,
+    truncations: &mut Vec<String>,
+) -> Vec<ExploreFederatedHandoff> {
+    let per_anchor = usize::try_from(policy.max_explore_federated_handoffs_per_anchor)
+        .expect("validated policy count is usize-representable");
+    let total_limit = usize::try_from(policy.max_explore_federated_handoffs)
+        .expect("validated policy count is usize-representable");
+    let evidence_limit = usize::try_from(policy.max_explore_evidence_locations_per_handoff)
+        .expect("validated policy count is usize-representable");
+    let node_by_id = nodes
+        .iter()
+        .map(|node| (&node.id, node))
+        .collect::<BTreeMap<_, _>>();
+    let evidence_by_id = evidence
+        .iter()
+        .map(|item| (&item.id, item))
+        .collect::<BTreeMap<_, _>>();
+    let mut output = Vec::new();
+    for anchor in anchors {
+        let anchor_path = anchor.file_path.trim_start_matches("./");
+        let matching_evidence = evidence
+            .iter()
+            .filter(|item| {
+                item.repo_id.as_ref() == Some(&repository.id)
+                    && item
+                        .file_path
+                        .as_deref()
+                        .is_some_and(|path| path.trim_start_matches("./") == anchor_path)
+                    && item.start_line.is_none_or(|start| {
+                        usize::try_from(start).is_ok_and(|start| start <= anchor.start_line)
+                    })
+                    && item.end_line.is_none_or(|end| {
+                        usize::try_from(end).is_ok_and(|end| end >= anchor.start_line)
+                    })
+            })
+            .map(|item| &item.id)
+            .collect::<BTreeSet<_>>();
+        if matching_evidence.is_empty() {
+            continue;
+        }
+        let mut emitted_for_anchor = 0_usize;
+        let mut seen = BTreeSet::new();
+        for edge in edges {
+            if !edge
+                .evidence
+                .iter()
+                .any(|id| matching_evidence.contains(id))
+            {
+                continue;
+            }
+            let remote = [&edge.source, &edge.target]
+                .into_iter()
+                .filter_map(|id| node_by_id.get(id).copied())
+                .find(|node| node.repo_id.as_ref().is_some_and(|id| id != &repository.id));
+            let Some(remote) = remote else {
+                continue;
+            };
+            if !seen.insert(remote.id.clone()) {
+                continue;
+            }
+            if emitted_for_anchor == per_anchor || output.len() == total_limit {
+                truncations.push(
+                    if output.len() == total_limit {
+                        "maxExploreFederatedHandoffs"
+                    } else {
+                        "maxExploreFederatedHandoffsPerAnchor"
+                    }
+                    .to_owned(),
+                );
+                break;
+            }
+            let mut locations = edge
+                .evidence
+                .iter()
+                .filter_map(|id| evidence_by_id.get(id).copied())
+                .filter_map(|item| {
+                    Some(ExploreEvidenceLocation {
+                        repo_id: item.repo_id.clone()?,
+                        path: item.file_path.clone()?,
+                        start_line: item.start_line,
+                        end_line: item.end_line,
+                    })
+                })
+                .collect::<Vec<_>>();
+            locations.sort_by(|left, right| {
+                (&left.repo_id, &left.path, left.start_line, left.end_line).cmp(&(
+                    &right.repo_id,
+                    &right.path,
+                    right.start_line,
+                    right.end_line,
+                ))
+            });
+            locations.dedup();
+            if locations.len() > evidence_limit {
+                locations.truncate(evidence_limit);
+                truncations.push("maxExploreEvidenceLocationsPerHandoff".to_owned());
+            }
+            output.push(ExploreFederatedHandoff {
+                anchor: anchor
+                    .qualified_name
+                    .clone()
+                    .unwrap_or_else(|| anchor.name.clone()),
+                node_id: remote.id.clone(),
+                label: remote.label.clone(),
+                remote_repository: remote
+                    .repo_id
+                    .as_ref()
+                    .and_then(|id| repositories.get(id).cloned()),
+                status: edge.status,
+                confidence: edge.confidence,
+                evidence: locations,
+            });
+            emitted_for_anchor += 1;
+        }
+        if output.len() == total_limit {
+            break;
+        }
+    }
+    output
+}
+
+fn explore_next_actions(
+    workspace: &str,
+    repository: &RepositoryRecord,
+    handoffs: &[ExploreFederatedHandoff],
+    policy: &ExecutionPolicy,
+) -> Vec<AgentNextAction> {
+    let maximum = usize::try_from(policy.max_agent_next_actions_per_response)
+        .expect("validated policy count is usize-representable");
+    let mut actions = handoffs
+        .iter()
+        .map(|handoff| AgentNextAction {
+            tool: "source_context".to_owned(),
+            arguments: BTreeMap::from([
+                ("workspace".to_owned(), workspace.to_owned()),
+                ("node_id".to_owned(), handoff.node_id.as_str().to_owned()),
+            ]),
+            rationale: format!(
+                "Inspect persisted evidence for the federated entity linked from `{}`.",
+                handoff.anchor
+            ),
+        })
+        .collect::<Vec<_>>();
+    if actions.len() < maximum {
+        actions.push(AgentNextAction {
+            tool: "explore".to_owned(),
+            arguments: BTreeMap::from([
+                ("workspace".to_owned(), workspace.to_owned()),
+                ("repository".to_owned(), repository.alias.clone()),
+            ]),
+            rationale:
+                "Refine the local source question while retaining the selected repository scope."
+                    .to_owned(),
+        });
+    }
+    actions.truncate(maximum);
+    actions
 }
 
 fn select_explore_repository<'a>(
@@ -2108,59 +2907,13 @@ fn select_explore_repository<'a>(
     ))
 }
 
-fn explore_result_envelope(
-    result: Result<LocalContextResult, ProviderError>,
-    shutdown: Result<(), ProviderError>,
-    freshness: FreshnessSummary,
-) -> ToolEnvelope<LocalContextResult> {
-    match result {
-        Ok(context) => {
-            let mut warnings = context
-                .execution
-                .degradations
-                .iter()
-                .map(|degradation| degradation.message.clone())
-                .collect::<Vec<_>>();
-            if context.execution.truncated {
-                warnings.push("Local context was truncated by the configured budget.".to_owned());
-            }
-            if let Err(error) = shutdown {
-                warnings.push(format!("CodeGraph shutdown degraded: {error}"));
-            }
-            let status = if warnings.is_empty() && freshness.overall == OverallFreshness::Fresh {
-                ToolStatus::Ok
-            } else {
-                ToolStatus::Degraded
-            };
-            ToolEnvelope {
-                schema_version: 1,
-                status,
-                data: Some(context),
-                freshness,
-                warnings,
-            }
-        }
-        Err(error) => ToolEnvelope {
-            schema_version: 1,
-            status: if matches!(&error, ProviderError::InvalidRequest(_)) {
-                ToolStatus::Error
-            } else {
-                ToolStatus::Degraded
-            },
-            data: None,
-            freshness,
-            warnings: vec![error.to_string()],
-        },
-    }
-}
-
 fn explore_scoped_error_envelope(
     freshness: FreshnessSummary,
     status: ToolStatus,
     message: String,
-) -> ToolEnvelope<LocalContextResult> {
+) -> ToolEnvelope<ExploreReport> {
     ToolEnvelope {
-        schema_version: 1,
+        schema_version: 2,
         status,
         data: None,
         freshness,
@@ -2168,9 +2921,9 @@ fn explore_scoped_error_envelope(
     }
 }
 
-fn explore_error_envelope(message: String) -> ToolEnvelope<LocalContextResult> {
+fn explore_error_envelope(message: String) -> ToolEnvelope<ExploreReport> {
     ToolEnvelope {
-        schema_version: 1,
+        schema_version: 2,
         status: ToolStatus::Error,
         data: None,
         freshness: FreshnessSummary {
@@ -2325,7 +3078,7 @@ pub async fn collect_workspace_changes_with_cancellation(
         item.checkout_id == repository.checkout_id && item.state == RepoFreshnessState::Fresh
     });
     Ok(ToolEnvelope {
-        schema_version: 1,
+        schema_version: 2,
         status: if repository_is_fresh {
             ToolStatus::Ok
         } else {
@@ -2408,7 +3161,7 @@ pub async fn analyze_workspace_changes_with_cancellation(
         ToolStatus::Degraded
     };
     Ok(ToolEnvelope {
-        schema_version: 1,
+        schema_version: 2,
         status,
         data: Some(report),
         freshness: collected.freshness,
@@ -2513,7 +3266,7 @@ pub async fn inspect_pull_request_with_cancellation(
         ToolStatus::Degraded
     };
     Ok(ToolEnvelope {
-        schema_version: 1,
+        schema_version: 2,
         status,
         data: Some(inspection),
         freshness: FreshnessSummary {
@@ -2563,7 +3316,7 @@ pub async fn list_pull_requests(
         ToolStatus::Degraded
     };
     Ok(ToolEnvelope {
-        schema_version: 1,
+        schema_version: 2,
         status,
         data: Some(page),
         freshness: FreshnessSummary {
@@ -2634,7 +3387,7 @@ fn impact_envelope(
         ToolStatus::Ok
     };
     Ok(ToolEnvelope {
-        schema_version: 1,
+        schema_version: 2,
         status,
         data: Some(report),
         freshness,
@@ -3442,7 +4195,7 @@ pub fn create_diagnostic_bundle(
         .map_err(|error| ApplicationError::Initialization(error.to_string()))?
         .as_millis();
     let bundle = DiagnosticBundle {
-        schema_version: 1,
+        schema_version: 2,
         binary_version: env!("CARGO_PKG_VERSION").to_owned(),
         operating_system: std::env::consts::OS.to_owned(),
         architecture: std::env::consts::ARCH.to_owned(),
@@ -3779,12 +4532,6 @@ fn load_workspace_context(
         .map_err(ManifestError::from)?;
     let execution_policy = ExecutionPolicy::resolve(manifest.execution_policy.as_ref())
         .map_err(ManifestError::from)?;
-    let codegraph_corroboration_anchor_limit = CodeGraphCorroborationAnchorLimit::try_from(
-        manifest_extensions
-            .max_codegraph_corroboration_anchors_per_repo()
-            .unwrap_or(DEFAULT_MAX_CODEGRAPH_CORROBORATION_ANCHORS_PER_REPO),
-    )
-    .map_err(ManifestError::from)?;
     for alias in overrides.repo_openapi.keys() {
         if !manifest.repos.contains_key(alias) {
             return Err(ApplicationError::UnknownOverrideRepository(alias.clone()));
@@ -3829,7 +4576,6 @@ fn load_workspace_context(
         repository_configs,
         extraction_budgets,
         execution_policy,
-        codegraph_corroboration_anchor_limit,
     })
 }
 
@@ -5282,7 +6028,9 @@ fn prepare_codegraph_jobs(
         anchors.dedup();
         limit_codegraph_anchors(
             &mut anchors,
-            context.codegraph_corroboration_anchor_limit,
+            context
+                .execution_policy
+                .max_codegraph_corroboration_anchors_per_repo,
             &repository.alias,
             &mut setup_degradations,
         );
@@ -6136,6 +6884,41 @@ fn read_bounded_bytes(
         })?;
     tracker.check_input_bytes(u64::try_from(bytes.len()).unwrap_or(u64::MAX))?;
     Ok(bytes)
+}
+
+#[cfg(test)]
+mod explore_anchor_fallback_tests {
+    use super::fallback_explore_anchors;
+
+    #[test]
+    fn recognized_codegraph_blast_radius_entries_should_form_strict_fallback_anchors() {
+        let source = "**Exploration: execution policy**\n\n\
+            - `outside` (src/outside.rs:1) — ignored\n\n\
+            **Blast radius — what depends on these**\n\n\
+            - `ExecutionPolicy` (crates/core/src/policy.rs:198) — 34 callers\n\
+            - `unsafe` (../outside.rs:2) — rejected\n\
+            - `second` (src/second.rs:7) — retained\n\n\
+            **Source Code**\n\n\
+            - `after` (src/after.rs:3) — ignored\n";
+
+        let anchors = fallback_explore_anchors(source, 2);
+
+        assert_eq!(anchors.len(), 2);
+        assert_eq!(anchors[0].name, "ExecutionPolicy");
+        assert_eq!(anchors[0].file_path, "crates/core/src/policy.rs");
+        assert_eq!(anchors[0].start_line, 198);
+        assert_eq!(anchors[1].name, "second");
+    }
+
+    #[test]
+    fn arbitrary_markdown_should_not_form_fallback_anchors() {
+        let anchors = fallback_explore_anchors(
+            "# Symbols\n\n- `invented` (src/invented.rs:9) — untrusted\n",
+            5,
+        );
+
+        assert!(anchors.is_empty());
+    }
 }
 
 #[cfg(test)]

@@ -3,6 +3,34 @@
 All notable public changes to Code System Graph are documented in this file. Code System Graph follows Semantic
 Versioning.
 
+## [1.1.0] - 2026-08-10
+
+### Breaking changes
+
+- MCP tools now return one bounded Markdown text block and omit `structuredContent` and result
+  `outputSchema`; all MCP resources use `text/markdown`, with fenced JSON in the schema catalog.
+- HTTP and CLI tool envelopes use delivery schema v2. Explore returns `ExploreReport` and places
+  ephemeral source in `source_markdown`.
+- Direct MCP mode requires `--config`; binding mode loads its recorded global manifest. Generated
+  plugin bindings and ownership receipts use version 2.
+- SQLite schema version 2 deliberately rejects 1.0.x databases. A fresh database and complete scan
+  are required; no legacy serializer, cache, plugin, or database compatibility path is provided.
+
+### Added
+
+- Added global Explore, Query, MCP-tool, MCP-resource, and schema-catalog limits to
+  `executionPolicy`, including checked capacity relationships and immutable policy sharing across
+  long-lived servers.
+- Added independent scan and agent-delivery fingerprints so presentation-only limits do not
+  invalidate snapshots, batches, or checkpoints.
+- Explore now reports repository context, source Markdown, resolved symbols, callers/callees,
+  evidence-correlated federated handoffs, coverage gaps, truncations, grounded next actions, and
+  exact provider execution accounting.
+- Query now returns grounded next actions and directs zero-hit source questions toward Explore when
+  a real registered repository alias is recognized.
+- Added bounded Markdown rendering with UTF-8-safe, block-stable truncation and centralized escaping
+  for headings, inline values, paths, controls, and untrusted source blocks.
+
 ## [1.0.3] - 2026-08-09
 
 ### Added

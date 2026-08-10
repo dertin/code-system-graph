@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use code_system_graph_core::{
-    ChangeImpactReport, ContractAction, ContractReport, ContractRequest, ImpactReport, ImpactRequest, LocalContextResult, ManualLinkConfig, PullRequestInspection, SearchReport, inspect_contracts, public_schema_catalog
+    ChangeImpactReport, ContractAction, ContractReport, ContractRequest, ImpactReport, ImpactRequest, ManualLinkConfig, PullRequestInspection, SearchReport, inspect_contracts, public_schema_catalog
 };
 use code_system_graph_model::{
     Community, CommunityId, Evidence, FreshnessSummary, Node, NodeId, NodeKind, OverallFreshness, RepoFreshness, RepoFreshnessState, RepositoryRecord, ToolEnvelope, ToolStatus, TraceReport
@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::{
-    ChangesInput, CommunityInput, CommunityReport, ExploreInput, ManifestMutationSummary, PullRequestInput, ScanSummary, SearchInput, TraceInput
+    ChangesInput, CommunityInput, CommunityReport, ExploreInput, ExploreReport, ManifestMutationSummary, PullRequestInput, ScanSummary, SearchInput, TraceInput
 };
 
 pub(super) const ADMIN_TOOL_NAMES: [&str; 5] = [
@@ -26,11 +26,9 @@ pub(super) const ADMIN_TOOL_NAMES: [&str; 5] = [
     "clean_cache",
     "recompute_communities",
 ];
-pub(super) const JSON_MIME_TYPE: &str = "application/json";
+pub(super) const MARKDOWN_MIME_TYPE: &str = "text/markdown";
 
 const MAX_PAGE_SIZE: usize = 100;
-const MAX_RESOURCE_BYTES: usize = 256 * 1024;
-const MAX_SCHEMA_RESOURCE_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -447,7 +445,7 @@ pub(super) fn status_envelope(
                 ToolStatus::Degraded
             };
             ToolEnvelope {
-                schema_version: 1,
+                schema_version: 2,
                 status,
                 data: Some(report),
                 freshness,
@@ -492,7 +490,7 @@ pub(super) fn contracts_envelope(
                 ToolStatus::Ok
             };
             ToolEnvelope {
-                schema_version: 1,
+                schema_version: 2,
                 status,
                 data: Some(report),
                 freshness,
@@ -586,7 +584,7 @@ pub(super) fn source_context_envelope(
                 ToolStatus::Ok
             };
             ToolEnvelope {
-                schema_version: 1,
+                schema_version: 2,
                 status,
                 data: Some(report),
                 freshness,
@@ -628,14 +626,14 @@ pub(super) fn admin_mutation_envelope<T>(
             |items| freshness_summary(&items),
         );
     ToolEnvelope {
-        schema_version: 1,
+        schema_version: 2,
         status: if freshness.overall == OverallFreshness::Fresh && audit_persisted {
             ToolStatus::Ok
         } else {
             ToolStatus::Degraded
         },
         data: Some(AdminAudit {
-            schema_version: 1,
+            schema_version: 2,
             operation: operation.to_owned(),
             workspace: workspace.to_owned(),
             mutated: true,
@@ -674,7 +672,7 @@ fn persist_admin_audit(
         .map_err(|error| format!("failed to timestamp administrative audit entry: {error}"))?
         .as_secs();
     let entry = json!({
-        "schema_version": 1,
+        "schema_version": 2,
         "timestamp_unix": timestamp,
         "workspace": workspace,
         "operation": operation,
@@ -762,10 +760,13 @@ pub(super) fn read_resource(
     database_path: &Path,
     workspace: &str,
     uri: &str,
+    policy: &code_system_graph_core::ExecutionPolicy,
 ) -> Result<String, ResourceError> {
+    let item_limit = usize::try_from(policy.max_mcp_resource_items)
+        .expect("validated policy count is usize-representable");
     let value = if uri == "code-system-graph://workspaces" {
         json!({
-            "schema_version": 1,
+            "schema_version": 2,
             "workspaces": [{"name": workspace, "configured": true}]
         })
     } else if let Some(path) = uri.strip_prefix("code-system-graph://workspace/") {
@@ -774,7 +775,7 @@ pub(super) fn read_resource(
             kind: ResourceErrorKind::Invalid,
             message,
         })?;
-        read_workspace_resource(database_path, workspace, resource)?
+        read_workspace_resource(database_path, workspace, resource, item_limit)?
     } else if let Some(evidence_id) = uri.strip_prefix("code-system-graph://evidence/") {
         read_evidence_resource(database_path, workspace, evidence_id)?
     } else {
@@ -785,17 +786,17 @@ pub(super) fn read_resource(
         message: format!("resource serialization failed: {error}"),
     })?;
     let maximum = if uri.ends_with("/schema") {
-        MAX_SCHEMA_RESOURCE_BYTES
+        usize::try_from(policy.max_mcp_schema_catalog_bytes)
+            .expect("validated policy bytes are usize-representable")
     } else {
-        MAX_RESOURCE_BYTES
+        usize::try_from(policy.max_mcp_resource_bytes)
+            .expect("validated policy bytes are usize-representable")
     };
-    if text.len() > maximum {
-        return Err(ResourceError {
-            kind: ResourceErrorKind::Internal,
-            message: format!("resource exceeds the {maximum}-byte response bound"),
-        });
-    }
-    Ok(text)
+    Ok(crate::agent_markdown::render_resource_json(
+        &text,
+        uri.ends_with("/schema"),
+        maximum,
+    ))
 }
 
 pub(super) fn schema_catalog() -> Value {
@@ -807,7 +808,7 @@ pub(super) fn schema_catalog() -> Value {
     insert_schema::<CommunitiesInput>(&mut schemas, "communities.input");
     insert_schema::<ToolEnvelope<CommunityReport>>(&mut schemas, "communities.result");
     insert_schema::<ExploreInput>(&mut schemas, "explore.input");
-    insert_schema::<ToolEnvelope<LocalContextResult>>(&mut schemas, "explore.result");
+    insert_schema::<ToolEnvelope<ExploreReport>>(&mut schemas, "explore.result");
     insert_schema::<ImpactRequest>(&mut schemas, "impact.input");
     insert_schema::<ToolEnvelope<ImpactReport>>(&mut schemas, "impact.result");
     insert_schema::<ChangesInput>(&mut schemas, "analyze_changes.input");
@@ -845,21 +846,21 @@ pub(super) fn schema_catalog() -> Value {
     let application_interfaces = public_schema_catalog().map_or_else(
         |error| {
             json!({
-                "schema_version": 1,
+                "schema_version": 2,
                 "error": error.to_string()
             })
         },
         |catalog| {
             serde_json::to_value(catalog).unwrap_or_else(|error| {
                 json!({
-                    "schema_version": 1,
+                    "schema_version": 2,
                     "error": error.to_string()
                 })
             })
         },
     );
     json!({
-        "schema_version": 1,
+        "schema_version": 2,
         "media_type": "application/schema+json",
         "schemas": schemas,
         "application_interfaces": application_interfaces
@@ -870,6 +871,7 @@ fn read_workspace_resource(
     database_path: &Path,
     workspace: &str,
     resource: &str,
+    item_limit: usize,
 ) -> Result<Value, ResourceError> {
     if resource == "schema" {
         return Ok(schema_catalog());
@@ -881,7 +883,7 @@ fn read_workspace_resource(
                 .current_snapshot_summary(workspace)
                 .map_err(internal_store)?;
             Ok(json!({
-                "schema_version": 1,
+                "schema_version": 2,
                 "workspace": workspace,
                 "snapshot": {
                     "id": summary.snapshot_id,
@@ -895,7 +897,7 @@ fn read_workspace_resource(
             let (status, freshness) =
                 load_status(database_path, workspace).map_err(internal_message)?;
             Ok(json!({
-                "schema_version": 1,
+                "schema_version": 2,
                 "status": status,
                 "freshness": freshness
             }))
@@ -907,19 +909,21 @@ fn read_workspace_resource(
             let repositories = registry
                 .repositories
                 .iter()
-                .take(MAX_PAGE_SIZE)
+                .take(item_limit)
                 .map(repository_view)
                 .collect::<Vec<_>>();
             Ok(json!({
-                "schema_version": 1,
+                "schema_version": 2,
                 "workspace": workspace,
                 "total": registry.repositories.len(),
-                "truncated": registry.repositories.len() > MAX_PAGE_SIZE,
+                "truncated": registry.repositories.len() > item_limit,
                 "repositories": repositories
             }))
         }
-        "services" => node_resource(&store, workspace, |kind| kind == NodeKind::Service),
-        "contracts" => node_resource(&store, workspace, is_contract),
+        "services" => node_resource(&store, workspace, item_limit, |kind| {
+            kind == NodeKind::Service
+        }),
+        "contracts" => node_resource(&store, workspace, item_limit, is_contract),
         "communities" => {
             let snapshot = store
                 .load_current_community_snapshot(workspace)
@@ -928,16 +932,16 @@ fn read_workspace_resource(
             let communities = snapshot
                 .communities
                 .into_iter()
-                .take(MAX_PAGE_SIZE)
+                .take(item_limit)
                 .collect::<Vec<Community>>();
             Ok(json!({
-                "schema_version": 1,
+                "schema_version": 2,
                 "workspace": workspace,
                 "snapshot_id": snapshot.snapshot_id,
                 "engine_version": snapshot.engine_version,
                 "config": snapshot.config,
                 "total": total,
-                "truncated": total > MAX_PAGE_SIZE,
+                "truncated": total > item_limit,
                 "communities": communities
             }))
         }
@@ -950,11 +954,11 @@ fn read_workspace_resource(
                 .map_err(internal_store)?;
             let run_total = runs.len();
             Ok(json!({
-                "schema_version": 1,
+                "schema_version": 2,
                 "workspace": workspace,
                 "run_total": run_total,
-                "truncated": run_total > MAX_PAGE_SIZE,
-                "runs": runs.into_iter().take(MAX_PAGE_SIZE).collect::<Vec<_>>(),
+                "truncated": run_total > item_limit,
+                "runs": runs.into_iter().take(item_limit).collect::<Vec<_>>(),
                 "freshness": freshness_summary(&freshness)
             }))
         }
@@ -993,7 +997,7 @@ fn read_evidence_resource(
             message: format!("evidence `{evidence_id}` was not found in workspace `{workspace}`"),
         })?;
     Ok(json!({
-        "schema_version": 1,
+        "schema_version": 2,
         "workspace": workspace,
         "evidence": evidence
     }))
@@ -1002,6 +1006,7 @@ fn read_evidence_resource(
 fn node_resource(
     store: &SqliteStore,
     workspace: &str,
+    item_limit: usize,
     predicate: impl Fn(NodeKind) -> bool,
 ) -> Result<Value, ResourceError> {
     let (nodes, _) = store
@@ -1013,11 +1018,11 @@ fn node_resource(
         .collect::<Vec<_>>();
     let total = selected.len();
     Ok(json!({
-        "schema_version": 1,
+        "schema_version": 2,
         "workspace": workspace,
         "total": total,
-        "truncated": total > MAX_PAGE_SIZE,
-        "entities": selected.into_iter().take(MAX_PAGE_SIZE).collect::<Vec<_>>()
+        "truncated": total > item_limit,
+        "entities": selected.into_iter().take(item_limit).collect::<Vec<_>>()
     }))
 }
 
@@ -1134,7 +1139,7 @@ fn insert_schema<T: JsonSchema>(catalog: &mut BTreeMap<String, Value>, name: &st
 
 fn error_envelope<T>(reason: &str, error: impl std::fmt::Display) -> ToolEnvelope<T> {
     ToolEnvelope {
-        schema_version: 1,
+        schema_version: 2,
         status: ToolStatus::Error,
         data: None,
         freshness: FreshnessSummary {
