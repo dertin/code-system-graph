@@ -14,7 +14,7 @@ use code_system_graph_store_sqlite::{SqliteStore, StoreLock};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
-    CallToolResult, ContentBlock, Implementation, ListResourcesResult, PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult, Resource, ResourceContents, ServerCapabilities, ServerInfo
+    CallToolResult, ContentBlock, Implementation, ListResourceTemplatesResult, ListResourcesResult, PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult, Resource, ResourceContents, ResourceTemplate, ServerCapabilities, ServerInfo
 };
 use rmcp::service::{RequestContext, RoleServer};
 use rmcp::{ErrorData as McpError, ServerHandler, tool, tool_handler, tool_router};
@@ -27,7 +27,7 @@ use crate::{
 mod mcp_support;
 
 use mcp_support::{
-    ADMIN_TOOL_NAMES, AdminAudit, CacheCleanInput, CacheCleanReport, CommunitiesInput, ContractsInput, GraphStatusReport, MARKDOWN_MIME_TYPE, ManifestAdminReport, ManualLinkWriteInput, ResourceErrorKind, SourceContextInput, SourceContextReport, WorkspaceInput, WorkspaceUpdateInput, admin_audit_envelope, admin_mutation_envelope, configured_manifest_path, contracts_envelope, read_resource, resource_uris, source_context_envelope, status_envelope
+    ADMIN_TOOL_NAMES, AdminAudit, CacheCleanInput, CacheCleanReport, CommunitiesInput, ContractsInput, GraphStatusReport, MARKDOWN_MIME_TYPE, ManifestAdminReport, ManualLinkWriteInput, ResourceErrorKind, SourceContextInput, SourceContextReport, WorkspaceInput, WorkspaceUpdateInput, admin_audit_envelope, admin_mutation_envelope, configured_manifest_path, contracts_envelope, read_resource, resource_templates, resource_uris, source_context_envelope, status_envelope
 };
 
 const EXPLORE_TOOL_NAME: &str = "explore";
@@ -833,6 +833,22 @@ impl ServerHandler for CodeSystemGraphServer {
         Ok(ListResourcesResult::with_all_items(resources).with_ttl_ms(1_000))
     }
 
+    async fn list_resource_templates(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListResourceTemplatesResult, McpError> {
+        let templates = resource_templates()
+            .into_iter()
+            .map(|(uri, name, description)| {
+                ResourceTemplate::new(uri, name)
+                    .with_description(description)
+                    .with_mime_type(MARKDOWN_MIME_TYPE)
+            })
+            .collect();
+        Ok(ListResourceTemplatesResult::with_all_items(templates).with_ttl_ms(1_000))
+    }
+
     async fn read_resource(
         &self,
         request: ReadResourceRequestParams,
@@ -1127,10 +1143,14 @@ mod tests {
             .map(|(uri, _, _)| uri)
             .collect::<Vec<_>>();
 
-        assert_eq!(uris.len(), 10);
+        assert_eq!(uris.len(), 9);
         assert!(uris.contains(&"code-system-graph://workspaces".to_owned()));
         assert!(uris.contains(&"code-system-graph://workspace/commerce/schema".to_owned()));
-        assert!(uris.contains(&"code-system-graph://evidence/{id}".to_owned()));
+        assert!(!uris.iter().any(|uri| uri.contains("{id}")));
+
+        let templates = mcp_support::resource_templates();
+        assert_eq!(templates.len(), 1);
+        assert_eq!(templates[0].0, "code-system-graph://evidence/{id}");
     }
 
     #[test]

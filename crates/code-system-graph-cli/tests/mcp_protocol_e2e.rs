@@ -82,6 +82,24 @@ async fn stdio_should_initialize_without_noise_and_hide_admin_tools() -> anyhow:
     let resources = service.list_all_resources().await?;
     let schema_uri = "code-system-graph://workspace/commerce-platform/schema";
     assert!(resources.iter().any(|resource| resource.uri == schema_uri));
+    assert!(
+        !resources
+            .iter()
+            .any(|resource| resource.uri.contains("{id}"))
+    );
+    let templates = service.list_all_resource_templates().await?;
+    let evidence_template = templates
+        .iter()
+        .find(|template| template.name == "evidence-metadata")
+        .ok_or_else(|| anyhow::anyhow!("evidence resource template"))?;
+    assert_eq!(
+        evidence_template.uri_template,
+        "code-system-graph://evidence/{id}"
+    );
+    assert_eq!(
+        evidence_template.mime_type.as_deref(),
+        Some("text/markdown")
+    );
     let schema = service
         .read_resource(ReadResourceRequestParams::new(schema_uri))
         .await?;

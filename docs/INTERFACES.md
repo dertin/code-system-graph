@@ -44,6 +44,9 @@ Stable resources:
 - `code-system-graph://workspace/{name}/communities`
 - `code-system-graph://workspace/{name}/schema`
 - `code-system-graph://workspace/{name}/coverage`
+
+Resource template, advertised through `resources/templates/list`:
+
 - `code-system-graph://evidence/{id}`
 
 The server rejects resource access outside its configured workspace. Lists and resource payloads

@@ -253,13 +253,15 @@ pub(crate) fn resource_uris(workspace: &str) -> Vec<(String, String, String)> {
             "workspace-coverage".to_owned(),
             "Bounded extractor and freshness coverage metadata.".to_owned(),
         ),
-        (
-            "code-system-graph://evidence/{id}".to_owned(),
-            "evidence-metadata".to_owned(),
-            "Template URI for one evidence metadata record; replace {id} with its stable ID."
-                .to_owned(),
-        ),
     ]
+}
+
+pub(crate) fn resource_templates() -> Vec<(String, String, String)> {
+    vec![(
+        "code-system-graph://evidence/{id}".to_owned(),
+        "evidence-metadata".to_owned(),
+        "One bounded evidence metadata record selected by stable ID.".to_owned(),
+    )]
 }
 
 pub(crate) fn read_resource(

@@ -21,7 +21,7 @@ use crate::{
 
 mod resources;
 
-pub(super) use resources::{ResourceErrorKind, read_resource, resource_uris};
+pub(super) use resources::{ResourceErrorKind, read_resource, resource_templates, resource_uris};
 
 pub(super) const ADMIN_TOOL_NAMES: [&str; 5] = [
     "scan",

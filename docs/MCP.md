@@ -107,12 +107,13 @@ responses are discarded.
 
 ## Resources and schemas
 
-The server publishes bounded `code-system-graph://workspaces`, workspace overview, status, repository,
-service, contract, community, coverage, schema-catalog, and exact evidence-metadata resources.
-Resource templates reject access to another workspace. Every resource uses `text/markdown`; the
-schema catalog embeds each generated JSON Schema in a closed fenced `json` block. Resource item
-and byte limits come from the immutable workspace policy. Every resource collection reports its
-`total`, retained count, and truncation state in Markdown; status, coverage, and freshness use
+The server publishes bounded `code-system-graph://workspaces`, workspace overview, status,
+repository, service, contract, community, coverage, and schema-catalog resources. Exact evidence
+metadata is discoverable through the `code-system-graph://evidence/{id}` resource template and is
+read only after substituting a concrete stable ID. Every resource uses `text/markdown`; the schema
+catalog embeds each generated JSON Schema in a closed fenced `json` block. Resource item and byte
+limits come from the immutable workspace policy. Every resource collection reports its `total`,
+retained count, and truncation state in Markdown; status, coverage, and freshness use
 collection-specific names for the same metadata.
 
 ## Administrative profile

@@ -155,6 +155,7 @@ fn select_explore_anchors(symbols: &[ResolvedSymbol], maximum: usize) -> Vec<Res
 fn explore_next_actions(
     workspace: &str,
     repository: &RepositoryRecord,
+    query: &str,
     handoffs: &[ExploreFederatedHandoff],
     policy: &ExecutionPolicy,
 ) -> Vec<AgentNextAction> {
@@ -180,6 +181,7 @@ fn explore_next_actions(
             arguments: BTreeMap::from([
                 ("workspace".to_owned(), workspace.to_owned()),
                 ("repository".to_owned(), repository.alias.clone()),
+                ("query".to_owned(), query.to_owned()),
             ]),
             rationale:
                 "Refine the local source question while retaining the selected repository scope."
@@ -882,7 +884,13 @@ pub async fn explore_repository(
         &mut ledger,
     )
     .await;
-    let next_actions = explore_next_actions(workspace, &repository, &federated_handoffs, policy);
+    let next_actions = explore_next_actions(
+        workspace,
+        &repository,
+        &input.query,
+        &federated_handoffs,
+        policy,
+    );
     let shutdown = provider.shutdown().await;
     if let Err(error) = shutdown {
         ledger

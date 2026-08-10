@@ -3,10 +3,31 @@
 use code_system_graph_core::{
     LocalNeighbor, LocalNeighborDirection, LocalNeighborResult, ProviderError, ProviderExecution, ProviderTransport
 };
+use code_system_graph_model::{
+    CheckoutId, NativePath, NativePathEncoding, RepoId, RepositoryRecord
+};
 
 use super::{
-    ExploreBudgetLedger, ExploreNeighborLimits, ExploreProviderData, record_explore_neighbor_results
+    ExploreBudgetLedger, ExploreNeighborLimits, ExploreProviderData, explore_next_actions, record_explore_neighbor_results
 };
+
+fn repository() -> RepositoryRecord {
+    RepositoryRecord {
+        id: RepoId::new("repo:api"),
+        checkout_id: CheckoutId::new("checkout:api"),
+        alias: "api".to_owned(),
+        canonical_path: NativePath {
+            encoding: NativePathEncoding::Utf8,
+            bytes: b"/api".to_vec(),
+            display: "/api".to_owned(),
+        },
+        git_common_dir: None,
+        normalized_remote: None,
+        head_commit: None,
+        is_linked_worktree: false,
+        working_tree_dirty: false,
+    }
+}
 
 fn neighbor_result(direction: LocalNeighborDirection) -> LocalNeighborResult {
     LocalNeighborResult {
@@ -110,6 +131,30 @@ fn arbitrary_markdown_should_not_form_fallback_anchors() {
         5,
     );
     assert_eq!(anchors, [] as [code_system_graph_core::ResolvedSymbol; 0]);
+}
+
+#[test]
+fn explore_follow_up_should_retain_the_required_query() {
+    let actions = explore_next_actions(
+        "commerce",
+        &repository(),
+        "create_order callers",
+        &[],
+        &code_system_graph_core::ExecutionPolicy::default(),
+    );
+    let action = actions
+        .iter()
+        .find(|action| action.tool == "explore")
+        .expect("Explore should advertise one scoped follow-up");
+
+    assert_eq!(
+        action.arguments.get("query").map(String::as_str),
+        Some("create_order callers")
+    );
+    assert_eq!(
+        action.arguments.get("repository").map(String::as_str),
+        Some("api")
+    );
 }
 
 #[tokio::test]
