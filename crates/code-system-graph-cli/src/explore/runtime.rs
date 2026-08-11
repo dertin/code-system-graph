@@ -133,6 +133,10 @@ where
     T: Send + 'static,
     F: FnOnce() -> Result<T, String> + Send + 'static,
 {
+    if context.expired() {
+        context.cancellation.cancel();
+        return Err(ExploreBlockingError::Deadline);
+    }
     let permit =
         match tokio::time::timeout_at(context.deadline, explore_blocking_permits().acquire_owned())
             .await
@@ -144,6 +148,10 @@ where
                 return Err(ExploreBlockingError::Deadline);
             }
         };
+    if context.expired() {
+        context.cancellation.cancel();
+        return Err(ExploreBlockingError::Deadline);
+    }
     let task = tokio::task::spawn_blocking(move || {
         let _permit = permit;
         operation()
