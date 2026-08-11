@@ -34,7 +34,7 @@ use tokio_util::sync::CancellationToken;
 use tower_http::sensitive_headers::SetSensitiveRequestHeadersLayer;
 
 use crate::{
-    ApplicationError, CODEGRAPH_DISABLED_CODE, CODEGRAPH_DISABLED_MESSAGE, ChangesInput, CommunityInput, CommunityReport, ExploreInput, ExploreReport, SearchInput, TraceInput, analyze_workspace_changes, communities_workspace, explore_repository, impact_workspace, impact_workspace_with_codegraph, search_workspace_with_policy, status_workspace, trace_workspace
+    ApplicationError, CODEGRAPH_DISABLED_CODE, CODEGRAPH_DISABLED_MESSAGE, ChangesInput, CommunityInput, CommunityReport, ExploreInput, ExploreReport, QueryActionCapabilities, SearchInput, TraceInput, analyze_workspace_changes, communities_workspace, explore_repository, impact_workspace, impact_workspace_with_codegraph, search_workspace_for_delivery, status_workspace, trace_workspace
 };
 
 /// Default loopback address used by optional HTTP delivery.
@@ -558,11 +558,15 @@ async fn query(
     let config = Arc::clone(&state.config);
     tool_service_response(
         run_blocking(move || {
-            search_workspace_with_policy(
+            search_workspace_for_delivery(
                 &config.database_path,
                 &config.workspace,
                 &input,
                 &config.execution_policy,
+                QueryActionCapabilities {
+                    source_context: false,
+                    explore: config.codegraph_enabled,
+                },
             )
         })
         .await,
@@ -681,11 +685,15 @@ async fn contracts(
     };
     let config = Arc::clone(&state.config);
     let result: Result<ToolEnvelope<SearchReport>, ToolFailure> = run_blocking(move || {
-        search_workspace_with_policy(
+        search_workspace_for_delivery(
             &config.database_path,
             &config.workspace,
             &search,
             &config.execution_policy,
+            QueryActionCapabilities {
+                source_context: false,
+                explore: config.codegraph_enabled,
+            },
         )
     })
     .await;

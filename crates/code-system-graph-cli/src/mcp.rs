@@ -20,7 +20,7 @@ use rmcp::service::{RequestContext, RoleServer};
 use rmcp::{ErrorData as McpError, ServerHandler, tool, tool_handler, tool_router};
 
 use crate::{
-    CODEGRAPH_DISABLED_CODE, CODEGRAPH_DISABLED_MESSAGE, ChangesInput, CommunityReport, ExploreInput, PullRequestInput, ScanOverrides, SearchInput, TraceInput, add_manual_link_to_manifest, add_repository_to_manifest, analyze_workspace_changes, communities_workspace, explore_repository, impact_workspace, impact_workspace_with_codegraph, inspect_pull_request, remove_repository_from_manifest, scan_workspace_with_overrides, search_workspace_with_policy, trace_workspace
+    CODEGRAPH_DISABLED_CODE, CODEGRAPH_DISABLED_MESSAGE, ChangesInput, CommunityReport, ExploreInput, PullRequestInput, QueryActionCapabilities, ScanOverrides, SearchInput, TraceInput, add_manual_link_to_manifest, add_repository_to_manifest, analyze_workspace_changes, communities_workspace, explore_repository, impact_workspace, impact_workspace_with_codegraph, inspect_pull_request, remove_repository_from_manifest, scan_workspace_with_overrides, search_workspace_for_delivery, trace_workspace
 };
 
 #[path = "mcp_support/mod.rs"]
@@ -234,11 +234,15 @@ impl CodeSystemGraphServer {
         )
     )]
     pub async fn query(&self, Parameters(input): Parameters<SearchInput>) -> CallToolResult {
-        let envelope = match search_workspace_with_policy(
+        let envelope = match search_workspace_for_delivery(
             &self.database_path,
             &self.workspace,
             &input,
             &self.execution_policy,
+            QueryActionCapabilities {
+                source_context: true,
+                explore: self.codegraph.enabled,
+            },
         ) {
             Ok(envelope) => envelope,
             Err(error) => error_envelope("Query inputs could not be validated.", error),
@@ -885,12 +889,20 @@ mod tests {
     use code_system_graph_core::ExecutionPolicy;
     use code_system_graph_store_sqlite::SqliteStore;
     use rmcp::ServerHandler;
-    #[cfg(unix)]
     use rmcp::handler::server::wrapper::Parameters;
+    use rmcp::model::ContentBlock;
 
     use super::{AgentToolResult, CodeSystemGraphServer, mcp_support};
     #[cfg(unix)]
-    use crate::{CODEGRAPH_DISABLED_CODE, ExploreInput, scan_workspace};
+    use crate::{CODEGRAPH_DISABLED_CODE, ExploreInput};
+    use crate::{SearchInput, scan_workspace};
+
+    fn tool_text(result: &rmcp::model::CallToolResult) -> &str {
+        match result.content.first() {
+            Some(ContentBlock::Text(content)) => &content.text,
+            _ => panic!("tool result did not contain one text block"),
+        }
+    }
 
     #[test]
     fn server_should_publish_read_only_tools() {
@@ -1021,6 +1033,43 @@ mod tests {
                 .iter()
                 .any(|tool| tool.name == "explore")
         );
+    }
+
+    #[tokio::test]
+    async fn query_actions_should_match_mcp_codegraph_capability()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temporary = tempfile::tempdir()?;
+        let database = temporary.path().join("graph.db");
+        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/platform-demo/code-system-graph.yaml");
+        scan_workspace(&manifest, &database)?;
+        let disabled = CodeSystemGraphServer::new(database.clone(), "commerce-platform".to_owned());
+        let enabled = disabled.clone().with_codegraph(true, None);
+        let input = |query: &str| SearchInput {
+            query: query.to_owned(),
+            node_kinds: Vec::new(),
+            repo_ids: Vec::new(),
+            service_ids: Vec::new(),
+            community_ids: Vec::new(),
+            offset: 0,
+            limit: 5,
+        };
+
+        let hit = disabled.query(Parameters(input("orders"))).await;
+        assert!(tool_text(&hit).contains("source\\_context"));
+
+        let missing = disabled
+            .query(Parameters(input("api source_literal_that_does_not_exist")))
+            .await;
+        assert!(!tool_text(&missing).contains("\nexplore\n"));
+        assert!(!tool_text(&missing).contains("use Explore"));
+
+        let enabled_missing = enabled
+            .query(Parameters(input("api source_literal_that_does_not_exist")))
+            .await;
+        assert!(tool_text(&enabled_missing).contains("\nexplore\n"));
+        assert!(tool_text(&enabled_missing).contains("use Explore"));
+        Ok(())
     }
 
     #[cfg(unix)]

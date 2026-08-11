@@ -1805,11 +1805,38 @@ pub fn search_workspace_with_policy(
     input: &SearchInput,
     policy: &ExecutionPolicy,
 ) -> Result<ToolEnvelope<SearchReport>, ApplicationError> {
+    search_workspace_for_delivery(
+        database_path,
+        workspace,
+        input,
+        policy,
+        QueryActionCapabilities::NONE,
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub(crate) struct QueryActionCapabilities {
+    pub(crate) source_context: bool,
+    pub(crate) explore: bool,
+}
+
+impl QueryActionCapabilities {
+    const NONE: Self = Self {
+        source_context: false,
+        explore: false,
+    };
+}
+
+pub(crate) fn search_workspace_for_delivery(
+    database_path: &Path,
+    workspace: &str,
+    input: &SearchInput,
+    policy: &ExecutionPolicy,
+    action_capabilities: QueryActionCapabilities,
+) -> Result<ToolEnvelope<SearchReport>, ApplicationError> {
     let store = SqliteStore::open_read_only(database_path)?;
     let snapshot = store.current_snapshot_summary(workspace)?;
-    let input_json = serde_json::to_vec(&(input, policy.agent_delivery_fingerprint()))
-        .map_err(|error| ApplicationError::Initialization(error.to_string()))?;
-    let input_fingerprint = stable_id_bytes("query-cache", &input_json);
+    let input_fingerprint = query_cache_fingerprint(input, policy, action_capabilities)?;
     let now_unix_ms = current_unix_millis();
     if let Some(cached) = store.load_query_cache(
         workspace,
@@ -1854,12 +1881,22 @@ pub fn search_workspace_with_policy(
     };
     let mut report = search(&nodes, &request)?;
     let registry = store.load_workspace_registry(workspace)?;
-    report.next_actions = query_next_actions(workspace, input, &report, &registry, policy);
+    report.next_actions = query_next_actions(
+        workspace,
+        input,
+        &report,
+        &registry,
+        policy,
+        action_capabilities,
+    );
     if report.hits.is_empty() {
-        report.coverage.gaps.push(
+        report.coverage.gaps.push(if action_capabilities.explore {
             "Query searches persisted architecture entities and contracts, not source-code bodies; use Explore for implementation text."
-                .to_owned(),
-        );
+                .to_owned()
+        } else {
+            "Query searches persisted architecture entities and contracts, not source-code bodies; source exploration is unavailable in this delivery profile."
+                .to_owned()
+        });
     }
     let status = if report.coverage.gaps.is_empty() && freshness.overall == OverallFreshness::Fresh
     {
@@ -1894,31 +1931,47 @@ pub fn search_workspace_with_policy(
     Ok(envelope)
 }
 
+fn query_cache_fingerprint(
+    input: &SearchInput,
+    policy: &ExecutionPolicy,
+    capabilities: QueryActionCapabilities,
+) -> Result<String, ApplicationError> {
+    let input_json =
+        serde_json::to_vec(&(input, policy.agent_delivery_fingerprint(), capabilities))
+            .map_err(|error| ApplicationError::Initialization(error.to_string()))?;
+    Ok(stable_id_bytes("query-cache", &input_json))
+}
+
 fn query_next_actions(
     workspace: &str,
     input: &SearchInput,
     report: &SearchReport,
     registry: &WorkspaceRecord,
     policy: &ExecutionPolicy,
+    capabilities: QueryActionCapabilities,
 ) -> Vec<AgentNextAction> {
     let maximum = usize::try_from(policy.max_agent_next_actions_per_response)
         .expect("validated policy count is usize-representable");
     let repository_maximum = usize::try_from(policy.max_query_repository_suggestions)
         .expect("validated policy count is usize-representable");
-    let mut actions = report
-        .hits
-        .iter()
-        .take(maximum)
-        .map(|hit| AgentNextAction {
-            tool: "source_context".to_owned(),
-            arguments: BTreeMap::from([
-                ("workspace".to_owned(), workspace.to_owned()),
-                ("node_id".to_owned(), hit.node.id.as_str().to_owned()),
-            ]),
-            rationale: format!("Inspect persisted evidence for `{}`.", hit.node.label),
-        })
-        .collect::<Vec<_>>();
-    if report.hits.is_empty() {
+    let mut actions = if capabilities.source_context {
+        report
+            .hits
+            .iter()
+            .take(maximum)
+            .map(|hit| AgentNextAction {
+                tool: "source_context".to_owned(),
+                arguments: BTreeMap::from([
+                    ("workspace".to_owned(), workspace.to_owned()),
+                    ("node_id".to_owned(), hit.node.id.as_str().to_owned()),
+                ]),
+                rationale: format!("Inspect persisted evidence for `{}`.", hit.node.label),
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    if report.hits.is_empty() && capabilities.explore {
         let normalized = input.query.to_lowercase();
         actions.extend(
             registry
