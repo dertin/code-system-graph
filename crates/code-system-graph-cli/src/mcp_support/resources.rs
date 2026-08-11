@@ -2,13 +2,12 @@
 
 use std::path::Path;
 
-use code_system_graph_model::{
-    Community, CommunityConfig, Evidence, ExtractorRun, FreshnessSummary, Node, NodeKind, OverallFreshness, RepositoryRecord
-};
 #[cfg(test)]
-use code_system_graph_model::{RepoFreshness, RepoFreshnessState};
+use code_system_graph_model::RepoFreshnessState;
+use code_system_graph_model::{
+    Community, CommunityAlgorithm, CommunityConfig, CommunityEdgeWeight, CommunityId, CommunityLabelEvidence, CommunityMetrics, CommunityScope, Evidence, ExtractorRun, FreshnessSummary, Node, NodeId, NodeKind, OverallFreshness, RepoFreshness, RepoId, RepositoryRecord
+};
 use code_system_graph_store_sqlite::{SqliteStore, StoreError};
-use serde::Serialize;
 use serde_json::{Value, json};
 
 #[cfg(test)]
@@ -16,13 +15,15 @@ use super::SnapshotMetrics;
 use super::{
     GraphStatusReport, freshness_summary, load_status, schema_catalog, validate_workspace
 };
+use crate::agent_markdown::MarkdownDocument;
 
-struct BoundedItems<T> {
+#[derive(Debug)]
+struct BoundedCollection<T> {
     total: usize,
     items: Vec<T>,
 }
 
-impl<T> BoundedItems<T> {
+impl<T> BoundedCollection<T> {
     fn retained(&self) -> usize {
         self.items.len()
     }
@@ -32,16 +33,19 @@ impl<T> BoundedItems<T> {
     }
 }
 
-fn bounded_items<T>(items: impl IntoIterator<Item = T>, item_limit: usize) -> BoundedItems<T> {
+fn bounded_collection<T>(
+    items: impl IntoIterator<Item = T>,
+    item_limit: usize,
+) -> BoundedCollection<T> {
     let items = items.into_iter().collect::<Vec<_>>();
     let total = items.len();
-    BoundedItems {
+    BoundedCollection {
         total,
         items: items.into_iter().take(item_limit).collect(),
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug)]
 struct RepositoryView {
     id: String,
     checkout_id: String,
@@ -52,22 +56,19 @@ struct RepositoryView {
     working_tree_dirty: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug)]
 struct WorkspaceResourceItem {
     name: String,
     configured: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug)]
 struct WorkspacesResource {
     schema_version: u32,
-    total: usize,
-    retained: usize,
-    truncated: bool,
-    workspaces: Vec<WorkspaceResourceItem>,
+    workspaces: BoundedCollection<WorkspaceResourceItem>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug)]
 struct OverviewSnapshot {
     id: String,
     nodes: usize,
@@ -75,81 +76,87 @@ struct OverviewSnapshot {
     evidence: usize,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug)]
 struct OverviewResource {
     schema_version: u32,
     workspace: String,
     snapshot: OverviewSnapshot,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug)]
 struct FreshnessResource {
     overall: OverallFreshness,
-    stale_repository_total: usize,
-    stale_repository_retained: usize,
-    stale_repositories_truncated: bool,
-    stale_repositories: Vec<code_system_graph_model::RepoId>,
-    reason_total: usize,
-    reason_retained: usize,
-    reasons_truncated: bool,
-    reasons: Vec<String>,
+    stale_repositories: BoundedCollection<RepoId>,
+    reasons: BoundedCollection<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug)]
 struct StatusResource {
     schema_version: u32,
     status: GraphStatusReport,
-    repository_total: usize,
-    repository_retained: usize,
-    repositories_truncated: bool,
+    repositories: BoundedCollection<RepoFreshness>,
     freshness: FreshnessResource,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug)]
 struct RepositoriesResource {
     schema_version: u32,
     workspace: String,
-    total: usize,
-    retained: usize,
-    truncated: bool,
-    repositories: Vec<RepositoryView>,
+    repositories: BoundedCollection<RepositoryView>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug)]
 struct EntitiesResource {
     schema_version: u32,
     workspace: String,
-    total: usize,
-    retained: usize,
-    truncated: bool,
-    entities: Vec<Node>,
+    entities: BoundedCollection<Node>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug)]
+struct CommunityConfigView {
+    algorithm: CommunityAlgorithm,
+    scope: CommunityScope,
+    seed: u64,
+    resolution: f64,
+    minimum_confidence: f32,
+    edge_weights: BoundedCollection<CommunityEdgeWeight>,
+    max_iterations: u32,
+}
+
+#[derive(Debug)]
+struct CommunityView {
+    id: CommunityId,
+    label: String,
+    members: BoundedCollection<NodeId>,
+    central_nodes: BoundedCollection<NodeId>,
+    repositories: BoundedCollection<RepoId>,
+    services: BoundedCollection<NodeId>,
+    inbound_contracts: BoundedCollection<NodeId>,
+    outbound_contracts: BoundedCollection<NodeId>,
+    metrics: CommunityMetrics,
+    label_evidence: BoundedCollection<CommunityLabelEvidence>,
+    limitations: BoundedCollection<String>,
+}
+
+#[derive(Debug)]
 struct CommunitiesResource {
     schema_version: u32,
     workspace: String,
     snapshot_id: String,
     engine_version: String,
-    config: CommunityConfig,
-    total: usize,
-    retained: usize,
-    truncated: bool,
-    communities: Vec<Community>,
+    config: CommunityConfigView,
+    communities: BoundedCollection<CommunityView>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug)]
 struct CoverageResource {
     schema_version: u32,
     workspace: String,
-    run_total: usize,
-    run_retained: usize,
-    runs_truncated: bool,
-    runs: Vec<ExtractorRun>,
+    runs: BoundedCollection<ExtractorRun>,
     freshness: FreshnessResource,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug)]
 struct EvidenceResource {
     schema_version: u32,
     workspace: String,
@@ -172,25 +179,210 @@ enum ResourceDocument {
 impl ResourceDocument {
     fn render(&self, maximum: usize) -> String {
         match self {
-            Self::Workspaces(resource) => crate::agent_markdown::render_resource(resource, maximum),
-            Self::Overview(resource) => crate::agent_markdown::render_resource(resource, maximum),
-            Self::Status(resource) => crate::agent_markdown::render_resource(resource, maximum),
-            Self::Repositories(resource) => {
-                crate::agent_markdown::render_resource(resource, maximum)
-            }
-            Self::Services(resource) | Self::Contracts(resource) => {
-                crate::agent_markdown::render_resource(resource, maximum)
-            }
-            Self::Communities(resource) => {
-                crate::agent_markdown::render_resource(resource, maximum)
-            }
-            Self::Coverage(resource) => crate::agent_markdown::render_resource(resource, maximum),
-            Self::Evidence(resource) => crate::agent_markdown::render_resource(resource, maximum),
+            Self::Workspaces(resource) => render_workspaces(resource, maximum),
+            Self::Overview(resource) => render_overview(resource, maximum),
+            Self::Status(resource) => render_status(resource, maximum),
+            Self::Repositories(resource) => render_repositories(resource, maximum),
+            Self::Services(resource) => render_entities("Workspace services", resource, maximum),
+            Self::Contracts(resource) => render_entities("Workspace contracts", resource, maximum),
+            Self::Communities(resource) => render_communities(resource, maximum),
+            Self::Coverage(resource) => render_coverage(resource, maximum),
+            Self::Evidence(resource) => render_evidence(resource, maximum),
             Self::SchemaCatalog(resource) => {
                 crate::agent_markdown::render_schema_catalog(resource, maximum)
             }
         }
     }
+}
+
+fn render_workspaces(resource: &WorkspacesResource, maximum: usize) -> String {
+    let mut document = MarkdownDocument::resource("Configured workspaces", resource.schema_version);
+    render_collection_items(
+        &mut document,
+        "Workspaces",
+        &resource.workspaces,
+        |document, index, workspace| {
+            document.text(&format!("Workspace {} name", index + 1), &workspace.name);
+            document.scalar(
+                &format!("Workspace {} configured", index + 1),
+                workspace.configured,
+            );
+        },
+    );
+    document.render(maximum)
+}
+
+fn render_overview(resource: &OverviewResource, maximum: usize) -> String {
+    let mut document = MarkdownDocument::resource("Workspace overview", resource.schema_version);
+    document.text("Workspace", &resource.workspace);
+    document.text("Snapshot", &resource.snapshot.id);
+    document.scalar("Nodes", resource.snapshot.nodes);
+    document.scalar("Edges", resource.snapshot.edges);
+    document.scalar("Evidence", resource.snapshot.evidence);
+    document.render(maximum)
+}
+
+fn render_status(resource: &StatusResource, maximum: usize) -> String {
+    let mut document = MarkdownDocument::resource("Workspace status", resource.schema_version);
+    document.text("Workspace", &resource.status.workspace);
+    document.scalar("Database schema", resource.status.schema_version);
+    document.scalar("Integrity ok", resource.status.integrity_ok);
+    document.debug("Snapshot", &resource.status.snapshot);
+    render_collection(&mut document, "Repositories", &resource.repositories);
+    render_freshness(&mut document, &resource.freshness);
+    document.render(maximum)
+}
+
+fn render_repositories(resource: &RepositoriesResource, maximum: usize) -> String {
+    let mut document =
+        MarkdownDocument::resource("Workspace repositories", resource.schema_version);
+    document.text("Workspace", &resource.workspace);
+    render_collection_items(
+        &mut document,
+        "Repositories",
+        &resource.repositories,
+        |document, index, repository| {
+            let prefix = format!("Repository {}", index + 1);
+            document.text(&format!("{prefix} id"), &repository.id);
+            document.text(&format!("{prefix} checkout"), &repository.checkout_id);
+            document.text(&format!("{prefix} alias"), &repository.alias);
+            document.debug(&format!("{prefix} remote"), &repository.normalized_remote);
+            document.debug(&format!("{prefix} head"), &repository.head_commit);
+            document.scalar(
+                &format!("{prefix} linked worktree"),
+                repository.linked_worktree,
+            );
+            document.scalar(&format!("{prefix} dirty"), repository.working_tree_dirty);
+        },
+    );
+    document.render(maximum)
+}
+
+fn render_entities(name: &str, resource: &EntitiesResource, maximum: usize) -> String {
+    let mut document = MarkdownDocument::resource(name, resource.schema_version);
+    document.text("Workspace", &resource.workspace);
+    render_collection(&mut document, "Entities", &resource.entities);
+    document.render(maximum)
+}
+
+fn render_communities(resource: &CommunitiesResource, maximum: usize) -> String {
+    let mut document = MarkdownDocument::resource("Workspace communities", resource.schema_version);
+    document.text("Workspace", &resource.workspace);
+    document.text("Snapshot", &resource.snapshot_id);
+    document.text("Engine version", &resource.engine_version);
+    document.debug("Algorithm", &resource.config.algorithm);
+    document.debug("Scope", &resource.config.scope);
+    document.scalar("Seed", resource.config.seed);
+    document.scalar("Resolution", resource.config.resolution);
+    document.scalar("Minimum confidence", resource.config.minimum_confidence);
+    document.scalar("Maximum iterations", resource.config.max_iterations);
+    render_collection(
+        &mut document,
+        "Configuration edge weights",
+        &resource.config.edge_weights,
+    );
+    render_collection_items(
+        &mut document,
+        "Communities",
+        &resource.communities,
+        |document, index, community| {
+            let prefix = format!("Community {}", index + 1);
+            document.debug(&format!("{prefix} identity"), &community.id);
+            document.text(&format!("{prefix} label"), &community.label);
+            document.debug(&format!("{prefix} metrics"), &community.metrics);
+            render_collection(document, &format!("{prefix} members"), &community.members);
+            render_collection(
+                document,
+                &format!("{prefix} central nodes"),
+                &community.central_nodes,
+            );
+            render_collection(
+                document,
+                &format!("{prefix} repositories"),
+                &community.repositories,
+            );
+            render_collection(document, &format!("{prefix} services"), &community.services);
+            render_collection(
+                document,
+                &format!("{prefix} inbound contracts"),
+                &community.inbound_contracts,
+            );
+            render_collection(
+                document,
+                &format!("{prefix} outbound contracts"),
+                &community.outbound_contracts,
+            );
+            render_collection(
+                document,
+                &format!("{prefix} label evidence"),
+                &community.label_evidence,
+            );
+            render_collection(
+                document,
+                &format!("{prefix} limitations"),
+                &community.limitations,
+            );
+        },
+    );
+    document.render(maximum)
+}
+
+fn render_coverage(resource: &CoverageResource, maximum: usize) -> String {
+    let mut document = MarkdownDocument::resource("Workspace coverage", resource.schema_version);
+    document.text("Workspace", &resource.workspace);
+    render_collection(&mut document, "Extractor runs", &resource.runs);
+    render_freshness(&mut document, &resource.freshness);
+    document.render(maximum)
+}
+
+fn render_evidence(resource: &EvidenceResource, maximum: usize) -> String {
+    let mut document = MarkdownDocument::resource("Evidence metadata", resource.schema_version);
+    document.text("Workspace", &resource.workspace);
+    document.debug("Evidence", &resource.evidence);
+    document.render(maximum)
+}
+
+fn render_freshness(document: &mut MarkdownDocument, freshness: &FreshnessResource) {
+    document.debug("Freshness overall", &freshness.overall);
+    render_collection(
+        document,
+        "Freshness stale repositories",
+        &freshness.stale_repositories,
+    );
+    render_collection(document, "Freshness reasons", &freshness.reasons);
+}
+
+fn render_collection<T: std::fmt::Debug>(
+    document: &mut MarkdownDocument,
+    name: &str,
+    collection: &BoundedCollection<T>,
+) {
+    document.bounded_collection(
+        name,
+        collection.total,
+        collection.retained(),
+        collection.truncated(),
+        &collection.items,
+    );
+}
+
+fn render_collection_items<T>(
+    document: &mut MarkdownDocument,
+    name: &str,
+    collection: &BoundedCollection<T>,
+    mut render_item: impl FnMut(&mut MarkdownDocument, usize, &T),
+) {
+    let items = collection
+        .items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            let mut fragment = MarkdownDocument::fragment();
+            render_item(&mut fragment, index, item);
+            fragment.into_complete()
+        })
+        .collect();
+    document.bounded_fragments(name, collection.total, collection.truncated(), items);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -273,7 +465,7 @@ pub(crate) fn read_resource(
     let item_limit = usize::try_from(policy.max_mcp_resource_items)
         .expect("validated policy count is usize-representable");
     let resource = if uri == "code-system-graph://workspaces" {
-        let workspaces = bounded_items(
+        let workspaces = bounded_collection(
             [WorkspaceResourceItem {
                 name: workspace.to_owned(),
                 configured: true,
@@ -282,10 +474,7 @@ pub(crate) fn read_resource(
         );
         ResourceDocument::Workspaces(WorkspacesResource {
             schema_version: 2,
-            total: workspaces.total,
-            retained: workspaces.retained(),
-            truncated: workspaces.truncated(),
-            workspaces: workspaces.items,
+            workspaces,
         })
     } else if let Some(path) = uri.strip_prefix("code-system-graph://workspace/") {
         let (requested, resource) = path.split_once('/').ok_or_else(|| invalid_resource(uri))?;
@@ -342,17 +531,14 @@ fn read_workspace_resource(
             let registry = store
                 .load_workspace_registry(workspace)
                 .map_err(internal_store)?;
-            let repositories = bounded_items(
+            let repositories = bounded_collection(
                 registry.repositories.iter().map(repository_view),
                 item_limit,
             );
             Ok(ResourceDocument::Repositories(RepositoriesResource {
                 schema_version: 2,
                 workspace: workspace.to_owned(),
-                total: repositories.total,
-                retained: repositories.retained(),
-                truncated: repositories.truncated(),
-                repositories: repositories.items,
+                repositories,
             }))
         }
         "services" => node_resource(&store, workspace, item_limit, |kind| {
@@ -365,17 +551,20 @@ fn read_workspace_resource(
             let snapshot = store
                 .load_current_community_snapshot(workspace)
                 .map_err(internal_store)?;
-            let communities = bounded_items(snapshot.communities, item_limit);
+            let communities = bounded_collection(
+                snapshot
+                    .communities
+                    .into_iter()
+                    .map(|community| community_view(community, item_limit)),
+                item_limit,
+            );
             Ok(ResourceDocument::Communities(CommunitiesResource {
                 schema_version: 2,
                 workspace: workspace.to_owned(),
                 snapshot_id: snapshot.snapshot_id,
                 engine_version: snapshot.engine_version,
-                config: snapshot.config,
-                total: communities.total,
-                retained: communities.retained(),
-                truncated: communities.truncated(),
-                communities: communities.items,
+                config: community_config_view(snapshot.config, item_limit),
+                communities,
             }))
         }
         "coverage" => workspace_coverage_resource(&store, workspace, item_limit),
@@ -429,17 +618,11 @@ fn status_resource_value(
     freshness: FreshnessSummary,
     item_limit: usize,
 ) -> StatusResource {
-    let repositories = bounded_items(std::mem::take(&mut status.repositories), item_limit);
-    let repository_total = repositories.total;
-    let repository_retained = repositories.retained();
-    let repositories_truncated = repositories.truncated();
-    status.repositories = repositories.items;
+    let repositories = bounded_collection(std::mem::take(&mut status.repositories), item_limit);
     StatusResource {
         schema_version: 2,
         status,
-        repository_total,
-        repository_retained,
-        repositories_truncated,
+        repositories,
         freshness: bounded_freshness(freshness, item_limit),
     }
 }
@@ -469,14 +652,11 @@ fn coverage_resource_value(
     freshness: FreshnessSummary,
     item_limit: usize,
 ) -> CoverageResource {
-    let runs = bounded_items(runs, item_limit);
+    let runs = bounded_collection(runs, item_limit);
     CoverageResource {
         schema_version: 2,
         workspace: workspace.to_owned(),
-        run_total: runs.total,
-        run_retained: runs.retained(),
-        runs_truncated: runs.truncated(),
-        runs: runs.items,
+        runs,
         freshness: bounded_freshness(freshness, item_limit),
     }
 }
@@ -524,34 +704,52 @@ fn node_resource(
     let (nodes, _) = store
         .load_current_graph(workspace)
         .map_err(internal_store)?;
-    let selected = bounded_items(
+    let entities = bounded_collection(
         nodes.into_iter().filter(|node| predicate(node.kind)),
         item_limit,
     );
     Ok(EntitiesResource {
         schema_version: 2,
         workspace: workspace.to_owned(),
-        total: selected.total,
-        retained: selected.retained(),
-        truncated: selected.truncated(),
-        entities: selected.items,
+        entities,
     })
 }
 fn bounded_freshness(freshness: FreshnessSummary, item_limit: usize) -> FreshnessResource {
-    let stale_repositories = bounded_items(freshness.stale_repositories, item_limit);
-    let reasons = bounded_items(freshness.reasons, item_limit);
     FreshnessResource {
         overall: freshness.overall,
-        stale_repository_total: stale_repositories.total,
-        stale_repository_retained: stale_repositories.retained(),
-        stale_repositories_truncated: stale_repositories.truncated(),
-        stale_repositories: stale_repositories.items,
-        reason_total: reasons.total,
-        reason_retained: reasons.retained(),
-        reasons_truncated: reasons.truncated(),
-        reasons: reasons.items,
+        stale_repositories: bounded_collection(freshness.stale_repositories, item_limit),
+        reasons: bounded_collection(freshness.reasons, item_limit),
     }
 }
+
+fn community_config_view(config: CommunityConfig, item_limit: usize) -> CommunityConfigView {
+    CommunityConfigView {
+        algorithm: config.algorithm,
+        scope: config.scope,
+        seed: config.seed,
+        resolution: config.resolution,
+        minimum_confidence: config.minimum_confidence,
+        edge_weights: bounded_collection(config.edge_weights, item_limit),
+        max_iterations: config.max_iterations,
+    }
+}
+
+fn community_view(community: Community, item_limit: usize) -> CommunityView {
+    CommunityView {
+        id: community.id,
+        label: community.label,
+        members: bounded_collection(community.members, item_limit),
+        central_nodes: bounded_collection(community.central_nodes, item_limit),
+        repositories: bounded_collection(community.repositories, item_limit),
+        services: bounded_collection(community.services, item_limit),
+        inbound_contracts: bounded_collection(community.inbound_contracts, item_limit),
+        outbound_contracts: bounded_collection(community.outbound_contracts, item_limit),
+        metrics: community.metrics,
+        label_evidence: bounded_collection(community.label_evidence, item_limit),
+        limitations: bounded_collection(community.limitations, item_limit),
+    }
+}
+
 fn is_contract(kind: NodeKind) -> bool {
     matches!(
         kind,
@@ -596,281 +794,4 @@ fn internal_message(message: String) -> ResourceError {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    fn repository_freshness(name: &str) -> RepoFreshness {
-        RepoFreshness {
-            repo_id: code_system_graph_model::RepoId::new(format!("repo:{name}")),
-            checkout_id: code_system_graph_model::CheckoutId::new(format!("checkout:{name}")),
-            head_commit: Some(format!("commit-{name}")),
-            manifest_hash: "manifest".to_owned(),
-            state: RepoFreshnessState::WorkingTreeChanged,
-            reason: Some(format!("{name} is stale")),
-        }
-    }
-
-    fn extractor_run(name: &str) -> ExtractorRun {
-        ExtractorRun {
-            id: format!("run:{name}"),
-            snapshot_id: "snapshot:one".to_owned(),
-            repo_id: code_system_graph_model::RepoId::new(format!("repo:{name}")),
-            checkout_id: code_system_graph_model::CheckoutId::new(format!("checkout:{name}")),
-            extractor: name.to_owned(),
-            extractor_version: "1".to_owned(),
-            status: code_system_graph_model::ExtractorRunStatus::Success,
-            discovered_files: 2,
-            parsed_files: 2,
-            skipped_files: 0,
-            elapsed_ms: 1,
-        }
-    }
-
-    fn empty_freshness_resource() -> FreshnessResource {
-        bounded_freshness(
-            FreshnessSummary {
-                overall: OverallFreshness::Fresh,
-                stale_repositories: Vec::new(),
-                reasons: Vec::new(),
-            },
-            1,
-        )
-    }
-
-    fn entities_resource() -> EntitiesResource {
-        EntitiesResource {
-            schema_version: 2,
-            workspace: "workspace".to_owned(),
-            total: 0,
-            retained: 0,
-            truncated: false,
-            entities: Vec::new(),
-        }
-    }
-
-    fn workspace_resource_fixtures() -> Vec<(&'static str, ResourceDocument)> {
-        vec![
-            (
-                "workspaces",
-                ResourceDocument::Workspaces(WorkspacesResource {
-                    schema_version: 2,
-                    total: 1,
-                    retained: 1,
-                    truncated: false,
-                    workspaces: vec![WorkspaceResourceItem {
-                        name: "workspace".to_owned(),
-                        configured: true,
-                    }],
-                }),
-            ),
-            (
-                "snapshot",
-                ResourceDocument::Overview(OverviewResource {
-                    schema_version: 2,
-                    workspace: "workspace".to_owned(),
-                    snapshot: OverviewSnapshot {
-                        id: "snapshot:one".to_owned(),
-                        nodes: 1,
-                        edges: 2,
-                        evidence: 3,
-                    },
-                }),
-            ),
-            (
-                "integrity ok",
-                ResourceDocument::Status(StatusResource {
-                    schema_version: 2,
-                    status: GraphStatusReport {
-                        workspace: "workspace".to_owned(),
-                        schema_version: 2,
-                        integrity_ok: true,
-                        snapshot: SnapshotMetrics {
-                            snapshot_id: "snapshot:one".to_owned(),
-                            node_count: 1,
-                            edge_count: 2,
-                            evidence_count: 3,
-                        },
-                        repositories: Vec::new(),
-                    },
-                    repository_total: 0,
-                    repository_retained: 0,
-                    repositories_truncated: false,
-                    freshness: empty_freshness_resource(),
-                }),
-            ),
-            (
-                "repositories",
-                ResourceDocument::Repositories(RepositoriesResource {
-                    schema_version: 2,
-                    workspace: "workspace".to_owned(),
-                    total: 0,
-                    retained: 0,
-                    truncated: false,
-                    repositories: Vec::new(),
-                }),
-            ),
-        ]
-    }
-
-    fn graph_resource_fixtures() -> Vec<(&'static str, ResourceDocument)> {
-        vec![
-            ("entities", ResourceDocument::Services(entities_resource())),
-            ("entities", ResourceDocument::Contracts(entities_resource())),
-            (
-                "communities",
-                ResourceDocument::Communities(CommunitiesResource {
-                    schema_version: 2,
-                    workspace: "workspace".to_owned(),
-                    snapshot_id: "snapshot:one".to_owned(),
-                    engine_version: "1".to_owned(),
-                    config: CommunityConfig {
-                        algorithm: code_system_graph_model::CommunityAlgorithm::Louvain,
-                        scope: code_system_graph_model::CommunityScope::Federated,
-                        seed: 0,
-                        resolution: 1.0,
-                        minimum_confidence: 0.5,
-                        edge_weights: Vec::new(),
-                        max_iterations: 100,
-                    },
-                    total: 0,
-                    retained: 0,
-                    truncated: false,
-                    communities: Vec::new(),
-                }),
-            ),
-            (
-                "runs",
-                ResourceDocument::Coverage(CoverageResource {
-                    schema_version: 2,
-                    workspace: "workspace".to_owned(),
-                    run_total: 0,
-                    run_retained: 0,
-                    runs_truncated: false,
-                    runs: Vec::new(),
-                    freshness: empty_freshness_resource(),
-                }),
-            ),
-            (
-                "ev:one",
-                ResourceDocument::Evidence(EvidenceResource {
-                    schema_version: 2,
-                    workspace: "workspace".to_owned(),
-                    evidence: Evidence {
-                        id: code_system_graph_model::EvidenceId::new("ev:one"),
-                        repo_id: None,
-                        file_path: Some("src/lib.rs".to_owned()),
-                        start_line: Some(1),
-                        end_line: Some(1),
-                        extractor: "fixture".to_owned(),
-                        extractor_version: "1".to_owned(),
-                        provenance: code_system_graph_model::Provenance::Extracted,
-                        confidence: 1.0,
-                        observed_at_commit: None,
-                        content_hash: None,
-                        note: None,
-                    },
-                }),
-            ),
-            (
-                "```json",
-                ResourceDocument::SchemaCatalog(serde_json::json!({
-                    "query": {"type": "object"}
-                })),
-            ),
-        ]
-    }
-
-    #[test]
-    fn every_typed_resource_variant_should_render_its_own_markdown_fixture() {
-        let resources = workspace_resource_fixtures()
-            .into_iter()
-            .chain(graph_resource_fixtures());
-
-        for (expected, resource) in resources {
-            let rendered = resource.render(4_096);
-            assert!(rendered.contains(expected), "{expected}: {rendered}");
-        }
-    }
-    #[test]
-    fn resource_freshness_collections_should_apply_item_limits() {
-        let value = bounded_freshness(
-            FreshnessSummary {
-                overall: OverallFreshness::Partial,
-                stale_repositories: vec![
-                    code_system_graph_model::RepoId::new("repo:one"),
-                    code_system_graph_model::RepoId::new("repo:two"),
-                ],
-                reasons: vec!["one".to_owned(), "two".to_owned()],
-            },
-            1,
-        );
-
-        assert_eq!(value.stale_repository_total, 2);
-        assert_eq!(value.stale_repository_retained, 1);
-        assert!(value.stale_repositories_truncated);
-        assert_eq!(value.reason_total, 2);
-        assert_eq!(value.reason_retained, 1);
-        assert!(value.reasons_truncated);
-    }
-
-    #[test]
-    fn status_resource_should_limit_repositories_with_exact_metadata() {
-        let repositories = vec![repository_freshness("one"), repository_freshness("two")];
-        let value = status_resource_value(
-            GraphStatusReport {
-                workspace: "workspace".to_owned(),
-                schema_version: 2,
-                integrity_ok: true,
-                snapshot: SnapshotMetrics {
-                    snapshot_id: "snapshot:one".to_owned(),
-                    node_count: 0,
-                    edge_count: 0,
-                    evidence_count: 0,
-                },
-                repositories: repositories.clone(),
-            },
-            freshness_summary(&repositories),
-            1,
-        );
-
-        assert_eq!(value.repository_total, 2);
-        assert_eq!(value.repository_retained, 1);
-        assert!(value.repositories_truncated);
-        assert_eq!(value.status.repositories.len(), 1);
-    }
-
-    #[test]
-    fn coverage_resource_should_limit_runs_with_exact_metadata() {
-        let value = coverage_resource_value(
-            "workspace",
-            vec![extractor_run("one"), extractor_run("two")],
-            FreshnessSummary {
-                overall: OverallFreshness::Fresh,
-                stale_repositories: Vec::new(),
-                reasons: Vec::new(),
-            },
-            1,
-        );
-
-        assert_eq!(value.run_total, 2);
-        assert_eq!(value.run_retained, 1);
-        assert!(value.runs_truncated);
-        assert_eq!(value.runs.len(), 1);
-    }
-
-    #[test]
-    fn schema_catalog_should_apply_resource_item_limit() {
-        let catalog = bounded_schema_catalog(1);
-
-        assert_eq!(catalog["schema_retained"], 1);
-        assert_eq!(
-            catalog["schemas"].as_object().map(serde_json::Map::len),
-            Some(1)
-        );
-        assert_eq!(catalog["schemas_truncated"], true);
-        assert!(
-            catalog["schema_total"]
-                .as_u64()
-                .is_some_and(|total| total > 1)
-        );
-    }
-}
+mod tests;

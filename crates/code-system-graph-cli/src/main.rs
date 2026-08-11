@@ -30,7 +30,7 @@ use serde::Serialize;
     name = "csgraph",
     version,
     about = "Federated multi-repository code intelligence",
-    after_help = "Examples:\n  csgraph init . --name commerce\n  csgraph scan --database .code-system-graph/code-system-graph.db\n  csgraph query \"orders contract\" --workspace commerce --database .code-system-graph/code-system-graph.db --json\n  csgraph mcp --workspace commerce --database .code-system-graph/code-system-graph.db"
+    after_help = "Examples:\n  csgraph init . --name commerce\n  csgraph scan --database .code-system-graph/code-system-graph.db\n  csgraph query \"orders contract\" --config code-system-graph.yaml --workspace commerce --database .code-system-graph/code-system-graph.db --json\n  csgraph mcp --config code-system-graph.yaml --workspace commerce --database .code-system-graph/code-system-graph.db"
 )]
 struct Cli {
     /// Suppress non-result diagnostics.
@@ -617,6 +617,24 @@ fn parse_impact_direction(value: &str) -> Result<ImpactDirection, String> {
         "downstream" => Ok(ImpactDirection::Downstream),
         "both" => Ok(ImpactDirection::Both),
         _ => Err("expected `upstream`, `downstream`, or `both`".to_owned()),
+    }
+}
+
+#[cfg(test)]
+mod help_tests {
+    use clap::Parser as _;
+
+    use super::Cli;
+
+    #[test]
+    fn root_examples_should_include_the_required_manifest_for_direct_commands() {
+        let help = Cli::try_parse_from(["csgraph", "--help"])
+            .expect_err("help should stop argument parsing")
+            .to_string();
+        assert!(help.contains(
+            "csgraph query \"orders contract\" --config code-system-graph.yaml --workspace"
+        ));
+        assert!(help.contains("csgraph mcp --config code-system-graph.yaml --workspace"));
     }
 }
 

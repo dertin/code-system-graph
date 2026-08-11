@@ -1,12 +1,15 @@
 use std::fmt::Write as _;
 use std::num::NonZeroUsize;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use code_system_graph_model::stable_id;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+mod tracker;
+
+pub use tracker::{MonotonicClock, ScanJobTracker};
 
 /// Default maximum wall time for one supervised scan or sync pass.
 pub const DEFAULT_MAX_SCAN_WALL_TIME_MS: u64 = 21_600_000;
@@ -49,6 +52,36 @@ pub const DEFAULT_MAX_MCP_RESOURCE_BYTES: u64 = 262_144;
 pub const DEFAULT_MAX_MCP_SCHEMA_CATALOG_BYTES: u64 = 2_097_152;
 /// Smallest Markdown response budget that can retain the mandatory MCP control block.
 pub const MIN_MCP_MARKDOWN_BYTES: u64 = 256;
+
+// Keep the agent-facing policy inventory in one declarative list. The two public serde structs
+// intentionally remain flat for schema-v2 compatibility; defaults, override resolution, and the
+// delivery fingerprint are generated from this list so a new field cannot silently omit one of
+// those behaviors.
+macro_rules! with_agent_policy_fields {
+    ($consumer:ident) => {
+        $consumer! {
+            max_explore_wall_time_ms: DEFAULT_MAX_EXPLORE_WALL_TIME_MS => "maxExploreWallTimeMs";
+            max_explore_codegraph_operations: DEFAULT_MAX_EXPLORE_CODEGRAPH_OPERATIONS => "maxExploreCodeGraphOperations";
+            max_explore_concurrent_codegraph_processes: DEFAULT_MAX_EXPLORE_CONCURRENT_CODEGRAPH_PROCESSES => "maxExploreConcurrentCodeGraphProcesses";
+            max_explore_source_files: DEFAULT_MAX_EXPLORE_SOURCE_FILES => "maxExploreSourceFiles";
+            max_explore_resolved_symbols: DEFAULT_MAX_EXPLORE_RESOLVED_SYMBOLS => "maxExploreResolvedSymbols";
+            max_explore_anchors: DEFAULT_MAX_EXPLORE_ANCHORS => "maxExploreAnchors";
+            max_explore_neighbors_per_direction: DEFAULT_MAX_EXPLORE_NEIGHBORS_PER_DIRECTION => "maxExploreNeighborsPerDirection";
+            max_explore_local_relationships: DEFAULT_MAX_EXPLORE_LOCAL_RELATIONSHIPS => "maxExploreLocalRelationships";
+            max_explore_federated_handoffs_per_anchor: DEFAULT_MAX_EXPLORE_FEDERATED_HANDOFFS_PER_ANCHOR => "maxExploreFederatedHandoffsPerAnchor";
+            max_explore_federated_handoffs: DEFAULT_MAX_EXPLORE_FEDERATED_HANDOFFS => "maxExploreFederatedHandoffs";
+            max_explore_evidence_locations_per_handoff: DEFAULT_MAX_EXPLORE_EVIDENCE_LOCATIONS_PER_HANDOFF => "maxExploreEvidenceLocationsPerHandoff";
+            max_explore_source_markdown_bytes: DEFAULT_MAX_EXPLORE_SOURCE_MARKDOWN_BYTES => "maxExploreSourceMarkdownBytes";
+            max_explore_enrichment_bytes: DEFAULT_MAX_EXPLORE_ENRICHMENT_BYTES => "maxExploreEnrichmentBytes";
+            max_agent_next_actions_per_response: DEFAULT_MAX_AGENT_NEXT_ACTIONS_PER_RESPONSE => "maxAgentNextActionsPerResponse";
+            max_query_repository_suggestions: DEFAULT_MAX_QUERY_REPOSITORY_SUGGESTIONS => "maxQueryRepositorySuggestions";
+            max_mcp_tool_response_bytes: DEFAULT_MAX_MCP_TOOL_RESPONSE_BYTES => "maxMcpToolResponseBytes";
+            max_mcp_resource_items: DEFAULT_MAX_MCP_RESOURCE_ITEMS => "maxMcpResourceItems";
+            max_mcp_resource_bytes: DEFAULT_MAX_MCP_RESOURCE_BYTES => "maxMcpResourceBytes";
+            max_mcp_schema_catalog_bytes: DEFAULT_MAX_MCP_SCHEMA_CATALOG_BYTES => "maxMcpSchemaCatalogBytes";
+        }
+    };
+}
 
 /// Effective per-repository limit for source-symbol corroboration through `CodeGraph`.
 ///
@@ -265,7 +298,9 @@ pub struct ExecutionPolicy {
 
 impl Default for ExecutionPolicy {
     fn default() -> Self {
-        Self {
+        macro_rules! policy_defaults {
+            ($($field:ident: $default:ident => $external:literal;)*) => {
+                Self {
             max_scan_wall_time_ms: DEFAULT_MAX_SCAN_WALL_TIME_MS,
             max_no_progress_time_ms: DEFAULT_MAX_NO_PROGRESS_TIME_MS,
             max_codegraph_sync_wall_time_ms_per_repo:
@@ -281,29 +316,11 @@ impl Default for ExecutionPolicy {
                     DEFAULT_MAX_CODEGRAPH_CORROBORATION_ANCHORS_PER_REPO,
                 )
                 .expect("the built-in corroboration limit is valid"),
-            max_explore_wall_time_ms: DEFAULT_MAX_EXPLORE_WALL_TIME_MS,
-            max_explore_codegraph_operations: DEFAULT_MAX_EXPLORE_CODEGRAPH_OPERATIONS,
-            max_explore_concurrent_codegraph_processes:
-                DEFAULT_MAX_EXPLORE_CONCURRENT_CODEGRAPH_PROCESSES,
-            max_explore_source_files: DEFAULT_MAX_EXPLORE_SOURCE_FILES,
-            max_explore_resolved_symbols: DEFAULT_MAX_EXPLORE_RESOLVED_SYMBOLS,
-            max_explore_anchors: DEFAULT_MAX_EXPLORE_ANCHORS,
-            max_explore_neighbors_per_direction: DEFAULT_MAX_EXPLORE_NEIGHBORS_PER_DIRECTION,
-            max_explore_local_relationships: DEFAULT_MAX_EXPLORE_LOCAL_RELATIONSHIPS,
-            max_explore_federated_handoffs_per_anchor:
-                DEFAULT_MAX_EXPLORE_FEDERATED_HANDOFFS_PER_ANCHOR,
-            max_explore_federated_handoffs: DEFAULT_MAX_EXPLORE_FEDERATED_HANDOFFS,
-            max_explore_evidence_locations_per_handoff:
-                DEFAULT_MAX_EXPLORE_EVIDENCE_LOCATIONS_PER_HANDOFF,
-            max_explore_source_markdown_bytes: DEFAULT_MAX_EXPLORE_SOURCE_MARKDOWN_BYTES,
-            max_explore_enrichment_bytes: DEFAULT_MAX_EXPLORE_ENRICHMENT_BYTES,
-            max_agent_next_actions_per_response: DEFAULT_MAX_AGENT_NEXT_ACTIONS_PER_RESPONSE,
-            max_query_repository_suggestions: DEFAULT_MAX_QUERY_REPOSITORY_SUGGESTIONS,
-            max_mcp_tool_response_bytes: DEFAULT_MAX_MCP_TOOL_RESPONSE_BYTES,
-            max_mcp_resource_items: DEFAULT_MAX_MCP_RESOURCE_ITEMS,
-            max_mcp_resource_bytes: DEFAULT_MAX_MCP_RESOURCE_BYTES,
-            max_mcp_schema_catalog_bytes: DEFAULT_MAX_MCP_SCHEMA_CATALOG_BYTES,
+                    $($field: $default,)*
+                }
+            };
         }
+        with_agent_policy_fields!(policy_defaults)
     }
 }
 
@@ -337,25 +354,12 @@ impl ExecutionPolicy {
             if let Some(value) = values.max_codegraph_corroboration_anchors_per_repo {
                 policy.max_codegraph_corroboration_anchors_per_repo = value.try_into()?;
             }
-            apply!(max_explore_wall_time_ms);
-            apply!(max_explore_codegraph_operations);
-            apply!(max_explore_concurrent_codegraph_processes);
-            apply!(max_explore_source_files);
-            apply!(max_explore_resolved_symbols);
-            apply!(max_explore_anchors);
-            apply!(max_explore_neighbors_per_direction);
-            apply!(max_explore_local_relationships);
-            apply!(max_explore_federated_handoffs_per_anchor);
-            apply!(max_explore_federated_handoffs);
-            apply!(max_explore_evidence_locations_per_handoff);
-            apply!(max_explore_source_markdown_bytes);
-            apply!(max_explore_enrichment_bytes);
-            apply!(max_agent_next_actions_per_response);
-            apply!(max_query_repository_suggestions);
-            apply!(max_mcp_tool_response_bytes);
-            apply!(max_mcp_resource_items);
-            apply!(max_mcp_resource_bytes);
-            apply!(max_mcp_schema_catalog_bytes);
+            macro_rules! apply_agent_overrides {
+                ($($field:ident: $default:ident => $external:literal;)*) => {
+                    $(apply!($field);)*
+                };
+            }
+            with_agent_policy_fields!(apply_agent_overrides);
         }
         policy.validate()?;
         Ok(policy)
@@ -539,67 +543,13 @@ impl ExecutionPolicy {
         ]
     }
 
-    fn agent_canonical_values(&self) -> [(&'static str, u64); 19] {
-        [
-            ("maxExploreWallTimeMs", self.max_explore_wall_time_ms),
-            (
-                "maxExploreCodeGraphOperations",
-                self.max_explore_codegraph_operations,
-            ),
-            (
-                "maxExploreConcurrentCodeGraphProcesses",
-                self.max_explore_concurrent_codegraph_processes,
-            ),
-            ("maxExploreSourceFiles", self.max_explore_source_files),
-            (
-                "maxExploreResolvedSymbols",
-                self.max_explore_resolved_symbols,
-            ),
-            ("maxExploreAnchors", self.max_explore_anchors),
-            (
-                "maxExploreNeighborsPerDirection",
-                self.max_explore_neighbors_per_direction,
-            ),
-            (
-                "maxExploreLocalRelationships",
-                self.max_explore_local_relationships,
-            ),
-            (
-                "maxExploreFederatedHandoffsPerAnchor",
-                self.max_explore_federated_handoffs_per_anchor,
-            ),
-            (
-                "maxExploreFederatedHandoffs",
-                self.max_explore_federated_handoffs,
-            ),
-            (
-                "maxExploreEvidenceLocationsPerHandoff",
-                self.max_explore_evidence_locations_per_handoff,
-            ),
-            (
-                "maxExploreSourceMarkdownBytes",
-                self.max_explore_source_markdown_bytes,
-            ),
-            (
-                "maxExploreEnrichmentBytes",
-                self.max_explore_enrichment_bytes,
-            ),
-            (
-                "maxAgentNextActionsPerResponse",
-                self.max_agent_next_actions_per_response,
-            ),
-            (
-                "maxQueryRepositorySuggestions",
-                self.max_query_repository_suggestions,
-            ),
-            ("maxMcpToolResponseBytes", self.max_mcp_tool_response_bytes),
-            ("maxMcpResourceItems", self.max_mcp_resource_items),
-            ("maxMcpResourceBytes", self.max_mcp_resource_bytes),
-            (
-                "maxMcpSchemaCatalogBytes",
-                self.max_mcp_schema_catalog_bytes,
-            ),
-        ]
+    fn agent_canonical_values(&self) -> Vec<(&'static str, u64)> {
+        macro_rules! canonical_agent_values {
+            ($($field:ident: $default:ident => $external:literal;)*) => {
+                vec![$(($external, self.$field),)*]
+            };
+        }
+        with_agent_policy_fields!(canonical_agent_values)
     }
 
     /// Returns the stable canonical fingerprint of the effective operational policy.
@@ -789,167 +739,9 @@ pub struct ExecutionLimitExceeded {
     pub completed_units: u64,
 }
 
-/// Injectable monotonic time source used by execution watchdogs.
-pub trait MonotonicClock: std::fmt::Debug + Send + Sync {
-    /// Duration since an arbitrary stable origin.
-    fn now(&self) -> Duration;
-}
-
-#[derive(Debug)]
-struct SystemMonotonicClock {
-    origin: Instant,
-}
-
-impl SystemMonotonicClock {
-    fn new() -> Self {
-        Self {
-            origin: Instant::now(),
-        }
-    }
-}
-
-impl MonotonicClock for SystemMonotonicClock {
-    fn now(&self) -> Duration {
-        self.origin.elapsed()
-    }
-}
-
-/// Monotonic progress tracker used inside one worker process.
-#[derive(Debug)]
-pub struct ScanJobTracker {
-    run_id: String,
-    policy: ExecutionPolicy,
-    clock: Arc<dyn MonotonicClock>,
-    started: Duration,
-    last_progress: Duration,
-    phase: JobPhase,
-    completed_units: u64,
-}
-
-impl ScanJobTracker {
-    /// Starts a tracker for one run at configuration validation.
-    #[must_use]
-    pub fn new(run_id: impl Into<String>, policy: ExecutionPolicy) -> Self {
-        Self::with_clock(run_id, policy, Arc::new(SystemMonotonicClock::new()))
-    }
-
-    /// Starts a tracker with an injected monotonic clock for deterministic execution tests.
-    #[must_use]
-    pub fn with_clock(
-        run_id: impl Into<String>,
-        policy: ExecutionPolicy,
-        clock: Arc<dyn MonotonicClock>,
-    ) -> Self {
-        let now = clock.now();
-        Self {
-            run_id: run_id.into(),
-            policy,
-            clock,
-            started: now,
-            last_progress: now,
-            phase: JobPhase::Configuration,
-            completed_units: 0,
-        }
-    }
-
-    /// Changes phase after checking the active deadlines.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ExecutionLimitExceeded`] when wall time or no-progress time is exhausted.
-    pub fn enter_phase(&mut self, phase: JobPhase) -> Result<(), ExecutionLimitExceeded> {
-        self.check_time()?;
-        self.phase = phase;
-        Ok(())
-    }
-
-    /// Charges verified completed work using checked arithmetic.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ExecutionLimitExceeded`] on arithmetic overflow or an exhausted deadline.
-    pub fn progress(&mut self, amount: u64) -> Result<(), ExecutionLimitExceeded> {
-        let completed_units = self
-            .completed_units
-            .checked_add(amount)
-            .ok_or_else(|| self.exceeded(ExecutionResource::WorkUnits, u64::MAX, u64::MAX - 1))?;
-        self.check_time()?;
-        self.completed_units = completed_units;
-        self.last_progress = self.clock.now();
-        Ok(())
-    }
-
-    /// Checks monotonic wall time and time since the last verified progress.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ExecutionLimitExceeded`] when either effective duration is exhausted.
-    pub fn check_time(&self) -> Result<(), ExecutionLimitExceeded> {
-        let now = self.clock.now();
-        self.check_duration(
-            ExecutionResource::WallTimeMs,
-            now.saturating_sub(self.started),
-            self.policy.max_scan_wall_time_ms,
-        )?;
-        self.check_duration(
-            ExecutionResource::NoProgressTimeMs,
-            now.saturating_sub(self.last_progress),
-            self.policy.max_no_progress_time_ms,
-        )
-    }
-
-    fn check_duration(
-        &self,
-        resource: ExecutionResource,
-        observed: Duration,
-        maximum: u64,
-    ) -> Result<(), ExecutionLimitExceeded> {
-        let observed = u64::try_from(observed.as_millis()).unwrap_or(u64::MAX);
-        if observed > maximum {
-            return Err(self.exceeded(resource, observed, maximum));
-        }
-        Ok(())
-    }
-
-    fn exceeded(
-        &self,
-        resource: ExecutionResource,
-        observed: u64,
-        maximum: u64,
-    ) -> ExecutionLimitExceeded {
-        ExecutionLimitExceeded {
-            run_id: self.run_id.clone(),
-            phase: self.phase,
-            resource,
-            observed,
-            maximum,
-            completed_units: self.completed_units,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicU64, Ordering};
-
     use super::*;
-
-    #[derive(Debug, Default)]
-    struct FakeClock {
-        milliseconds: AtomicU64,
-    }
-
-    impl FakeClock {
-        fn advance(&self, milliseconds: u64) {
-            self.milliseconds.fetch_add(milliseconds, Ordering::Relaxed);
-        }
-    }
-
-    impl MonotonicClock for FakeClock {
-        fn now(&self) -> Duration {
-            Duration::from_millis(self.milliseconds.load(Ordering::Relaxed))
-        }
-    }
 
     #[test]
     fn defaults_should_be_generous_and_finite() {
@@ -1159,47 +951,5 @@ mod tests {
                 Err(InvalidExecutionPolicy::InvalidRelationship { .. })
             ));
         }
-    }
-
-    #[test]
-    fn injected_clock_should_accept_exact_deadline_and_reject_one_unit_over() {
-        let clock = Arc::new(FakeClock::default());
-        let policy = ExecutionPolicy {
-            max_scan_wall_time_ms: 10,
-            max_no_progress_time_ms: 10,
-            ..ExecutionPolicy::default()
-        };
-        let tracker = ScanJobTracker::with_clock("run", policy, clock.clone());
-
-        clock.advance(10);
-        tracker.check_time().expect("exact deadline is inclusive");
-        clock.advance(1);
-        let error = tracker.check_time().expect_err("one over must fail");
-
-        assert_eq!(error.resource, ExecutionResource::WallTimeMs);
-        assert_eq!(error.observed, 11);
-        assert_eq!(error.maximum, 10);
-    }
-
-    #[test]
-    fn phase_changes_should_not_fake_progress() {
-        let clock = Arc::new(FakeClock::default());
-        let policy = ExecutionPolicy {
-            max_scan_wall_time_ms: 100,
-            max_no_progress_time_ms: 5,
-            ..ExecutionPolicy::default()
-        };
-        let mut tracker = ScanJobTracker::with_clock("run", policy, clock.clone());
-
-        clock.advance(5);
-        tracker
-            .enter_phase(JobPhase::Discovery)
-            .expect("exact idle deadline is inclusive");
-        clock.advance(1);
-        let error = tracker
-            .enter_phase(JobPhase::Fingerprinting)
-            .expect_err("phase churn must not renew watchdog");
-
-        assert_eq!(error.resource, ExecutionResource::NoProgressTimeMs);
     }
 }

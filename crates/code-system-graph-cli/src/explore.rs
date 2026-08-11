@@ -1,23 +1,27 @@
-//! Internal Explore execution state and budget accounting.
-
-use std::sync::{Arc, OnceLock};
+//! Bounded Explore orchestration.
 
 mod correlation;
 mod model;
+mod provider;
+mod runtime;
 
-use code_system_graph_core::{
-    ExecutionPolicy, LocalNeighborResult, ProviderError, ProviderExecution, ResolvedSymbol
-};
+use code_system_graph_core::{ExecutionPolicy, ResolvedSymbol};
 use correlation::{
     ExploreCorrelationInput, ExploreCorrelationOutput, correlate_explore_handoffs, explore_repository_context, explore_repository_contexts
 };
 pub use model::{
     ExploreCoverage, ExploreEvidenceLocation, ExploreExecution, ExploreFederatedHandoff, ExploreInput, ExploreLocalRelationship, ExploreReport, ExploreRepositoryContext
 };
+use provider::{
+    ExploreProviderInput, ExploreProviderOutcome, create_explore_provider, run_explore_provider_stages, validate_explore_input
+};
+use runtime::{
+    ExploreBlockingError, ExploreBudgetLedger, ExploreExecutionContext, ExploreProviderData, ExploreSnapshotData, load_explore_snapshot, run_bounded_explore_blocking
+};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    AgentNextAction, BTreeMap, BTreeSet, CodeGraphConfig, CodeGraphProvider, Duration, Edge, Evidence, FreshnessSummary, LocalCodeIntelligenceProvider, LocalContextRequest, LocalNeighborDirection, LocalNeighborsRequest, Node, OverallFreshness, Path, ProviderBudget, ProviderRequest, RepoFreshness, RepositoryRecord, SqliteStore, ToolEnvelope, ToolStatus, WorkspaceRecord, freshness_summary, native_relative_path
+    AgentNextAction, BTreeMap, BTreeSet, Duration, FreshnessSummary, LocalCodeIntelligenceProvider, OverallFreshness, Path, ProviderBudget, ProviderRequest, RepoFreshness, RepositoryRecord, ToolEnvelope, ToolStatus, WorkspaceRecord, freshness_summary, native_relative_path
 };
 
 fn explore_provider_request(
@@ -245,7 +249,7 @@ fn explore_error_envelope(message: String) -> ToolEnvelope<ExploreReport> {
     }
 }
 
-fn explore_deadline_envelope(stage: &str) -> ToolEnvelope<ExploreReport> {
+fn explore_deadline_without_context(stage: &str) -> ToolEnvelope<ExploreReport> {
     ToolEnvelope {
         schema_version: 2,
         status: ToolStatus::Degraded,
@@ -256,460 +260,9 @@ fn explore_deadline_envelope(stage: &str) -> ToolEnvelope<ExploreReport> {
             reasons: vec!["Explore exhausted its global wall-time budget.".to_owned()],
         },
         warnings: vec![format!(
-            "{stage} exceeded maxExploreWallTimeMs; no later Explore stages were started"
+            "{stage} exceeded maxExploreWallTimeMs before repository context was available"
         )],
     }
-}
-
-struct ExploreSnapshotData {
-    registry: WorkspaceRecord,
-    freshness: Vec<RepoFreshness>,
-    nodes: Vec<Node>,
-    edges: Vec<Edge>,
-    evidence: Vec<Evidence>,
-}
-
-enum ExploreSnapshotLoadError {
-    Failed(String),
-    Deadline,
-}
-
-fn explore_blocking_permits() -> Arc<tokio::sync::Semaphore> {
-    static PERMITS: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
-    PERMITS
-        .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(2)))
-        .clone()
-}
-
-async fn run_bounded_explore_blocking<T, F>(
-    context: &ExploreExecutionContext,
-    operation: F,
-) -> Result<T, ExploreSnapshotLoadError>
-where
-    T: Send + 'static,
-    F: FnOnce() -> Result<T, String> + Send + 'static,
-{
-    let permit =
-        match tokio::time::timeout_at(context.deadline, explore_blocking_permits().acquire_owned())
-            .await
-        {
-            Ok(Ok(permit)) => permit,
-            Ok(Err(error)) => return Err(ExploreSnapshotLoadError::Failed(error.to_string())),
-            Err(_) => {
-                context.cancellation.cancel();
-                return Err(ExploreSnapshotLoadError::Deadline);
-            }
-        };
-    let task = tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        operation()
-    });
-    match tokio::time::timeout_at(context.deadline, task).await {
-        Ok(Ok(Ok(value))) => Ok(value),
-        Ok(Ok(Err(error))) => Err(ExploreSnapshotLoadError::Failed(error)),
-        Ok(Err(error)) => Err(ExploreSnapshotLoadError::Failed(format!(
-            "Explore blocking stage failed: {error}"
-        ))),
-        Err(_) => {
-            context.cancellation.cancel();
-            Err(ExploreSnapshotLoadError::Deadline)
-        }
-    }
-}
-
-async fn load_explore_snapshot(
-    database_path: &Path,
-    workspace: &str,
-    context: &ExploreExecutionContext,
-) -> Result<ExploreSnapshotData, ExploreSnapshotLoadError> {
-    let database_path = database_path.to_path_buf();
-    let workspace = workspace.to_owned();
-    let cancellation = context.cancellation.clone();
-    let deadline = context.deadline;
-    let result =
-        run_bounded_explore_blocking(context, move || -> Result<ExploreSnapshotData, String> {
-            let store =
-                SqliteStore::open_read_only(&database_path).map_err(|error| error.to_string())?;
-            store
-                .interrupt_queries_when(move || {
-                    cancellation.is_cancelled() || tokio::time::Instant::now() >= deadline
-                })
-                .map_err(|error| error.to_string())?;
-            let registry = store
-                .load_workspace_registry(&workspace)
-                .map_err(|error| error.to_string())?;
-            let freshness = store
-                .load_current_freshness(&workspace)
-                .map_err(|error| error.to_string())?;
-            let (nodes, edges) = store
-                .load_current_graph(&workspace)
-                .map_err(|error| error.to_string())?;
-            let evidence = store
-                .load_current_evidence(&workspace)
-                .map_err(|error| error.to_string())?;
-            Ok(ExploreSnapshotData {
-                registry,
-                freshness,
-                nodes,
-                edges,
-                evidence,
-            })
-        })
-        .await;
-    match result {
-        Err(ExploreSnapshotLoadError::Failed(_))
-            if context.expired() || context.cancellation.is_cancelled() =>
-        {
-            Err(ExploreSnapshotLoadError::Deadline)
-        }
-        other => other,
-    }
-}
-
-struct ExploreProviderStage<'a> {
-    provider: &'a CodeGraphProvider,
-    repository: &'a RepositoryRecord,
-    project_path: &'a Path,
-    query: &'a str,
-    context: &'a ExploreExecutionContext,
-}
-
-struct ExploreProviderInput<'a> {
-    provider: &'a CodeGraphProvider,
-    repository: &'a RepositoryRecord,
-    project_path: &'a Path,
-    query: &'a str,
-    policy: &'a ExecutionPolicy,
-    context: &'a ExploreExecutionContext,
-    max_files: usize,
-}
-
-struct ExploreProviderOutcome {
-    data: ExploreProviderData,
-    ledger: ExploreBudgetLedger,
-    anchors: Vec<ResolvedSymbol>,
-}
-
-async fn run_explore_provider_stages(input: ExploreProviderInput<'_>) -> ExploreProviderOutcome {
-    let mut ledger = ExploreBudgetLedger::default();
-    let mut data = ExploreProviderData::default();
-    let stage = ExploreProviderStage {
-        provider: input.provider,
-        repository: input.repository,
-        project_path: input.project_path,
-        query: input.query,
-        context: input.context,
-    };
-    let operation_limit = usize::try_from(input.policy.max_explore_codegraph_operations)
-        .expect("validated policy count is usize-representable");
-    let source_bytes = usize::try_from(input.policy.max_explore_source_markdown_bytes)
-        .expect("validated policy bytes are usize-representable");
-    let enrichment_bytes = usize::try_from(input.policy.max_explore_enrichment_bytes)
-        .expect("validated policy bytes are usize-representable");
-    let resolved_limit = usize::try_from(input.policy.max_explore_resolved_symbols)
-        .expect("validated policy count is usize-representable");
-    collect_explore_source(
-        &stage,
-        input.max_files,
-        source_bytes,
-        operation_limit,
-        &mut ledger,
-        &mut data,
-    )
-    .await;
-    resolve_explore_symbols(
-        &stage,
-        operation_limit,
-        enrichment_bytes,
-        resolved_limit,
-        &mut ledger,
-        &mut data,
-    )
-    .await;
-    let anchor_limit = usize::try_from(input.policy.max_explore_anchors)
-        .expect("validated policy count is usize-representable");
-    let anchors = select_explore_anchors(&data.resolved_symbols, anchor_limit);
-    collect_explore_neighbors(
-        &stage,
-        &anchors,
-        &ExploreNeighborLimits {
-            operation_limit,
-            enrichment_bytes,
-            neighbor_limit: usize::try_from(input.policy.max_explore_neighbors_per_direction)
-                .expect("validated policy count is usize-representable"),
-            relationship_limit: usize::try_from(input.policy.max_explore_local_relationships)
-                .expect("validated policy count is usize-representable"),
-        },
-        &mut ledger,
-        &mut data,
-    )
-    .await;
-    ExploreProviderOutcome {
-        data,
-        ledger,
-        anchors,
-    }
-}
-
-fn create_explore_provider(
-    binary: Option<std::ffi::OsString>,
-    policy: &ExecutionPolicy,
-) -> Result<CodeGraphProvider, String> {
-    let mut config = CodeGraphConfig {
-        max_concurrent_processes: usize::try_from(
-            policy.max_explore_concurrent_codegraph_processes,
-        )
-        .expect("validated policy count is usize-representable"),
-        ..CodeGraphConfig::default()
-    };
-    if let Some(binary) = binary {
-        config.binary = binary;
-    }
-    CodeGraphProvider::new(config).map_err(|error| error.to_string())
-}
-
-fn validate_explore_input(
-    workspace: &str,
-    input: &ExploreInput,
-    policy: &ExecutionPolicy,
-) -> Result<usize, String> {
-    if input.workspace != workspace {
-        return Err(format!(
-            "workspace `{}` is outside this server's configured workspace `{workspace}`",
-            input.workspace
-        ));
-    }
-    let source_file_limit = usize::try_from(policy.max_explore_source_files)
-        .expect("validated policy count is usize-representable");
-    let max_files = input.max_files.unwrap_or(source_file_limit.min(12));
-    if max_files == 0 || max_files > source_file_limit {
-        return Err(format!(
-            "max_files must be between 1 and the effective workspace limit ({source_file_limit})"
-        ));
-    }
-    Ok(max_files)
-}
-
-async fn collect_explore_source(
-    stage: &ExploreProviderStage<'_>,
-    max_files: usize,
-    source_bytes: usize,
-    operation_limit: usize,
-    ledger: &mut ExploreBudgetLedger,
-    data: &mut ExploreProviderData,
-) {
-    if !ledger.try_reserve_operations(1, operation_limit, stage.context) {
-        ledger.gaps.push(
-            "source context skipped because the Explore deadline or operation budget was exhausted"
-                .to_owned(),
-        );
-        return;
-    }
-    let result = stage
-        .provider
-        .build_local_context(LocalContextRequest {
-            request: explore_provider_request(
-                stage.repository,
-                stage.project_path,
-                source_bytes,
-                max_files,
-                stage.context.deadline,
-                &stage.context.cancellation,
-            ),
-            query: stage.query.to_owned(),
-            max_files,
-        })
-        .await;
-    match result {
-        Ok(result) => {
-            data.source_markdown = truncate_utf8_owned(result.content, source_bytes);
-            data.source_context = true;
-            if result.execution.truncated {
-                ledger
-                    .truncations
-                    .push("maxExploreSourceMarkdownBytes".to_owned());
-            }
-            ledger.record_execution(result.execution);
-        }
-        Err(error) => ledger
-            .gaps
-            .push(format!("source context unavailable: {error}")),
-    }
-}
-
-async fn resolve_explore_symbols(
-    stage: &ExploreProviderStage<'_>,
-    operation_limit: usize,
-    enrichment_bytes: usize,
-    resolved_limit: usize,
-    ledger: &mut ExploreBudgetLedger,
-    data: &mut ExploreProviderData,
-) {
-    if ledger.try_reserve_operations(1, operation_limit, stage.context) {
-        let result = stage
-            .provider
-            .resolve_symbols(code_system_graph_core::ResolveSymbolsRequest {
-                request: explore_provider_request(
-                    stage.repository,
-                    stage.project_path,
-                    enrichment_bytes,
-                    resolved_limit,
-                    stage.context.deadline,
-                    &stage.context.cancellation,
-                ),
-                query: stage.query.to_owned(),
-            })
-            .await;
-        match result {
-            Ok(mut result) => {
-                data.symbol_resolution = true;
-                if result.symbols.len() > resolved_limit || result.execution.truncated {
-                    ledger
-                        .truncations
-                        .push("maxExploreResolvedSymbols".to_owned());
-                }
-                result.symbols.truncate(resolved_limit);
-                data.resolved_symbols = result.symbols;
-                ledger.retain_enrichment_bytes(result.execution.output_bytes, enrichment_bytes);
-                ledger.record_execution(result.execution);
-            }
-            Err(error) => ledger
-                .gaps
-                .push(format!("symbol resolution unavailable: {error}")),
-        }
-    } else {
-        ledger.gaps.push(
-            "symbol resolution skipped because the Explore deadline or operation budget was exhausted"
-                .to_owned(),
-        );
-    }
-    if data.resolved_symbols.is_empty() {
-        data.resolved_symbols = fallback_explore_anchors(&data.source_markdown, resolved_limit);
-        ledger.gaps.push(if data.resolved_symbols.is_empty() {
-            "no Explore anchors were available from structured symbol resolution or recognized CodeGraph blast-radius entries".to_owned()
-        } else {
-            "structured symbol anchors were unavailable; strict fallback anchors were derived from explicit CodeGraph blast-radius entries".to_owned()
-        });
-    }
-}
-
-struct ExploreNeighborLimits {
-    operation_limit: usize,
-    enrichment_bytes: usize,
-    neighbor_limit: usize,
-    relationship_limit: usize,
-}
-
-async fn collect_explore_neighbors(
-    stage: &ExploreProviderStage<'_>,
-    anchors: &[ResolvedSymbol],
-    limits: &ExploreNeighborLimits,
-    ledger: &mut ExploreBudgetLedger,
-    data: &mut ExploreProviderData,
-) {
-    for (anchor_index, anchor) in anchors.iter().enumerate() {
-        let remaining = ledger.remaining_enrichment_bytes(limits.enrichment_bytes);
-        if remaining < 2 {
-            ledger
-                .truncations
-                .push("maxExploreEnrichmentBytes".to_owned());
-            break;
-        }
-        if !ledger.try_reserve_operations(2, limits.operation_limit, stage.context) {
-            ledger.gaps.push(format!(
-                "neighbors for `{}` skipped because the Explore deadline or operation budget was exhausted",
-                anchor.name
-            ));
-            break;
-        }
-        let symbol = anchor
-            .qualified_name
-            .clone()
-            .unwrap_or_else(|| anchor.name.clone());
-        let request = |direction, bytes| LocalNeighborsRequest {
-            request: explore_provider_request(
-                stage.repository,
-                stage.project_path,
-                bytes,
-                limits.neighbor_limit,
-                stage.context.deadline,
-                &stage.context.cancellation,
-            ),
-            symbol: symbol.clone(),
-            direction,
-        };
-        let (incoming, outgoing) = tokio::join!(
-            stage
-                .provider
-                .get_local_neighbors(request(LocalNeighborDirection::Callers, remaining / 2,)),
-            stage.provider.get_local_neighbors(request(
-                LocalNeighborDirection::Callees,
-                remaining - (remaining / 2),
-            )),
-        );
-        let anchor_completed =
-            record_explore_neighbor_results(&symbol, incoming, outgoing, limits, ledger, data);
-        data.anchors_traversed += usize::from(anchor_completed);
-        let observed_relationships = data.local_relationships.len();
-        if observed_relationships >= limits.relationship_limit {
-            data.local_relationships.truncate(limits.relationship_limit);
-            if local_relationships_truncated(
-                observed_relationships,
-                limits.relationship_limit,
-                anchor_index + 1 < anchors.len(),
-            ) {
-                ledger
-                    .truncations
-                    .push("maxExploreLocalRelationships".to_owned());
-            }
-            break;
-        }
-    }
-}
-
-fn local_relationships_truncated(observed: usize, maximum: usize, anchors_remaining: bool) -> bool {
-    observed > maximum || (observed == maximum && anchors_remaining)
-}
-
-fn record_explore_neighbor_results(
-    symbol: &str,
-    incoming: Result<LocalNeighborResult, ProviderError>,
-    outgoing: Result<LocalNeighborResult, ProviderError>,
-    limits: &ExploreNeighborLimits,
-    ledger: &mut ExploreBudgetLedger,
-    data: &mut ExploreProviderData,
-) -> bool {
-    let mut completed_directions = 0_usize;
-    for (direction, result) in [("callers", incoming), ("callees", outgoing)] {
-        match result {
-            Ok(mut result) => {
-                completed_directions += 1;
-                if result.neighbors.len() > limits.neighbor_limit || result.execution.truncated {
-                    ledger
-                        .truncations
-                        .push("maxExploreNeighborsPerDirection".to_owned());
-                }
-                result.neighbors.truncate(limits.neighbor_limit);
-                ledger.retain_enrichment_bytes(
-                    result.execution.output_bytes,
-                    limits.enrichment_bytes,
-                );
-                data.local_relationships
-                    .extend(result.neighbors.into_iter().map(|neighbor| {
-                        ExploreLocalRelationship {
-                            anchor: symbol.to_owned(),
-                            direction: result.direction,
-                            neighbor,
-                        }
-                    }));
-                ledger.record_execution(result.execution);
-            }
-            Err(error) => ledger.gaps.push(format!(
-                "{direction} neighbors for `{symbol}` degraded: {error}"
-            )),
-        }
-    }
-    completed_directions == 2
 }
 
 async fn correlate_explore_with_deadline(
@@ -734,13 +287,21 @@ async fn correlate_explore_with_deadline(
             ledger.truncations.extend(truncations);
             handoffs
         }
-        Err(ExploreSnapshotLoadError::Failed(error)) => {
+        Err(ExploreBlockingError::Failed(_))
+            if context.expired() || context.cancellation.is_cancelled() =>
+        {
+            ledger
+                .gaps
+                .push("federated handoff correlation exceeded maxExploreWallTimeMs".to_owned());
+            Vec::new()
+        }
+        Err(ExploreBlockingError::Failed(error)) => {
             ledger
                 .gaps
                 .push(format!("federated handoff correlation failed: {error}"));
             Vec::new()
         }
-        Err(ExploreSnapshotLoadError::Deadline) => {
+        Err(ExploreBlockingError::Deadline) => {
             ledger
                 .gaps
                 .push("federated handoff correlation exceeded maxExploreWallTimeMs".to_owned());
@@ -808,6 +369,81 @@ fn finish_explore_envelope(mut input: ExploreEnvelopeInput) -> ToolEnvelope<Expl
     }
 }
 
+fn snapshot_freshness(snapshot: &ExploreSnapshotData) -> FreshnessSummary {
+    if snapshot.freshness_loaded {
+        freshness_summary(&snapshot.freshness)
+    } else {
+        FreshnessSummary {
+            overall: OverallFreshness::Unknown,
+            stale_repositories: Vec::new(),
+            reasons: vec!["Persisted freshness was not loaded before Explore degraded.".to_owned()],
+        }
+    }
+}
+
+fn select_requested_repository(
+    snapshot: &ExploreSnapshotData,
+    requested: Option<&str>,
+    workspace: &str,
+) -> Result<RepositoryRecord, String> {
+    let requested = requested.map(str::trim).filter(|alias| !alias.is_empty());
+    select_explore_repository(&snapshot.registry, requested, workspace).cloned()
+}
+
+fn partial_snapshot_envelope(
+    workspace: &str,
+    input: &ExploreInput,
+    repository: RepositoryRecord,
+    snapshot: ExploreSnapshotData,
+    policy: &ExecutionPolicy,
+) -> ToolEnvelope<ExploreReport> {
+    let stage = snapshot.incomplete_stage.unwrap_or("snapshot loading");
+    let freshness = snapshot_freshness(&snapshot);
+    let mut ledger = ExploreBudgetLedger::default();
+    ledger.gaps.extend(snapshot.gaps);
+    ledger.gaps.push(format!(
+        "{stage} exceeded maxExploreWallTimeMs; no later Explore stages were started"
+    ));
+    finish_explore_envelope(ExploreEnvelopeInput {
+        next_actions: explore_next_actions(workspace, &repository, &input.query, &[], policy),
+        repository,
+        persisted_freshness: snapshot.freshness,
+        freshness,
+        provider_data: ExploreProviderData::default(),
+        federated_handoffs: Vec::new(),
+        policy: policy.clone(),
+        maximum_concurrency_observed: 0,
+        ledger,
+    })
+}
+
+fn provider_unavailable_envelope(
+    workspace: &str,
+    query: &str,
+    repository: RepositoryRecord,
+    snapshot: ExploreSnapshotData,
+    freshness: FreshnessSummary,
+    policy: &ExecutionPolicy,
+    message: &str,
+) -> ToolEnvelope<ExploreReport> {
+    let mut ledger = ExploreBudgetLedger::default();
+    ledger.gaps.extend(snapshot.gaps);
+    ledger
+        .gaps
+        .push(format!("CodeGraph provider unavailable: {message}"));
+    finish_explore_envelope(ExploreEnvelopeInput {
+        next_actions: explore_next_actions(workspace, &repository, query, &[], policy),
+        repository,
+        persisted_freshness: snapshot.freshness,
+        freshness,
+        provider_data: ExploreProviderData::default(),
+        federated_handoffs: Vec::new(),
+        policy: policy.clone(),
+        maximum_concurrency_observed: 0,
+        ledger,
+    })
+}
+
 /// Explores one registered checkout through bounded, ephemeral local code intelligence.
 ///
 /// The returned [`ExploreReport::source_markdown`] may contain source code and must never be
@@ -832,35 +468,35 @@ pub async fn explore_repository(
     };
     let snapshot = match load_explore_snapshot(database_path, workspace, &execution_context).await {
         Ok(snapshot) => snapshot,
-        Err(ExploreSnapshotLoadError::Failed(error)) => return explore_error_envelope(error),
-        Err(ExploreSnapshotLoadError::Deadline) => {
+        Err(ExploreBlockingError::Failed(error)) => return explore_error_envelope(error),
+        Err(ExploreBlockingError::Deadline) => {
             execution_context.cancellation.cancel();
-            return explore_deadline_envelope("snapshot loading");
+            return explore_deadline_without_context("workspace registry loading");
         }
     };
-    let ExploreSnapshotData {
-        registry,
-        freshness: persisted_freshness,
-        nodes,
-        edges,
-        evidence,
-    } = snapshot;
-    let freshness = freshness_summary(&persisted_freshness);
-    let requested_alias = input
-        .repository
-        .as_deref()
-        .map(str::trim)
-        .filter(|alias| !alias.is_empty());
-    let repository = match select_explore_repository(&registry, requested_alias, workspace) {
-        Ok(repository) => repository.clone(),
-        Err(message) => {
-            return explore_scoped_error_envelope(freshness, ToolStatus::Error, message);
-        }
-    };
+    let freshness = snapshot_freshness(&snapshot);
+    let repository =
+        match select_requested_repository(&snapshot, input.repository.as_deref(), workspace) {
+            Ok(repository) => repository,
+            Err(message) => {
+                return explore_scoped_error_envelope(freshness, ToolStatus::Error, message);
+            }
+        };
+    if snapshot.incomplete_stage.is_some() {
+        return partial_snapshot_envelope(workspace, input, repository, snapshot, policy);
+    }
     let provider = match create_explore_provider(binary, policy) {
         Ok(provider) => provider,
         Err(message) => {
-            return explore_scoped_error_envelope(freshness, ToolStatus::Degraded, message);
+            return provider_unavailable_envelope(
+                workspace,
+                &input.query,
+                repository,
+                snapshot,
+                freshness,
+                policy,
+                &message,
+            );
         }
     };
     let project_path = native_relative_path(&repository.canonical_path);
@@ -879,15 +515,16 @@ pub async fn explore_repository(
         mut ledger,
         anchors,
     } = outcome;
+    ledger.gaps.extend(snapshot.gaps);
 
-    let repository_contexts = explore_repository_contexts(&registry, &persisted_freshness);
+    let repository_contexts = explore_repository_contexts(&snapshot.registry, &snapshot.freshness);
     let federated_handoffs = correlate_explore_with_deadline(
         ExploreCorrelationInput {
             repository: repository.clone(),
             anchors,
-            nodes,
-            edges,
-            evidence,
+            nodes: snapshot.nodes,
+            edges: snapshot.edges,
+            evidence: snapshot.evidence,
             repositories: repository_contexts,
             policy: policy.clone(),
         },
@@ -902,15 +539,14 @@ pub async fn explore_repository(
         &federated_handoffs,
         policy,
     );
-    let shutdown = provider.shutdown().await;
-    if let Err(error) = shutdown {
+    if let Err(error) = provider.shutdown().await {
         ledger
             .degradations
             .push(format!("CodeGraph shutdown degraded: {error}"));
     }
     finish_explore_envelope(ExploreEnvelopeInput {
         repository,
-        persisted_freshness,
+        persisted_freshness: snapshot.freshness,
         freshness,
         provider_data,
         federated_handoffs,
@@ -919,90 +555,6 @@ pub async fn explore_repository(
         maximum_concurrency_observed: provider.maximum_concurrency_observed(),
         ledger,
     })
-}
-
-struct ExploreExecutionContext {
-    deadline: tokio::time::Instant,
-    cancellation: CancellationToken,
-}
-
-impl ExploreExecutionContext {
-    fn new(policy: &ExecutionPolicy) -> Self {
-        Self {
-            deadline: tokio::time::Instant::now()
-                + std::time::Duration::from_millis(policy.max_explore_wall_time_ms),
-            cancellation: CancellationToken::new(),
-        }
-    }
-
-    fn expired(&self) -> bool {
-        tokio::time::Instant::now() >= self.deadline
-    }
-}
-
-#[derive(Default)]
-struct ExploreBudgetLedger {
-    operations: Vec<ProviderExecution>,
-    degradations: Vec<String>,
-    truncations: Vec<String>,
-    gaps: Vec<String>,
-    provider_operations: usize,
-    enrichment_retained_bytes: usize,
-}
-
-impl ExploreBudgetLedger {
-    fn try_reserve_operations(
-        &mut self,
-        count: usize,
-        limit: usize,
-        context: &ExploreExecutionContext,
-    ) -> bool {
-        if context.expired() || self.provider_operations.saturating_add(count) > limit {
-            return false;
-        }
-        self.provider_operations += count;
-        true
-    }
-
-    fn remaining_enrichment_bytes(&self, limit: usize) -> usize {
-        limit.saturating_sub(self.enrichment_retained_bytes)
-    }
-
-    fn retain_enrichment_bytes(&mut self, bytes: usize, limit: usize) {
-        self.enrichment_retained_bytes = self
-            .enrichment_retained_bytes
-            .saturating_add(bytes)
-            .min(limit);
-    }
-
-    fn record_execution(&mut self, execution: ProviderExecution) {
-        self.degradations.extend(
-            execution
-                .degradations
-                .iter()
-                .map(|item| item.message.clone()),
-        );
-        self.operations.push(execution);
-    }
-
-    fn normalize(&mut self) {
-        self.truncations.sort();
-        self.truncations.dedup();
-        self.gaps.sort();
-        self.gaps.dedup();
-        self.degradations.sort();
-        self.degradations.dedup();
-    }
-}
-
-#[derive(Default)]
-struct ExploreProviderData {
-    source_markdown: String,
-    source_context: bool,
-    resolved_symbols: Vec<ResolvedSymbol>,
-    symbol_resolution: bool,
-    local_relationships: Vec<ExploreLocalRelationship>,
-    anchors_traversed: usize,
 }
 
 #[cfg(test)]

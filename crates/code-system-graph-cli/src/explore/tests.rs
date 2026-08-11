@@ -1,15 +1,20 @@
 //! Unit tests for independently bounded Explore stages.
 
 use code_system_graph_core::{
-    LocalNeighbor, LocalNeighborDirection, LocalNeighborResult, ProviderError, ProviderExecution, ProviderTransport
+    LocalNeighbor, LocalNeighborDirection, LocalNeighborResult, ProviderError, ProviderExecution, ProviderTransport, ResolvedSymbol
 };
 use code_system_graph_model::{
-    CheckoutId, NativePath, NativePathEncoding, RepoId, RepositoryRecord
+    CheckoutId, NativePath, NativePathEncoding, OverallFreshness, RepoId, RepositoryRecord, ToolStatus, WorkspaceId, WorkspaceRecord
 };
 
-use super::{
-    ExploreBudgetLedger, ExploreNeighborLimits, ExploreProviderData, explore_next_actions, local_relationships_truncated, record_explore_neighbor_results
+use super::correlation::ExploreCorrelationInput;
+use super::provider::{
+    ExploreNeighborLimits, local_relationships_truncated, record_explore_neighbor_results
 };
+use super::runtime::{
+    ExploreBlockingError, ExploreBudgetLedger, ExploreExecutionContext, ExploreProviderData, ExploreSnapshotData, run_bounded_explore_blocking
+};
+use super::{correlate_explore_with_deadline, explore_next_actions, partial_snapshot_envelope};
 
 fn repository() -> RepositoryRecord {
     RepositoryRecord {
@@ -26,6 +31,16 @@ fn repository() -> RepositoryRecord {
         head_commit: None,
         is_linked_worktree: false,
         working_tree_dirty: false,
+    }
+}
+
+fn workspace(repository: RepositoryRecord) -> WorkspaceRecord {
+    WorkspaceRecord {
+        id: WorkspaceId::new("workspace:commerce"),
+        name: "commerce".to_owned(),
+        manifest_hash: "manifest".to_owned(),
+        config_path: None,
+        repositories: vec![repository],
     }
 }
 
@@ -164,21 +179,104 @@ fn local_relationship_limit_should_only_report_omitted_work() {
     assert!(local_relationships_truncated(49, 48, false));
 }
 
+#[test]
+fn later_snapshot_deadline_should_preserve_loaded_context_in_degraded_data() {
+    let repository = repository();
+    let snapshot = ExploreSnapshotData {
+        registry: workspace(repository.clone()),
+        freshness: Vec::new(),
+        freshness_loaded: true,
+        nodes: Vec::new(),
+        edges: Vec::new(),
+        evidence: Vec::new(),
+        gaps: vec!["persisted graph unavailable".to_owned()],
+        incomplete_stage: Some("evidence loading"),
+    };
+    let envelope = partial_snapshot_envelope(
+        "commerce",
+        &super::ExploreInput {
+            workspace: "commerce".to_owned(),
+            repository: Some("api".to_owned()),
+            query: "create_order callers".to_owned(),
+            max_files: None,
+        },
+        repository,
+        snapshot,
+        &code_system_graph_core::ExecutionPolicy::default(),
+    );
+
+    assert_eq!(envelope.status, ToolStatus::Degraded);
+    assert_eq!(envelope.freshness.overall, OverallFreshness::Fresh);
+    let report = envelope.data.expect("loaded registry should remain usable");
+    assert_eq!(report.repository.alias, "api");
+    assert!(
+        report
+            .coverage
+            .gaps
+            .iter()
+            .any(|gap| gap.contains("persisted graph"))
+    );
+    assert!(
+        report
+            .coverage
+            .gaps
+            .iter()
+            .any(|gap| gap.contains("evidence loading"))
+    );
+    assert_eq!(report.execution.provider_operations, 0);
+}
+
 #[tokio::test]
 async fn blocking_stage_should_signal_cancellation_at_the_global_deadline() {
-    let context = super::ExploreExecutionContext {
+    let context = ExploreExecutionContext {
         deadline: tokio::time::Instant::now() + std::time::Duration::from_millis(5),
         cancellation: tokio_util::sync::CancellationToken::new(),
     };
-    let result = super::run_bounded_explore_blocking(&context, || {
+    let result = run_bounded_explore_blocking(&context, || {
         std::thread::sleep(std::time::Duration::from_millis(50));
         Ok::<_, String>(())
     })
     .await;
 
-    assert!(matches!(
-        result,
-        Err(super::ExploreSnapshotLoadError::Deadline)
-    ));
+    assert!(matches!(result, Err(ExploreBlockingError::Deadline)));
     assert!(context.cancellation.is_cancelled());
+}
+
+#[tokio::test]
+async fn correlation_stage_should_record_its_own_deadline_gap() {
+    let context = ExploreExecutionContext {
+        deadline: tokio::time::Instant::now(),
+        cancellation: tokio_util::sync::CancellationToken::new(),
+    };
+    let mut ledger = ExploreBudgetLedger::default();
+    let handoffs = correlate_explore_with_deadline(
+        ExploreCorrelationInput {
+            repository: repository(),
+            anchors: vec![ResolvedSymbol {
+                local_id: None,
+                name: "anchor".to_owned(),
+                qualified_name: None,
+                kind: "function".to_owned(),
+                file_path: "src/lib.rs".to_owned(),
+                start_line: 1,
+                score: None,
+            }],
+            nodes: Vec::new(),
+            edges: Vec::new(),
+            evidence: Vec::new(),
+            repositories: std::collections::BTreeMap::new(),
+            policy: code_system_graph_core::ExecutionPolicy::default(),
+        },
+        &context,
+        &mut ledger,
+    )
+    .await;
+
+    assert_eq!(handoffs, [] as [super::ExploreFederatedHandoff; 0]);
+    assert!(
+        ledger
+            .gaps
+            .iter()
+            .any(|gap| { gap == "federated handoff correlation exceeded maxExploreWallTimeMs" })
+    );
 }

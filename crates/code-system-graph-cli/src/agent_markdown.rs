@@ -1,51 +1,249 @@
-//! Bounded Markdown presentation for agent-facing MCP delivery.
+//! Typed, bounded Markdown construction for agent-facing MCP delivery.
+
+use std::fmt::{Debug, Display};
 
 use code_system_graph_model::{FreshnessSummary, ToolStatus};
-use serde::Serialize;
 use serde_json::{Map, Value};
 
 const TRUNCATION_NOTICE: &str = "\n## Truncation\n\nAdditional result content was omitted by the effective MCP response-byte limit.\n";
 
-/// Renders one typed tool envelope as bounded UTF-8 Markdown without embedding a JSON envelope.
-pub(crate) fn render_envelope<T: Serialize>(
-    tool: &str,
-    schema_version: u32,
-    status: ToolStatus,
-    freshness: &FreshnessSummary,
-    warnings: &[String],
-    data: Option<&T>,
-    maximum: usize,
-) -> String {
-    let mut blocks = vec![format!("# {}\n", heading(tool))];
-    push_control_blocks(schema_version, status, freshness, warnings, &mut blocks);
-    let mut rendered_data = None;
-    if let Some(data) = data {
-        match serde_json::to_value(data) {
-            Ok(value) => {
-                push_report_blocks(&value, &mut blocks);
-                rendered_data = Some(value);
-            }
-            Err(error) => blocks.push(format!(
-                "\nResult serialization failed: {}\n",
-                inline(&error.to_string())
-            )),
-        }
-    }
-    let compact = compact_control_block(tool, status, freshness, warnings, rendered_data.as_ref());
-    fit_blocks(blocks, maximum, Some(compact))
+enum DocumentBlock {
+    Control(String),
+    Atomic(String),
+    Collection {
+        heading: String,
+        total: usize,
+        source_truncated: bool,
+        items: Vec<String>,
+    },
+    Source {
+        heading: String,
+        value: String,
+    },
 }
 
-/// Renders a typed resource contract as bounded Markdown.
-pub(crate) fn render_resource<T: Serialize>(resource: &T, maximum: usize) -> String {
-    let mut blocks = vec!["# Code System Graph Resource\n".to_owned()];
-    match serde_json::to_value(resource) {
-        Ok(value) => render_value_blocks(None, &value, 2, &mut blocks),
-        Err(error) => blocks.push(format!(
-            "\nResource serialization failed: {}\n",
-            inline(&error.to_string())
-        )),
+impl DocumentBlock {
+    fn complete(&self) -> String {
+        match self {
+            Self::Control(value) | Self::Atomic(value) => value.clone(),
+            Self::Collection {
+                heading,
+                total,
+                source_truncated,
+                items,
+            } => collection_block(heading, *total, items.len(), *source_truncated, items),
+            Self::Source {
+                heading: source_heading,
+                value,
+            } => {
+                format!(
+                    "\n## {}\n{}",
+                    heading(source_heading),
+                    fenced("text", value)
+                )
+            }
+        }
     }
-    fit_blocks(blocks, maximum, None)
+}
+
+/// Internal typed Markdown document. Callers select concrete report fields before adding them;
+/// this builder never reflects over serialized report objects.
+pub(crate) struct MarkdownDocument {
+    blocks: Vec<DocumentBlock>,
+    compact: String,
+}
+
+impl MarkdownDocument {
+    pub(crate) fn fragment() -> Self {
+        Self {
+            blocks: Vec::new(),
+            compact: String::new(),
+        }
+    }
+
+    pub(crate) fn tool(
+        name: &str,
+        schema_version: u32,
+        status: ToolStatus,
+        freshness: &FreshnessSummary,
+        warnings: &[String],
+        coverage_present: bool,
+        path: Option<&str>,
+    ) -> Self {
+        let status_text = tool_status(status);
+        let freshness_text = format!("{:?}", freshness.overall).to_lowercase();
+        let warning = warnings.first().map_or_else(
+            || "none".to_owned(),
+            |value| compact_text(&inline(value), 18),
+        );
+        let path = path.map_or_else(
+            || "absent".to_owned(),
+            |value| compact_text(&inline(value), 18),
+        );
+        let compact = format!(
+            "# {}\nstatus={status_text} freshness={freshness_text} truncated=true\nwarning={warning}\ncoverage={} path={path}\n",
+            compact_text(&heading(name), 24),
+            if coverage_present {
+                "present"
+            } else {
+                "absent"
+            },
+        );
+        let mut document = Self {
+            blocks: vec![DocumentBlock::Control(format!("# {}\n", heading(name)))],
+            compact,
+        };
+        document.blocks.push(DocumentBlock::Control(format!(
+            "\n## Status\n\n- State: `{status_text}`\n- Delivery schema: `{schema_version}`\n"
+        )));
+        document.control_string_collection("Warnings", warnings);
+        document.blocks.push(DocumentBlock::Control(format!(
+            "\n## Freshness\n\n- Overall: `{freshness_text}`\n"
+        )));
+        document.control_debug_collection("Stale repositories", &freshness.stale_repositories);
+        document.control_string_collection("Freshness reasons", &freshness.reasons);
+        document
+    }
+
+    pub(crate) fn resource(name: &str, schema_version: u32) -> Self {
+        Self {
+            blocks: vec![
+                DocumentBlock::Control(format!("# {}\n", heading(name))),
+                DocumentBlock::Control(format!(
+                    "\n## Contract\n\n- Delivery schema: `{schema_version}`\n"
+                )),
+            ],
+            compact: format!(
+                "# {}\nschema={schema_version} truncated=true\n",
+                compact_text(&heading(name), 32)
+            ),
+        }
+    }
+
+    pub(crate) fn scalar(&mut self, name: &str, value: impl Display) {
+        self.blocks.push(DocumentBlock::Atomic(format!(
+            "\n## {}\n\n`{}`\n",
+            heading(name),
+            inline(&value.to_string())
+        )));
+    }
+
+    pub(crate) fn text(&mut self, name: &str, value: &str) {
+        self.blocks.push(DocumentBlock::Atomic(format!(
+            "\n## {}\n\n{}\n",
+            heading(name),
+            inline(value)
+        )));
+    }
+
+    pub(crate) fn debug(&mut self, name: &str, value: &impl Debug) {
+        self.text(name, &format!("{value:?}"));
+    }
+
+    pub(crate) fn debug_collection<T: Debug>(&mut self, name: &str, items: &[T]) {
+        self.bounded_fragments(
+            name,
+            items.len(),
+            false,
+            items
+                .iter()
+                .map(|item| format!("\n- {}\n", inline(&format!("{item:?}"))))
+                .collect(),
+        );
+    }
+
+    pub(crate) fn string_collection(&mut self, name: &str, items: &[String]) {
+        self.bounded_fragments(
+            name,
+            items.len(),
+            false,
+            items
+                .iter()
+                .map(|item| format!("\n- {}\n", inline(item)))
+                .collect(),
+        );
+    }
+
+    fn control_debug_collection<T: Debug>(&mut self, name: &str, items: &[T]) {
+        self.control_collection_metadata(name, items.len(), items.len(), false);
+        for item in items {
+            self.blocks.push(DocumentBlock::Control(format!(
+                "\n- {}\n",
+                inline(&format!("{item:?}"))
+            )));
+        }
+    }
+
+    fn control_string_collection(&mut self, name: &str, items: &[String]) {
+        self.control_collection_metadata(name, items.len(), items.len(), false);
+        for item in items {
+            self.blocks
+                .push(DocumentBlock::Control(format!("\n- {}\n", inline(item))));
+        }
+    }
+
+    pub(crate) fn bounded_collection<T: Debug>(
+        &mut self,
+        name: &str,
+        total: usize,
+        retained: usize,
+        truncated: bool,
+        items: &[T],
+    ) {
+        debug_assert_eq!(retained, items.len());
+        self.bounded_fragments(
+            name,
+            total,
+            truncated,
+            items
+                .iter()
+                .map(|item| format!("\n- {}\n", inline(&format!("{item:?}"))))
+                .collect(),
+        );
+    }
+
+    pub(crate) fn bounded_fragments(
+        &mut self,
+        name: &str,
+        total: usize,
+        source_truncated: bool,
+        items: Vec<String>,
+    ) {
+        self.blocks.push(DocumentBlock::Collection {
+            heading: name.to_owned(),
+            total,
+            source_truncated,
+            items,
+        });
+    }
+
+    fn control_collection_metadata(
+        &mut self,
+        name: &str,
+        total: usize,
+        retained: usize,
+        truncated: bool,
+    ) {
+        self.blocks.push(DocumentBlock::Control(format!(
+            "\n## {}\n\n- Total: `{total}`\n- Retained: `{retained}`\n- Truncated: `{truncated}`\n",
+            heading(name)
+        )));
+    }
+
+    pub(crate) fn source(&mut self, name: &str, value: &str) {
+        self.blocks.push(DocumentBlock::Source {
+            heading: name.to_owned(),
+            value: safe_multiline(value),
+        });
+    }
+
+    pub(crate) fn render(self, maximum: usize) -> String {
+        fit_document(self.blocks, maximum, &self.compact)
+    }
+
+    pub(crate) fn into_complete(self) -> String {
+        self.blocks.iter().map(DocumentBlock::complete).collect()
+    }
 }
 
 /// Renders the heterogeneous schema catalog with atomic fenced JSON entries.
@@ -70,7 +268,168 @@ pub(crate) fn render_schema_catalog(value: &Value, maximum: usize) -> String {
         let text = serde_json::to_string_pretty(value).unwrap_or_else(|_| "null".to_owned());
         blocks.push(fenced("json", &text));
     }
-    fit_blocks(blocks, maximum, None)
+    fit_atomic_blocks(blocks, maximum)
+}
+
+fn fit_document(blocks: Vec<DocumentBlock>, maximum: usize, compact: &str) -> String {
+    let complete = blocks
+        .iter()
+        .map(DocumentBlock::complete)
+        .collect::<String>();
+    if complete.len() <= maximum {
+        return complete;
+    }
+    let available = maximum.saturating_sub(TRUNCATION_NOTICE.len());
+    let mut output = if compact.len() <= available {
+        compact.to_owned()
+    } else {
+        String::new()
+    };
+    for block in blocks {
+        match block {
+            DocumentBlock::Control(_) => {}
+            DocumentBlock::Atomic(value) => {
+                if output.len().saturating_add(value.len()) <= available {
+                    output.push_str(&value);
+                }
+            }
+            DocumentBlock::Collection {
+                heading,
+                total,
+                source_truncated,
+                items,
+            } => {
+                let remaining = available.saturating_sub(output.len());
+                if let Some(value) =
+                    bounded_collection_block(&heading, total, source_truncated, &items, remaining)
+                {
+                    output.push_str(&value);
+                }
+            }
+            DocumentBlock::Source { heading, value } => {
+                let remaining = available.saturating_sub(output.len());
+                if let Some(value) = bounded_source_block(&heading, &value, remaining) {
+                    output.push_str(&value);
+                }
+            }
+        }
+    }
+    if output.len().saturating_add(TRUNCATION_NOTICE.len()) <= maximum {
+        output.push_str(TRUNCATION_NOTICE);
+    }
+    output
+}
+
+fn collection_block(
+    name: &str,
+    total: usize,
+    retained: usize,
+    truncated: bool,
+    items: &[String],
+) -> String {
+    format!(
+        "\n## {}\n\n- Total: `{total}`\n- Retained: `{retained}`\n- Truncated: `{truncated}`\n{}",
+        heading(name),
+        items.concat()
+    )
+}
+
+fn bounded_collection_block(
+    name: &str,
+    total: usize,
+    source_truncated: bool,
+    items: &[String],
+    maximum: usize,
+) -> Option<String> {
+    let mut retained = 0_usize;
+    let mut item_bytes = 0_usize;
+    for item in items {
+        let candidate_retained = retained + 1;
+        let metadata = collection_block(
+            name,
+            total,
+            candidate_retained,
+            source_truncated || candidate_retained < total,
+            &[],
+        );
+        if metadata
+            .len()
+            .saturating_add(item_bytes)
+            .saturating_add(item.len())
+            > maximum
+        {
+            break;
+        }
+        retained = candidate_retained;
+        item_bytes = item_bytes.saturating_add(item.len());
+    }
+    let mut output = collection_block(
+        name,
+        total,
+        retained,
+        source_truncated || retained < total,
+        &[],
+    );
+    if output.len().saturating_add(item_bytes) > maximum {
+        return None;
+    }
+    for item in items.iter().take(retained) {
+        output.push_str(item);
+    }
+    Some(output)
+}
+
+fn fit_atomic_blocks(blocks: Vec<String>, maximum: usize) -> String {
+    let complete = blocks.concat();
+    if complete.len() <= maximum {
+        return complete;
+    }
+    let available = maximum.saturating_sub(TRUNCATION_NOTICE.len());
+    let mut output = String::new();
+    for block in blocks {
+        if output.len().saturating_add(block.len()) <= available {
+            output.push_str(&block);
+        }
+    }
+    if output.len().saturating_add(TRUNCATION_NOTICE.len()) <= maximum {
+        output.push_str(TRUNCATION_NOTICE);
+    }
+    output
+}
+
+fn bounded_source_block(name: &str, value: &str, maximum: usize) -> Option<String> {
+    let heading = format!("\n## {}\n\n", heading(name));
+    let minimum = heading.len().saturating_add("```text\n\n```\n".len());
+    if minimum > maximum {
+        return None;
+    }
+
+    let mut boundary = 0_usize;
+    let mut current_backticks = 0_usize;
+    let mut longest_backticks = 0_usize;
+    for (offset, character) in value.char_indices() {
+        current_backticks = if character == '`' {
+            current_backticks + 1
+        } else {
+            0
+        };
+        longest_backticks = longest_backticks.max(current_backticks);
+        let next_boundary = offset + character.len_utf8();
+        let fence_bytes = longest_backticks.max(2) + 1;
+        let candidate_bytes = heading
+            .len()
+            .saturating_add(next_boundary)
+            .saturating_add(fence_bytes.saturating_mul(2))
+            .saturating_add("text\n\n\n".len());
+        if candidate_bytes > maximum {
+            break;
+        }
+        boundary = next_boundary;
+    }
+
+    let retained = &value[..boundary];
+    let fence = fence_marker(retained);
+    Some(format!("{heading}{fence}text\n{retained}\n{fence}\n"))
 }
 
 fn render_nested_schema_catalog(
@@ -91,10 +450,10 @@ fn render_nested_schema_catalog(
         .unwrap_or(total > schemas.len());
     let version = object
         .get("schema_version")
-        .map_or_else(|| "_none_".to_owned(), compact);
+        .map_or_else(|| "_none_".to_owned(), compact_json);
     let media_type = object
         .get("media_type")
-        .map_or_else(|| "_none_".to_owned(), compact);
+        .map_or_else(|| "_none_".to_owned(), compact_json);
     let schema_blocks = schemas
         .iter()
         .map(|(name, schema)| schema_catalog_entry(name, schema))
@@ -197,180 +556,7 @@ fn schema_catalog_entry(name: &str, value: &Value) -> String {
     format!("\n## {}\n{}", heading(name), fenced("json", &encoded))
 }
 
-fn compact_control_block(
-    tool: &str,
-    status: ToolStatus,
-    freshness: &FreshnessSummary,
-    warnings: &[String],
-    data: Option<&Value>,
-) -> String {
-    let status = match status {
-        ToolStatus::Ok => "ok",
-        ToolStatus::Degraded => "degraded",
-        ToolStatus::Error => "error",
-    };
-    let freshness = serde_json::to_value(freshness.overall)
-        .ok()
-        .and_then(|value| value.as_str().map(str::to_owned))
-        .unwrap_or_else(|| "unknown".to_owned());
-    let warning = warnings.first().map_or_else(
-        || "none".to_owned(),
-        |warning| compact_text(&inline(warning), 18),
-    );
-    let coverage = data
-        .and_then(|value| value.get("coverage"))
-        .map_or("absent", |_| "present");
-    let path = data.and_then(first_verifiable_path).map_or_else(
-        || "absent".to_owned(),
-        |path| compact_text(&inline(path), 18),
-    );
-    format!(
-        "# {}\nstatus={status} freshness={freshness} truncated=true\nwarning={warning}\ncoverage={coverage} path={path}\n",
-        compact_text(&heading(tool), 24),
-    )
-}
-
-fn first_verifiable_path(value: &Value) -> Option<&str> {
-    match value {
-        Value::Object(object) => {
-            for key in ["path", "file_path", "root"] {
-                if let Some(path) = object.get(key).and_then(Value::as_str) {
-                    return Some(path);
-                }
-            }
-            object.values().find_map(first_verifiable_path)
-        }
-        Value::Array(values) => values.iter().find_map(first_verifiable_path),
-        _ => None,
-    }
-}
-
-fn compact_text(value: &str, maximum: usize) -> String {
-    let value = value.replace(['\n', '\r', '\t'], " ");
-    if value.len() <= maximum {
-        return value;
-    }
-    let mut boundary = maximum;
-    while boundary > 0 && !value.is_char_boundary(boundary) {
-        boundary -= 1;
-    }
-    value[..boundary].to_owned()
-}
-
-fn push_control_blocks(
-    schema_version: u32,
-    status: ToolStatus,
-    freshness: &FreshnessSummary,
-    warnings: &[String],
-    blocks: &mut Vec<String>,
-) {
-    let status = match status {
-        ToolStatus::Ok => "ok",
-        ToolStatus::Degraded => "degraded",
-        ToolStatus::Error => "error",
-    };
-    blocks.push(format!(
-        "\n## Status\n\n- State: `{status}`\n- Delivery schema: `{schema_version}`\n"
-    ));
-    blocks.push("\n## Warnings\n".to_owned());
-    let warnings = serde_json::to_value(warnings).unwrap_or(Value::Null);
-    render_value_blocks(None, &warnings, 3, blocks);
-    blocks.push("\n## Freshness\n".to_owned());
-    let freshness = serde_json::to_value(freshness).unwrap_or(Value::Null);
-    render_value_blocks(None, &freshness, 3, blocks);
-}
-
-fn push_report_blocks(value: &Value, blocks: &mut Vec<String>) {
-    let Value::Object(object) = value else {
-        blocks.push("\n## Result\n".to_owned());
-        render_value_blocks(None, value, 3, blocks);
-        return;
-    };
-    for (field, heading_name) in [("evidence", "Evidence"), ("coverage", "Coverage")] {
-        if let Some(value) = object.get(field) {
-            blocks.push(format!("\n## {heading_name}\n"));
-            render_value_blocks(None, value, 3, blocks);
-        }
-    }
-    blocks.push("\n## Result\n".to_owned());
-    for (name, value) in prioritized_fields(object, &["evidence", "coverage", "source_markdown"]) {
-        render_value_blocks(Some(name), value, 3, blocks);
-    }
-    if let Some(source) = object.get("source_markdown") {
-        blocks.push("\n## Source\n".to_owned());
-        render_value_blocks(None, source, 3, blocks);
-    }
-}
-
-fn prioritized_fields<'a>(
-    object: &'a Map<String, Value>,
-    excluded: &[&str],
-) -> Vec<(&'a str, &'a Value)> {
-    const PRIORITY: &[&str] = &[
-        "repository",
-        "locations",
-        "truncations",
-        "next_actions",
-        "resolved_symbols",
-        "local_relationships",
-        "federated_handoffs",
-        "execution",
-    ];
-    let mut fields = object
-        .iter()
-        .filter(|(key, _)| !excluded.contains(&key.as_str()))
-        .map(|(key, value)| (key.as_str(), value))
-        .collect::<Vec<_>>();
-    fields.sort_by_key(|(key, _)| {
-        PRIORITY
-            .iter()
-            .position(|candidate| candidate == key)
-            .unwrap_or(PRIORITY.len())
-    });
-    fields
-}
-
-fn render_value_blocks(name: Option<&str>, value: &Value, level: usize, blocks: &mut Vec<String>) {
-    if let Some(name) = name {
-        blocks.push(format!(
-            "\n{} {}\n",
-            "#".repeat(level.min(6)),
-            heading(name)
-        ));
-    }
-    match value {
-        Value::Null => blocks.push("\n_None._\n".to_owned()),
-        Value::Bool(value) => blocks.push(format!("\n`{value}`\n")),
-        Value::Number(value) => blocks.push(format!("\n`{value}`\n")),
-        Value::String(value) if value.contains('\n') || value.len() > 160 => {
-            blocks.push(fenced("text", value));
-        }
-        Value::String(value) => blocks.push(format!("\n{}\n", inline(value))),
-        Value::Array(values) if values.is_empty() => blocks.push("\n_None._\n".to_owned()),
-        Value::Array(values) => {
-            for (index, value) in values.iter().enumerate() {
-                match value {
-                    Value::Object(_) | Value::Array(_) => {
-                        blocks.push(format!(
-                            "\n{} Item {}\n",
-                            "#".repeat((level + 1).min(6)),
-                            index + 1
-                        ));
-                        render_value_blocks(None, value, level + 2, blocks);
-                    }
-                    _ => blocks.push(format!("\n- {}\n", compact(value))),
-                }
-            }
-        }
-        Value::Object(object) => {
-            for (key, value) in prioritized_fields(object, &[]) {
-                render_value_blocks(Some(key), value, level, blocks);
-            }
-        }
-    }
-}
-
-fn compact(value: &Value) -> String {
+fn compact_json(value: &Value) -> String {
     match value {
         Value::Null => "_none_".to_owned(),
         Value::Bool(value) => format!("`{value}`"),
@@ -380,44 +566,41 @@ fn compact(value: &Value) -> String {
     }
 }
 
-fn fit_blocks(blocks: Vec<String>, maximum: usize, compact: Option<String>) -> String {
-    let complete_length = blocks
-        .iter()
-        .fold(0_usize, |length, block| length.saturating_add(block.len()));
-    if complete_length <= maximum {
-        return blocks.concat();
+fn tool_status(status: ToolStatus) -> &'static str {
+    match status {
+        ToolStatus::Ok => "ok",
+        ToolStatus::Degraded => "degraded",
+        ToolStatus::Error => "error",
     }
-    let reserve = TRUNCATION_NOTICE.len().min(maximum);
-    let mut output = compact
-        .filter(|block| block.len() <= maximum.saturating_sub(reserve))
-        .unwrap_or_default();
-    for block in blocks {
-        if output.len().saturating_add(block.len()) <= maximum.saturating_sub(reserve) {
-            output.push_str(&block);
-        }
+}
+
+fn compact_text(value: &str, maximum: usize) -> String {
+    let value = value.replace(['\n', '\r', '\t'], " ");
+    let boundary = utf8_boundary_at_or_before(&value, maximum);
+    value[..boundary].to_owned()
+}
+
+fn utf8_boundary_at_or_before(value: &str, maximum: usize) -> usize {
+    let mut boundary = maximum.min(value.len());
+    while boundary > 0 && !value.is_char_boundary(boundary) {
+        boundary -= 1;
     }
-    if output.len().saturating_add(TRUNCATION_NOTICE.len()) <= maximum {
-        output.push_str(TRUNCATION_NOTICE);
-    }
-    if output.len() > maximum {
-        let mut boundary = maximum;
-        while boundary > 0 && !output.is_char_boundary(boundary) {
-            boundary -= 1;
-        }
-        output.truncate(boundary);
-    }
-    output
+    boundary
 }
 
 fn fenced(language: &str, value: &str) -> String {
     let value = safe_multiline(value);
+    let fence = fence_marker(&value);
+    format!("\n{fence}{language}\n{value}\n{fence}\n")
+}
+
+fn fence_marker(value: &str) -> String {
     let longest = value
         .split(|character| character != '`')
         .map(str::len)
         .max()
         .unwrap_or(0);
-    let fence = "`".repeat(longest.max(2) + 1);
-    format!("\n{fence}{language}\n{value}\n{fence}\n")
+    "`".repeat(longest.max(2) + 1)
 }
 
 fn heading(value: &str) -> String {
@@ -427,7 +610,7 @@ fn heading(value: &str) -> String {
             '_' | '-' | '\n' | '\r' | '\t' | '\0' => ' ',
             character => safe_character(character),
         })
-        .collect::<String>()
+        .collect()
 }
 
 fn inline(value: &str) -> String {
@@ -483,7 +666,7 @@ fn safe_character(character: char) -> char {
 mod tests {
     use code_system_graph_model::{FreshnessSummary, OverallFreshness, ToolStatus};
 
-    use super::{render_envelope, render_resource, render_schema_catalog};
+    use super::{MarkdownDocument, render_schema_catalog};
 
     fn freshness() -> FreshnessSummary {
         FreshnessSummary {
@@ -494,133 +677,130 @@ mod tests {
     }
 
     #[test]
-    fn tool_rendering_is_bounded_utf8_markdown_without_json_envelope() {
-        let rendered = render_envelope(
+    fn complete_document_that_exactly_fits_should_not_claim_truncation() {
+        let document = MarkdownDocument::tool(
             "query",
             2,
             ToolStatus::Ok,
             &freshness(),
             &[],
-            Some(&serde_json::json!({
-                "path": "src/💡.rs",
-                "items": ["one", "[untrusted](https://example.test)\u{202e}"]
-            })),
-            512,
+            true,
+            Some("src/lib.rs"),
         );
-        assert!(rendered.len() <= 512);
-        assert!(rendered.contains("# query"));
-        assert!(!rendered.contains("\"schema_version\""));
-        assert!(!rendered.contains('\u{202e}'));
-        assert!(rendered.contains("\\[untrusted\\]\\(https://example.test\\)�"));
-        assert!(std::str::from_utf8(rendered.as_bytes()).is_ok());
+        let complete = document.render(4_096);
+        let exact = complete.len();
+        let document = MarkdownDocument::tool(
+            "query",
+            2,
+            ToolStatus::Ok,
+            &freshness(),
+            &[],
+            true,
+            Some("src/lib.rs"),
+        );
+        assert_eq!(document.render(exact), complete);
+        assert!(!complete.contains("## Truncation"));
     }
 
     #[test]
-    fn every_mcp_tool_should_render_its_report_specific_fixture() {
-        for (tool, value, expected_field) in [
-            (
-                "trace",
-                serde_json::json!({"segments": ["a -> b"]}),
-                "segments",
-            ),
-            (
-                "query",
-                serde_json::json!({"hits": [{"id": "node:a"}]}),
-                "hits",
-            ),
-            (
-                "explore",
-                serde_json::json!({"resolved_symbols": ["a"]}),
-                "resolved symbols",
-            ),
-            (
-                "communities",
-                serde_json::json!({"communities": ["one"]}),
-                "communities",
-            ),
-            ("impact", serde_json::json!({"risk": "high"}), "risk"),
-            (
-                "analyze_changes",
-                serde_json::json!({"changed_files": ["a.rs"]}),
-                "changed files",
-            ),
-            (
-                "analyze_pull_request",
-                serde_json::json!({"pull_request": 42}),
-                "pull request",
-            ),
-            (
-                "status",
-                serde_json::json!({"integrity_ok": true}),
-                "integrity ok",
-            ),
-            (
-                "contracts",
-                serde_json::json!({"contracts": ["api"]}),
-                "contracts",
-            ),
-            (
-                "source_context",
-                serde_json::json!({"evidence": ["ev:1"]}),
-                "Evidence",
-            ),
-            (
-                "scan",
-                serde_json::json!({"snapshot_id": "snapshot:1"}),
-                "snapshot id",
-            ),
-            (
-                "update_workspace",
-                serde_json::json!({"mutation": "add"}),
-                "mutation",
-            ),
-            (
-                "write_manual_link",
-                serde_json::json!({"manual_link": "edge:1"}),
-                "manual link",
-            ),
-            (
-                "clean_cache",
-                serde_json::json!({"removed_entries": 3}),
-                "removed entries",
-            ),
-            (
-                "recompute_communities",
-                serde_json::json!({"community_count": 4}),
-                "community count",
-            ),
+    fn minimum_budget_should_keep_mandatory_tool_control() {
+        let minimum =
+            usize::try_from(code_system_graph_core::MIN_MCP_MARKDOWN_BYTES).expect("MCP minimum");
+        let rendered = MarkdownDocument::tool(
+            "query",
+            2,
+            ToolStatus::Degraded,
+            &freshness(),
+            &["provider timed out".to_owned()],
+            true,
+            Some("src/💡.rs"),
+        )
+        .render(minimum);
+        assert!(rendered.len() <= minimum);
+        for required in [
+            "status=degraded",
+            "freshness=fresh",
+            "warning=provider timed out",
+            "coverage=present",
+            "path=src/💡.rs",
+            "## Truncation",
         ] {
-            let rendered = render_envelope(
-                tool,
-                2,
-                ToolStatus::Ok,
-                &freshness(),
-                &[],
-                Some(&value),
-                4_096,
-            );
-            assert!(rendered.starts_with(&format!("# {}", tool.replace('_', " "))));
-            assert!(rendered.contains(expected_field), "{tool}: {rendered}");
+            assert!(rendered.contains(required), "{rendered}");
         }
     }
 
     #[test]
-    fn schema_catalog_uses_closed_json_fences() {
-        let rendered =
-            render_schema_catalog(&serde_json::json!({"query": {"type": "object"}}), 512);
-        assert_eq!(rendered.matches("```json").count(), 1);
+    fn oversized_source_should_keep_utf8_prefix_and_close_fence() {
+        let mut document = MarkdownDocument::tool(
+            "explore",
+            2,
+            ToolStatus::Degraded,
+            &freshness(),
+            &[],
+            true,
+            Some("src/lib.rs"),
+        );
+        document.source("Source", &"💡 source line\n".repeat(128));
+        let rendered = document.render(512);
+        assert!(rendered.contains("💡 source"), "{rendered}");
+        assert_eq!(rendered.matches("```text").count(), 1);
         assert_eq!(rendered.matches("\n```\n").count(), 1);
+        assert!(rendered.contains("## Truncation"));
+        assert!(std::str::from_utf8(rendered.as_bytes()).is_ok());
     }
 
     #[test]
-    fn bounded_nested_catalog_should_retain_individual_schemas_with_exact_coverage() {
+    fn source_fitting_should_ignore_backticks_outside_the_retained_prefix() {
+        let mut document = MarkdownDocument::tool(
+            "explore",
+            2,
+            ToolStatus::Degraded,
+            &freshness(),
+            &[],
+            true,
+            Some("src/lib.rs"),
+        );
+        document.source("Source", &format!("useful source\n{}", "`".repeat(2_048)));
+        let rendered = document.render(512);
+
+        assert!(rendered.contains("useful source"), "{rendered}");
+        assert!(rendered.contains("## Source"), "{rendered}");
+        assert!(rendered.contains("## Truncation"), "{rendered}");
+    }
+
+    #[test]
+    fn byte_fitting_should_recompute_delivered_collection_metadata() {
+        let mut document = MarkdownDocument::resource("bounded", 2);
+        document.bounded_collection("Items", 2, 2, false, &["a".repeat(128), "b".repeat(128)]);
+        let rendered = document.render(256);
+
+        assert!(rendered.contains("- Total: `2`"), "{rendered}");
+        assert!(rendered.contains("- Retained: `0`"), "{rendered}");
+        assert!(rendered.contains("- Truncated: `true`"), "{rendered}");
+        assert!(!rendered.contains(&"a".repeat(32)), "{rendered}");
+    }
+
+    #[test]
+    fn large_collection_fitting_should_remain_linear_and_exact() {
+        let items = (0..10_000)
+            .map(|index| format!("item-{index}"))
+            .collect::<Vec<_>>();
+        let mut document = MarkdownDocument::resource("bounded", 2);
+        document.bounded_collection("Items", items.len(), items.len(), false, &items);
+        let rendered = document.render(1_048_576);
+
+        assert!(rendered.contains("- Retained: `10000`"), "{rendered}");
+        assert!(rendered.contains("- Truncated: `false`"), "{rendered}");
+        assert!(rendered.contains("item-9999"), "{rendered}");
+    }
+
+    #[test]
+    fn bounded_nested_catalog_should_retain_individual_schemas() {
         let rendered = render_schema_catalog(
             &serde_json::json!({
                 "schema_version": 2,
                 "media_type": "application/schema+json",
                 "schema_total": 2,
-                "schema_retained": 2,
-                "schemas_truncated": false,
                 "schemas": {
                     "alpha": {"type": "string"},
                     "beta": {"description": "x".repeat(1_024)}
@@ -628,153 +808,9 @@ mod tests {
             }),
             512,
         );
-
         assert!(rendered.contains("## alpha"), "{rendered}");
         assert!(!rendered.contains("## beta"), "{rendered}");
         assert!(rendered.contains("retained `1`"), "{rendered}");
         assert!(rendered.contains("truncated `true`"), "{rendered}");
-        assert_eq!(rendered.matches("```json").count(), 1);
-        assert_eq!(rendered.matches("\n```\n").count(), 1);
-        assert!(rendered.contains("## Truncation"));
-    }
-
-    #[test]
-    fn every_resource_shape_should_render_as_markdown() {
-        for (name, resource, expected) in [
-            (
-                "workspaces",
-                serde_json::json!({"workspaces": ["commerce"]}),
-                "workspaces",
-            ),
-            (
-                "overview",
-                serde_json::json!({"snapshot": {"id": "one"}}),
-                "snapshot",
-            ),
-            (
-                "status",
-                serde_json::json!({"status": {"integrity_ok": true}}),
-                "integrity ok",
-            ),
-            (
-                "repositories",
-                serde_json::json!({"repositories": ["api"]}),
-                "repositories",
-            ),
-            (
-                "services",
-                serde_json::json!({"entities": ["service"]}),
-                "entities",
-            ),
-            (
-                "contracts",
-                serde_json::json!({"entities": ["contract"]}),
-                "entities",
-            ),
-            (
-                "communities",
-                serde_json::json!({"communities": ["one"]}),
-                "communities",
-            ),
-            (
-                "coverage",
-                serde_json::json!({"runs": ["extractor"]}),
-                "runs",
-            ),
-            (
-                "evidence",
-                serde_json::json!({"evidence": {"id": "ev:1"}}),
-                "evidence",
-            ),
-        ] {
-            let rendered = render_resource(&resource, 4_096);
-            assert!(
-                rendered.starts_with("# Code System Graph Resource"),
-                "{name}"
-            );
-            assert!(rendered.contains(expected), "{name}: {rendered}");
-        }
-    }
-
-    #[test]
-    fn truncation_should_preserve_atomic_fences_and_utf8_boundaries() {
-        let rendered = render_envelope(
-            "explore",
-            2,
-            ToolStatus::Degraded,
-            &freshness(),
-            &["bounded".to_owned()],
-            Some(&serde_json::json!({
-                "coverage": {"gaps": ["neighbors"]},
-                "source_markdown": "```rust\nfn 💡() {}\n```\n".repeat(30)
-            })),
-            320,
-        );
-
-        assert!(rendered.len() <= 320);
-        assert!(std::str::from_utf8(rendered.as_bytes()).is_ok());
-        assert_eq!(
-            rendered.matches("```text").count(),
-            rendered.matches("\n```\n").count()
-        );
-        assert!(rendered.contains("## Truncation"));
-    }
-
-    #[test]
-    fn exact_response_budget_should_not_trigger_truncation() {
-        let value = serde_json::json!({"message": "ready"});
-        let complete = render_envelope(
-            "query",
-            2,
-            ToolStatus::Ok,
-            &freshness(),
-            &[],
-            Some(&value),
-            4_096,
-        );
-        let exact = render_envelope(
-            "query",
-            2,
-            ToolStatus::Ok,
-            &freshness(),
-            &[],
-            Some(&value),
-            complete.len(),
-        );
-
-        assert_eq!(exact, complete);
-        assert!(!exact.contains("## Truncation"));
-    }
-
-    #[test]
-    fn minimum_response_budget_should_keep_control_and_truncation_blocks() {
-        let minimum = usize::try_from(code_system_graph_core::MIN_MCP_MARKDOWN_BYTES)
-            .expect("MCP minimum is usize-representable");
-        let rendered = render_envelope(
-            "query",
-            2,
-            ToolStatus::Degraded,
-            &FreshnessSummary {
-                overall: OverallFreshness::Stale,
-                stale_repositories: vec![code_system_graph_model::RepoId::new("repo:api")],
-                reasons: vec!["snapshot is stale".to_owned()],
-            },
-            &["provider timed out".to_owned()],
-            Some(&serde_json::json!({
-                "coverage": {"gaps": ["neighbors unavailable"]},
-                "locations": [{"path": "src/api.rs"}],
-                "hits": ["x".repeat(512)]
-            })),
-            minimum,
-        );
-
-        assert_ne!(rendered, "");
-        assert!(rendered.len() <= minimum);
-        assert!(rendered.contains("status=degraded"));
-        assert!(rendered.contains("freshness=stale"));
-        assert!(rendered.contains("provider timed out"));
-        assert!(rendered.contains("coverage=present"));
-        assert!(rendered.contains("path=src/api.rs"));
-        assert!(rendered.contains("## Truncation"));
     }
 }

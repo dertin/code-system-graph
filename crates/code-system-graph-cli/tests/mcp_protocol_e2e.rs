@@ -208,7 +208,7 @@ async fn stdio_explore_should_proxy_bounded_ephemeral_codegraph_context() -> any
         .await?;
     assert_ne!(impact.is_error, Some(true));
     assert!(impact.structured_content.is_none());
-    assert!(tool_text(&impact).contains("local impact summaries"));
+    assert!(tool_text(&impact).contains("Local impact summaries"));
     let _ = service.close().await;
     let status = tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await??;
     assert!(status.success());

@@ -19,8 +19,12 @@ use crate::{
     ChangesInput, CommunityInput, CommunityReport, ExploreInput, ExploreReport, ManifestMutationSummary, PullRequestInput, ScanSummary, SearchInput, TraceInput
 };
 
+mod presentation;
+#[cfg(test)]
+mod presentation_goldens;
 mod resources;
 
+pub(super) use presentation::AgentToolResult;
 pub(super) use resources::{ResourceErrorKind, read_resource, resource_templates, resource_uris};
 
 pub(super) const ADMIN_TOOL_NAMES: [&str; 5] = [
@@ -361,7 +365,7 @@ pub(super) struct SourceContextInput {
     pub evidence_limit: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub(super) struct SnapshotMetrics {
     pub snapshot_id: String,
     pub node_count: usize,
@@ -369,7 +373,7 @@ pub(super) struct SnapshotMetrics {
     pub evidence_count: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub(super) struct GraphStatusReport {
     pub workspace: String,
     pub schema_version: i64,
@@ -378,7 +382,7 @@ pub(super) struct GraphStatusReport {
     pub repositories: Vec<RepoFreshness>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub(super) struct SourceContextReport {
     pub workspace: String,
     pub entity: Node,
@@ -388,7 +392,7 @@ pub(super) struct SourceContextReport {
     pub truncated: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub(super) struct AdminAudit<T> {
     pub schema_version: u32,
     pub operation: String,
@@ -398,13 +402,13 @@ pub(super) struct AdminAudit<T> {
     pub result: T,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub(super) struct ManifestAdminReport {
     pub mutation: ManifestMutationSummary,
     pub scan: ScanSummary,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub(super) struct CacheCleanReport {
     pub removed_entries: usize,
 }
