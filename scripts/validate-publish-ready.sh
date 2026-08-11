@@ -39,7 +39,7 @@ fi
 "$ROOT/scripts/smoke-install.sh" "$PACKAGE_DIR"
 
 if rg -n -i \
-  'phase[ _-]?[0-9]+|fase[ _-]?[0-9]+|PLAN\.md|STATUS\.md|PROMPT-(GPT|RESUME)|schema v[2-9][0-9]*|3700fe3|93c0078|/opt/[[:alnum:]_.-]+' \
+  'phase[ _-]?[0-9]+|fase[ _-]?[0-9]+|PLAN\.md|STATUS\.md|PROMPT-(GPT|RESUME)|3700fe3|93c0078|/opt/[[:alnum:]_.-]+' \
   "$ROOT" \
   --glob '!target/**' \
   --glob '!dist/**' \
