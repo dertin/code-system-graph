@@ -3,7 +3,7 @@
 All notable public changes to Code System Graph are documented in this file. Code System Graph follows Semantic
 Versioning.
 
-## [1.1.0] - 2026-08-10
+## [1.1.0] - 2026-08-11
 
 ### Breaking changes
 
@@ -30,6 +30,24 @@ Versioning.
   a real registered repository alias is recognized.
 - Added bounded Markdown rendering with UTF-8-safe, block-stable truncation and centralized escaping
   for headings, inline values, paths, controls, and untrusted source blocks.
+
+### Fixed
+
+- Explore now enforces one deadline across snapshot loading, provider traversal, and correlation;
+  timed-out or abandoned work is cooperatively cancelled while partial context remains available.
+- Snapshot and candidate identity now includes the complete scan fingerprint while excluding
+  agent-delivery-only settings, so scan-facing changes cannot reuse stale persisted results.
+- Explore reports observed provider concurrency and counts an anchor as traversed only after both
+  caller and callee directions complete successfully.
+- MCP rendering now preserves compact status, freshness, warnings, coverage, and paths at the
+  256-byte minimum, and reports collection retention after both item and byte limits are applied.
+
+### Release engineering
+
+- Added exhaustive typed Markdown fixtures and golden coverage for all 15 MCP tools and every MCP
+  resource, including low-budget, UTF-8, fenced-source, error, and nested-collection cases.
+- Added direct deadline and cancellation tests for Explore snapshot loading and correlation, plus
+  synchronized Markdown-only MCP instructions and CLI configuration examples.
 
 ## [1.0.3] - 2026-08-09
 
