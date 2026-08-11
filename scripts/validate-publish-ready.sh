@@ -16,7 +16,7 @@ RUSTDOCFLAGS="-D warnings" cargo +stable doc --workspace --exclude code-system-g
 cargo deny check
 cargo audit --deny warnings
 if command -v gitleaks >/dev/null 2>&1; then
-  gitleaks dir --no-banner --redact "$ROOT"
+  gitleaks dir --no-banner --redact .
 elif command -v docker >/dev/null 2>&1; then
   container="$(docker create zricethezav/gitleaks:latest dir /tmp --no-banner --redact)"
   trap 'docker rm -f "$container" >/dev/null 2>&1 || true' EXIT
