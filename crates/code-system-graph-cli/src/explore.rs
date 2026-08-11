@@ -607,7 +607,7 @@ async fn collect_explore_neighbors(
     ledger: &mut ExploreBudgetLedger,
     data: &mut ExploreProviderData,
 ) {
-    for anchor in anchors {
+    for (anchor_index, anchor) in anchors.iter().enumerate() {
         let remaining = ledger.remaining_enrichment_bytes(limits.enrichment_bytes);
         if remaining < 2 {
             ledger
@@ -650,14 +650,25 @@ async fn collect_explore_neighbors(
         let anchor_completed =
             record_explore_neighbor_results(&symbol, incoming, outgoing, limits, ledger, data);
         data.anchors_traversed += usize::from(anchor_completed);
-        if data.local_relationships.len() >= limits.relationship_limit {
+        let observed_relationships = data.local_relationships.len();
+        if observed_relationships >= limits.relationship_limit {
             data.local_relationships.truncate(limits.relationship_limit);
-            ledger
-                .truncations
-                .push("maxExploreLocalRelationships".to_owned());
+            if local_relationships_truncated(
+                observed_relationships,
+                limits.relationship_limit,
+                anchor_index + 1 < anchors.len(),
+            ) {
+                ledger
+                    .truncations
+                    .push("maxExploreLocalRelationships".to_owned());
+            }
             break;
         }
     }
+}
+
+fn local_relationships_truncated(observed: usize, maximum: usize, anchors_remaining: bool) -> bool {
+    observed > maximum || (observed == maximum && anchors_remaining)
 }
 
 fn record_explore_neighbor_results(

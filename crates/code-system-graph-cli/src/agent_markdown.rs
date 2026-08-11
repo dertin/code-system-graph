@@ -50,15 +50,20 @@ pub(crate) fn render_resource<T: Serialize>(resource: &T, maximum: usize) -> Str
 
 /// Renders the heterogeneous schema catalog with atomic fenced JSON entries.
 pub(crate) fn render_schema_catalog(value: &Value, maximum: usize) -> String {
+    if let Some(object) = value.as_object()
+        && let Some(schemas) = object.get("schemas").and_then(Value::as_object)
+    {
+        return render_nested_schema_catalog(object, schemas, maximum);
+    }
     let mut blocks = vec!["# Schema Catalog\n".to_owned()];
     if let Some(object) = value.as_object() {
         for (name, schema) in object {
             let encoded =
                 serde_json::to_string_pretty(schema).unwrap_or_else(|_| "null".to_owned());
             blocks.push(format!(
-                "\n## {}\n\n```json\n{}\n```\n",
+                "\n## {}\n{}",
                 heading(name),
-                encoded
+                fenced("json", &encoded)
             ));
         }
     } else {
@@ -66,6 +71,130 @@ pub(crate) fn render_schema_catalog(value: &Value, maximum: usize) -> String {
         blocks.push(fenced("json", &text));
     }
     fit_blocks(blocks, maximum, None)
+}
+
+fn render_nested_schema_catalog(
+    object: &Map<String, Value>,
+    schemas: &Map<String, Value>,
+    maximum: usize,
+) -> String {
+    let header = "# Schema Catalog\n".to_owned();
+    let total = object
+        .get("schema_total")
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .unwrap_or(schemas.len())
+        .max(schemas.len());
+    let source_truncated = object
+        .get("schemas_truncated")
+        .and_then(Value::as_bool)
+        .unwrap_or(total > schemas.len());
+    let version = object
+        .get("schema_version")
+        .map_or_else(|| "_none_".to_owned(), compact);
+    let media_type = object
+        .get("media_type")
+        .map_or_else(|| "_none_".to_owned(), compact);
+    let schema_blocks = schemas
+        .iter()
+        .map(|(name, schema)| schema_catalog_entry(name, schema))
+        .collect::<Vec<_>>();
+    let optional_blocks = object
+        .iter()
+        .filter(|(name, _)| {
+            !matches!(
+                name.as_str(),
+                "schema_version"
+                    | "media_type"
+                    | "schemas"
+                    | "schema_total"
+                    | "schema_retained"
+                    | "schemas_truncated"
+            )
+        })
+        .map(|(name, value)| schema_catalog_entry(name, value))
+        .collect::<Vec<_>>();
+    let complete_preamble = schema_catalog_preamble(
+        &version,
+        &media_type,
+        total,
+        schemas.len(),
+        source_truncated || total > schemas.len(),
+    );
+    let complete_length = std::iter::once(&header)
+        .chain(std::iter::once(&complete_preamble))
+        .chain(schema_blocks.iter())
+        .chain(optional_blocks.iter())
+        .fold(0_usize, |length, block| length.saturating_add(block.len()));
+    if complete_length <= maximum {
+        return std::iter::once(header)
+            .chain(std::iter::once(complete_preamble))
+            .chain(schema_blocks)
+            .chain(optional_blocks)
+            .collect();
+    }
+
+    let available = maximum.saturating_sub(TRUNCATION_NOTICE.len());
+    let mut retained_blocks = Vec::new();
+    let mut retained_bytes = 0_usize;
+    for block in schema_blocks {
+        let candidate_count = retained_blocks.len() + 1;
+        let candidate_preamble = schema_catalog_preamble(
+            &version,
+            &media_type,
+            total,
+            candidate_count,
+            source_truncated || total > candidate_count,
+        );
+        let candidate_length = header
+            .len()
+            .saturating_add(candidate_preamble.len())
+            .saturating_add(retained_bytes)
+            .saturating_add(block.len());
+        if candidate_length <= available {
+            retained_bytes = retained_bytes.saturating_add(block.len());
+            retained_blocks.push(block);
+        }
+    }
+    let retained = retained_blocks.len();
+    let preamble = schema_catalog_preamble(
+        &version,
+        &media_type,
+        total,
+        retained,
+        source_truncated || total > retained,
+    );
+    let mut output = header;
+    output.push_str(&preamble);
+    for block in retained_blocks {
+        output.push_str(&block);
+    }
+    for block in optional_blocks {
+        if output.len().saturating_add(block.len()) <= available {
+            output.push_str(&block);
+        }
+    }
+    if output.len().saturating_add(TRUNCATION_NOTICE.len()) <= maximum {
+        output.push_str(TRUNCATION_NOTICE);
+    }
+    output
+}
+
+fn schema_catalog_preamble(
+    version: &str,
+    media_type: &str,
+    total: usize,
+    retained: usize,
+    truncated: bool,
+) -> String {
+    format!(
+        "\n## Catalog\n\n- Schema version: {version}\n- Media type: {media_type}\n- Schemas: total `{total}`, retained `{retained}`, truncated `{truncated}`\n"
+    )
+}
+
+fn schema_catalog_entry(name: &str, value: &Value) -> String {
+    let encoded = serde_json::to_string_pretty(value).unwrap_or_else(|_| "null".to_owned());
+    format!("\n## {}\n{}", heading(name), fenced("json", &encoded))
 }
 
 fn compact_control_block(
@@ -481,6 +610,32 @@ mod tests {
             render_schema_catalog(&serde_json::json!({"query": {"type": "object"}}), 512);
         assert_eq!(rendered.matches("```json").count(), 1);
         assert_eq!(rendered.matches("\n```\n").count(), 1);
+    }
+
+    #[test]
+    fn bounded_nested_catalog_should_retain_individual_schemas_with_exact_coverage() {
+        let rendered = render_schema_catalog(
+            &serde_json::json!({
+                "schema_version": 2,
+                "media_type": "application/schema+json",
+                "schema_total": 2,
+                "schema_retained": 2,
+                "schemas_truncated": false,
+                "schemas": {
+                    "alpha": {"type": "string"},
+                    "beta": {"description": "x".repeat(1_024)}
+                }
+            }),
+            512,
+        );
+
+        assert!(rendered.contains("## alpha"), "{rendered}");
+        assert!(!rendered.contains("## beta"), "{rendered}");
+        assert!(rendered.contains("retained `1`"), "{rendered}");
+        assert!(rendered.contains("truncated `true`"), "{rendered}");
+        assert_eq!(rendered.matches("```json").count(), 1);
+        assert_eq!(rendered.matches("\n```\n").count(), 1);
+        assert!(rendered.contains("## Truncation"));
     }
 
     #[test]

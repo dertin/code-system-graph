@@ -8,7 +8,7 @@ use code_system_graph_model::{
 };
 
 use super::{
-    ExploreBudgetLedger, ExploreNeighborLimits, ExploreProviderData, explore_next_actions, record_explore_neighbor_results
+    ExploreBudgetLedger, ExploreNeighborLimits, ExploreProviderData, explore_next_actions, local_relationships_truncated, record_explore_neighbor_results
 };
 
 fn repository() -> RepositoryRecord {
@@ -155,6 +155,13 @@ fn explore_follow_up_should_retain_the_required_query() {
         action.arguments.get("repository").map(String::as_str),
         Some("api")
     );
+}
+
+#[test]
+fn local_relationship_limit_should_only_report_omitted_work() {
+    assert!(!local_relationships_truncated(48, 48, false));
+    assert!(local_relationships_truncated(48, 48, true));
+    assert!(local_relationships_truncated(49, 48, false));
 }
 
 #[tokio::test]
