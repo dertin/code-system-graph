@@ -156,12 +156,86 @@ fn select_explore_anchors(symbols: &[ResolvedSymbol], maximum: usize) -> Vec<Res
     selected
 }
 
+fn query_mentions_symbol(query: &str, symbol: &str) -> bool {
+    if symbol.is_empty() {
+        return false;
+    }
+    query.match_indices(symbol).any(|(start, _)| {
+        let before = query[..start].chars().next_back();
+        let after = query[start + symbol.len()..].chars().next();
+        let is_identifier =
+            |character: char| character.is_alphanumeric() || matches!(character, '_' | '$');
+        before.is_none_or(|character| !is_identifier(character))
+            && after.is_none_or(|character| !is_identifier(character))
+    })
+}
+
+fn exact_query_symbols(query: &str, symbols: &[ResolvedSymbol]) -> Vec<ResolvedSymbol> {
+    symbols
+        .iter()
+        .filter(|symbol| {
+            query_mentions_symbol(query, &symbol.name)
+                || symbol
+                    .qualified_name
+                    .as_deref()
+                    .is_some_and(|name| query_mentions_symbol(query, name))
+        })
+        .cloned()
+        .collect()
+}
+
+fn exact_query_symbols_with_source_fallback(
+    query: &str,
+    symbols: &[ResolvedSymbol],
+    source_markdown: &str,
+    maximum: usize,
+) -> Vec<ResolvedSymbol> {
+    let exact = exact_query_symbols(query, symbols);
+    if !exact.is_empty() {
+        return exact;
+    }
+    exact_query_symbols(query, &fallback_explore_anchors(source_markdown, maximum))
+}
+
+fn source_section_path(line: &str) -> Option<&str> {
+    line.strip_prefix("**`")?
+        .split_once("`**")
+        .map(|(path, _)| path)
+}
+
+fn source_markdown_for_exact_symbols(source_markdown: &str, symbols: &[ResolvedSymbol]) -> String {
+    let paths = symbols
+        .iter()
+        .map(|symbol| symbol.file_path.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut retained = Vec::new();
+    let mut collecting = false;
+    let mut found = false;
+    for line in source_markdown.lines() {
+        if let Some(path) = source_section_path(line) {
+            collecting = paths.contains(path);
+            found |= collecting;
+        }
+        if collecting {
+            retained.push(line);
+        }
+    }
+    if !found {
+        return source_markdown.to_owned();
+    }
+    format!(
+        "> Source narrowed to files defining the exact symbol(s) named in the query.\n\n{}",
+        retained.join("\n").trim_end()
+    )
+}
+
 fn explore_next_actions(
     workspace: &str,
     repository: &RepositoryRecord,
     query: &str,
     handoffs: &[ExploreFederatedHandoff],
     policy: &ExecutionPolicy,
+    include_refinement: bool,
 ) -> Vec<AgentNextAction> {
     let maximum = usize::try_from(policy.max_agent_next_actions_per_response)
         .expect("validated policy count is usize-representable");
@@ -179,7 +253,7 @@ fn explore_next_actions(
             ),
         })
         .collect::<Vec<_>>();
-    if actions.len() < maximum {
+    if include_refinement && actions.len() < maximum {
         actions.push(AgentNextAction {
             tool: "explore".to_owned(),
             arguments: BTreeMap::from([
@@ -405,7 +479,7 @@ fn partial_snapshot_envelope(
         "{stage} exceeded maxExploreWallTimeMs; no later Explore stages were started"
     ));
     finish_explore_envelope(ExploreEnvelopeInput {
-        next_actions: explore_next_actions(workspace, &repository, &input.query, &[], policy),
+        next_actions: explore_next_actions(workspace, &repository, &input.query, &[], policy, true),
         repository,
         persisted_freshness: snapshot.freshness,
         freshness,
@@ -432,7 +506,7 @@ fn provider_unavailable_envelope(
         .gaps
         .push(format!("CodeGraph provider unavailable: {message}"));
     finish_explore_envelope(ExploreEnvelopeInput {
-        next_actions: explore_next_actions(workspace, &repository, query, &[], policy),
+        next_actions: explore_next_actions(workspace, &repository, query, &[], policy, true),
         repository,
         persisted_freshness: snapshot.freshness,
         freshness,
@@ -515,6 +589,8 @@ pub async fn explore_repository(
         mut ledger,
         anchors,
     } = outcome;
+    let exact_symbol_resolved =
+        !exact_query_symbols(&input.query, &provider_data.resolved_symbols).is_empty();
     ledger.gaps.extend(snapshot.gaps);
 
     let repository_contexts = explore_repository_contexts(&snapshot.registry, &snapshot.freshness);
@@ -538,6 +614,7 @@ pub async fn explore_repository(
         &input.query,
         &federated_handoffs,
         policy,
+        !exact_symbol_resolved,
     );
     if let Err(error) = provider.shutdown().await {
         ledger

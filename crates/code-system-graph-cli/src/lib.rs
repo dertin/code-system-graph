@@ -50,6 +50,7 @@ pub use worker::{
 
 const MAX_TRACE_DEPTH: usize = 32;
 const MAX_SCAN_DEGRADATIONS: usize = 25;
+const QUERY_DELIVERY_REVISION: u32 = 2;
 const GENERATED_STATE_IGNORE_RULE: &[u8] = b".code-system-graph/";
 pub(crate) const CODEGRAPH_DISABLED_CODE: &str = "codegraph_disabled";
 pub(crate) const CODEGRAPH_DISABLED_MESSAGE: &str =
@@ -1848,7 +1849,9 @@ pub(crate) fn search_workspace_for_delivery(
     {
         return Ok(envelope);
     }
-    let (nodes, edges) = store.load_current_graph(workspace)?;
+    let (mut nodes, edges) = store.load_current_graph(workspace)?;
+    let registry = store.load_workspace_registry(workspace)?;
+    apply_repository_alias_labels(&mut nodes, &registry);
     let repository_freshness = store.load_current_freshness(workspace)?;
     let freshness = freshness_summary(&repository_freshness);
     let fts_hits = if input.query.trim().is_empty() {
@@ -1880,7 +1883,6 @@ pub(crate) fn search_workspace_for_delivery(
         limit: input.limit,
     };
     let mut report = search(&nodes, &request)?;
-    let registry = store.load_workspace_registry(workspace)?;
     report.next_actions = query_next_actions(
         workspace,
         input,
@@ -1936,10 +1938,34 @@ fn query_cache_fingerprint(
     policy: &ExecutionPolicy,
     capabilities: QueryActionCapabilities,
 ) -> Result<String, ApplicationError> {
-    let input_json =
-        serde_json::to_vec(&(input, policy.agent_delivery_fingerprint(), capabilities))
-            .map_err(|error| ApplicationError::Initialization(error.to_string()))?;
+    let input_json = serde_json::to_vec(&(
+        QUERY_DELIVERY_REVISION,
+        input,
+        policy.agent_delivery_fingerprint(),
+        capabilities,
+    ))
+    .map_err(|error| ApplicationError::Initialization(error.to_string()))?;
     Ok(stable_id_bytes("query-cache", &input_json))
+}
+
+fn apply_repository_alias_labels(nodes: &mut [Node], registry: &WorkspaceRecord) {
+    let aliases = registry
+        .repositories
+        .iter()
+        .map(|repository| (&repository.id, repository.alias.as_str()))
+        .collect::<BTreeMap<_, _>>();
+    for node in nodes
+        .iter_mut()
+        .filter(|node| node.kind == NodeKind::Repository)
+    {
+        if let Some(alias) = node
+            .repo_id
+            .as_ref()
+            .and_then(|repo_id| aliases.get(repo_id))
+        {
+            node.label = (*alias).to_owned();
+        }
+    }
 }
 
 fn query_next_actions(
@@ -1957,8 +1983,7 @@ fn query_next_actions(
     let mut actions = if capabilities.source_context {
         report
             .hits
-            .iter()
-            .take(maximum)
+            .first()
             .map(|hit| AgentNextAction {
                 tool: "source_context".to_owned(),
                 arguments: BTreeMap::from([
@@ -1967,10 +1992,39 @@ fn query_next_actions(
                 ]),
                 rationale: format!("Inspect persisted evidence for `{}`.", hit.node.label),
             })
+            .into_iter()
             .collect::<Vec<_>>()
     } else {
         Vec::new()
     };
+    if capabilities.explore {
+        let repositories_by_id = registry
+            .repositories
+            .iter()
+            .map(|repository| (&repository.id, repository.alias.as_str()))
+            .collect::<BTreeMap<_, _>>();
+        let mut selected = BTreeSet::new();
+        actions.extend(
+            report
+                .hits
+                .iter()
+                .filter_map(|hit| hit.node.repo_id.as_ref())
+                .filter_map(|repo_id| repositories_by_id.get(repo_id).copied())
+                .filter(|alias| selected.insert((*alias).to_owned()))
+                .take(repository_maximum)
+                .map(|alias| AgentNextAction {
+                    tool: "explore".to_owned(),
+                    arguments: BTreeMap::from([
+                        ("workspace".to_owned(), workspace.to_owned()),
+                        ("repository".to_owned(), alias.to_owned()),
+                        ("query".to_owned(), input.query.clone()),
+                    ]),
+                    rationale: format!(
+                        "Inspect repository-local symbols and call paths in `{alias}` with CodeGraph."
+                    ),
+                }),
+        );
+    }
     if report.hits.is_empty() && capabilities.explore {
         let normalized = input.query.to_lowercase();
         actions.extend(

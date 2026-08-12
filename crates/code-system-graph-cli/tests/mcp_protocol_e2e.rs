@@ -33,12 +33,43 @@ fn fake_codegraph(directory: &std::path::Path) -> anyhow::Result<std::path::Path
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "The protocol acceptance keeps discovery and dual-channel reads in one stdio session"
+)]
 async fn stdio_should_initialize_without_noise_and_hide_admin_tools() -> anyhow::Result<()> {
     let temporary = tempfile::tempdir()?;
     let database = temporary.path().join("graph.db");
     let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../fixtures/platform-demo/code-system-graph.yaml");
     scan_workspace(&fixture, &database)?;
+    let (graph_nodes, graph_edges) =
+        SqliteStore::open_read_only(&database)?.load_current_graph("commerce-platform")?;
+    let source_context_node = graph_edges
+        .first()
+        .map(|edge| edge.source.clone())
+        .or_else(|| graph_nodes.first().map(|node| node.id.clone()))
+        .ok_or_else(|| anyhow::anyhow!("graph node"))?;
+    let query_label = graph_nodes
+        .iter()
+        .find(|node| node.id == source_context_node)
+        .map(|node| node.label.clone())
+        .ok_or_else(|| anyhow::anyhow!("query label"))?;
+    let orders_table = graph_nodes
+        .iter()
+        .find(|node| {
+            node.kind == code_system_graph_model::NodeKind::DatabaseTable && node.label == "orders"
+        })
+        .map(|node| node.id.clone())
+        .ok_or_else(|| anyhow::anyhow!("orders table"))?;
+    let orders_channel = graph_nodes
+        .iter()
+        .find(|node| {
+            node.kind == code_system_graph_model::NodeKind::EventChannel
+                && node.label == "orders.created"
+        })
+        .map(|node| node.id.clone())
+        .ok_or_else(|| anyhow::anyhow!("orders event channel"))?;
     let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_csgraph"))
         .args([
             "mcp",
@@ -120,9 +151,101 @@ async fn stdio_should_initialize_without_noise_and_hide_admin_tools() -> anyhow:
             ))
             .await?;
     assert_ne!(contracts.is_error, Some(true));
-    assert!(contracts.structured_content.is_none());
+    assert_eq!(
+        contracts
+            .structured_content
+            .as_ref()
+            .expect("contracts structuredContent")["tool"],
+        "contracts"
+    );
+    assert_eq!(
+        contracts
+            .structured_content
+            .as_ref()
+            .expect("contracts structuredContent")["schema_version"],
+        5
+    );
     assert_eq!(contracts.content.len(), 1);
-    assert!(tool_text(&contracts).starts_with("# contracts"));
+    assert!(tool_text(&contracts).starts_with("# Contract analysis"));
+
+    let query = service
+        .call_tool(
+            CallToolRequestParams::new("query").with_arguments(serde_json::from_value(
+                serde_json::json!({"query": query_label, "limit": 5}),
+            )?),
+        )
+        .await?;
+    assert_ne!(query.is_error, Some(true));
+    let query_structured = query
+        .structured_content
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("query structuredContent"))?;
+    assert_eq!(query_structured["schema_version"], 5);
+    assert_eq!(query_structured["tool"], "query");
+    assert!(query_structured["data"]["results"].is_array());
+    let query_markdown = tool_text(&query);
+    assert!(query_markdown.starts_with("# Architecture search results"));
+    assert!(!query_markdown.contains("SearchHit {"));
+    assert!(!query_markdown.contains("## Offset"));
+
+    let source_context = service
+        .call_tool(CallToolRequestParams::new("source_context").with_arguments(
+            serde_json::from_value(serde_json::json!({
+                "workspace": "commerce-platform",
+                "node_id": source_context_node,
+                "evidence_limit": 10
+            }))?,
+        ))
+        .await?;
+    assert_ne!(source_context.is_error, Some(true));
+    let source_structured = source_context
+        .structured_content
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("source_context structuredContent"))?;
+    assert_eq!(source_structured["tool"], "source_context");
+    assert!(source_structured["data"]["outgoing_relations"].is_array());
+    assert!(source_structured["data"]["incoming_relations"].is_array());
+    assert!(tool_text(&source_context).contains("relationships"));
+
+    let table_context = service
+        .call_tool(CallToolRequestParams::new("source_context").with_arguments(
+            serde_json::from_value(serde_json::json!({
+                "workspace": "commerce-platform",
+                "node_id": orders_table,
+                "evidence_limit": 10
+            }))?,
+        ))
+        .await?;
+    let table_markdown = tool_text(&table_context);
+    assert!(
+        table_markdown.contains("database table `commerce.orders` defined in repository `api`"),
+        "{table_markdown}"
+    );
+    assert!(
+        table_markdown.contains("cross-repository"),
+        "{table_markdown}"
+    );
+
+    let event_context = service
+        .call_tool(CallToolRequestParams::new("source_context").with_arguments(
+            serde_json::from_value(serde_json::json!({
+                "workspace": "commerce-platform",
+                "node_id": orders_channel,
+                "evidence_limit": 10
+            }))?,
+        ))
+        .await?;
+    let event_markdown = tool_text(&event_context);
+    assert!(
+        event_markdown.contains(
+            "repository `api` → **publishes event orders.created to** → repository `worker`"
+        ),
+        "{event_markdown}"
+    );
+    assert!(
+        event_markdown.contains("Derived from observed publisher and subscriber edges"),
+        "{event_markdown}"
+    );
 
     let _ = service.close().await;
     let status = tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await??;
@@ -194,8 +317,18 @@ async fn stdio_explore_should_proxy_bounded_ephemeral_codegraph_context() -> any
             ))
             .await?;
 
-    assert!(explored.structured_content.is_none());
-    assert!(tool_text(&explored).contains("ephemeral local context"));
+    let explore_structured = explored
+        .structured_content
+        .as_ref()
+        .expect("explore structuredContent");
+    assert_eq!(explore_structured["tool"], "explore");
+    assert!(explore_structured["data"].get("source_markdown").is_none());
+    assert!(
+        explore_structured["data"]["execution"]
+            .get("effective_policy")
+            .is_none()
+    );
+    assert!(tool_text(&explored).contains("Repository source exploration"));
     let impact = service
         .call_tool(
             CallToolRequestParams::new("impact").with_arguments(serde_json::from_value(
@@ -207,8 +340,14 @@ async fn stdio_explore_should_proxy_bounded_ephemeral_codegraph_context() -> any
         )
         .await?;
     assert_ne!(impact.is_error, Some(true));
-    assert!(impact.structured_content.is_none());
-    assert!(tool_text(&impact).contains("Local impact summaries"));
+    assert_eq!(
+        impact
+            .structured_content
+            .as_ref()
+            .expect("impact structuredContent")["tool"],
+        "impact"
+    );
+    assert!(tool_text(&impact).contains("Impact of"));
     let _ = service.close().await;
     let status = tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await??;
     assert!(status.success());
@@ -310,7 +449,13 @@ async fn explicit_admin_stdio_should_apply_bounded_audited_mutations() -> anyhow
         )
         .await?;
     assert_ne!(manual.is_error, Some(true));
-    assert!(manual.structured_content.is_none());
+    assert_eq!(
+        manual
+            .structured_content
+            .as_ref()
+            .expect("manual-link structuredContent")["tool"],
+        "write_manual_link"
+    );
     assert!(!tool_text(&manual).contains("State: `error`"));
 
     let update = service
@@ -344,7 +489,12 @@ async fn explicit_admin_stdio_should_apply_bounded_audited_mutations() -> anyhow
         )
         .await?;
     assert_ne!(scan.is_error, Some(true));
-    assert!(scan.structured_content.is_none());
+    assert_eq!(
+        scan.structured_content
+            .as_ref()
+            .expect("scan structuredContent")["tool"],
+        "scan"
+    );
     assert!(!tool_text(&scan).contains("State: `error`"));
 
     let _ = service.close().await;

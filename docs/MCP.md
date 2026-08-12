@@ -2,14 +2,16 @@
 
 Code System Graph exposes a small read-only-by-default stdio MCP surface and advertises the server
 name `code_system_graph` during initialization. Every tool returns exactly one `text` content block
-containing bounded Markdown; MCP responses do not include `structuredContent` or result
-`outputSchema`. Persisted graph tools exclude source bodies; `explore` is the explicit
+containing bounded Markdown plus typed `structuredContent` using agent delivery schema version 5.
+Persisted graph tools exclude source bodies; `explore` is the explicit
 source-bearing, ephemeral exception. Mutating tools are absent from discovery unless the server
 starts with the explicit administrative profile.
 
-Initialization instructions describe this Markdown-only delivery explicitly. Schema version 2
-remains the logical tool/resource contract, while fenced JSON appears only inside the schema
-catalog. Final tool, resource, and schema-catalog Markdown budgets must each be at least 256 bytes.
+Initialization instructions describe this dual-channel delivery explicitly. Schema version 2
+remains the persisted tool/resource contract; agent delivery schema version 5 adds semantic views,
+repository attribution, and explicit derivation metadata. Fenced JSON appears only inside the
+schema catalog. Final tool, resource, and schema-catalog Markdown budgets must each be at least
+256 bytes.
 
 ## `status`
 
@@ -25,7 +27,16 @@ fields. All operations use the shared source-free `ContractRequest` and `Contrac
 ## `source_context`
 
 Returns bounded graph relationships and evidence locators for one exact entity. Source bodies are
-never returned; callers may use the locators for an explicit CodeGraph handoff.
+never returned; callers may use the locators for an explicit CodeGraph handoff. Repository nodes
+receive a bounded projection of semantic relationships from components uniquely attributed to the
+repository by confirmed `contains` edges. Shared tables and internal packages are attributed only
+when one repository owns the declaration; competing owners remain explicitly ambiguous. Event
+summaries are derived only from an exact persisted `publisher -> channel <- subscriber` identity
+and retain evidence from both endpoints. When a repository-level event sentence is available, its
+low-level publisher, subscriber, and delivery observations stay in `structuredContent` but are
+collapsed out of the Markdown. Evidence records distinguish `observed_relation` from
+`structural_attribution`, so a table or package owner statement remains auditable without
+displacing the call, query, or dependency evidence that created the semantic edge.
 
 ## `trace`
 
@@ -40,7 +51,14 @@ responses explain that Query searches persisted entities rather than code bodies
 `explore` when the question names a registered alias. Inputs support
 bounded pagination and graph-entity filters. Each hit includes a stable `NodeId`; clients select
 the intended hit and pass that identifier to `trace`. The server does not silently choose
-between close or ambiguous candidates.
+between close or ambiguous candidates. Agent Markdown starts with deduplicated cross-repository
+relationships and omits structural subordinate matches when their semantically connected parent is
+already present. One persisted relation is rendered once per response even when both endpoint
+entities matched the query. Cross-repository HTTP previews retain bounded evidence for both the
+consumer and provider; database and internal-package previews also retain the confirmed
+declaration evidence used for structural repository attribution. Stable keys, node and edge IDs,
+scores, pagination, and evidence roles remain in `structuredContent` instead of interrupting the
+human-readable Markdown.
 
 ## `explore`
 

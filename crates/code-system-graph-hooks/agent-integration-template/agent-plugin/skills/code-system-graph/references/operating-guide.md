@@ -84,6 +84,16 @@ When adding a repository to the bound workspace:
 8. Exercise one trace, impact, or contract check if the repository has an
    expected connection to another repository.
 
+For a multi-repository workspace, validation is incomplete until `status`
+reports at least one cross-repository relationship or the absence is recorded
+as a concrete extraction coverage gap. Validate a known connection by querying
+both repository aliases, inspecting `source_context`, and tracing the two
+resolved endpoints when a path should exist. Separately validate repository-
+local source intelligence with `explore`; persisted graph edges and CodeGraph
+call paths are different evidence layers. Keep `explore` scoped to a concrete
+symbol, source file, or call path; a repository alias or broad prose search is
+not a useful CodeGraph anchor.
+
 An index with zero supported source files can be legitimate. Record the
 language or content limitation instead of claiming missing files were indexed.
 

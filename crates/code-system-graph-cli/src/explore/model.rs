@@ -20,7 +20,7 @@ pub struct ExploreInput {
     pub query: String,
     /// Maximum source files returned by the local provider.
     #[serde(default)]
-    #[schemars(range(min = 1))]
+    #[schemars(range(min = 1, max = 25))]
     pub max_files: Option<usize>,
 }
 

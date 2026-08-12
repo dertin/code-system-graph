@@ -149,6 +149,89 @@ fn arbitrary_markdown_should_not_form_fallback_anchors() {
 }
 
 #[test]
+fn exact_symbol_in_query_should_exclude_approximate_resolutions() {
+    let symbols = vec![
+        ResolvedSymbol {
+            local_id: Some("function:fetch".to_owned()),
+            name: "fetchHugint".to_owned(),
+            qualified_name: Some("fetchHugint".to_owned()),
+            kind: "function".to_owned(),
+            file_path: "frontend/fetchHugint.js".to_owned(),
+            start_line: 220,
+            score: Some(120.0),
+        },
+        ResolvedSymbol {
+            local_id: Some("function:reset".to_owned()),
+            name: "reset_local_database".to_owned(),
+            qualified_name: Some("reset_local_database".to_owned()),
+            kind: "function".to_owned(),
+            file_path: "backend/local_bootstrap.py".to_owned(),
+            start_line: 205,
+            score: Some(38.0),
+        },
+    ];
+
+    let exact = super::exact_query_symbols("Show exact symbol fetchHugint callers", &symbols);
+
+    assert_eq!(exact.len(), 1);
+    assert_eq!(exact[0].name, "fetchHugint");
+}
+
+#[test]
+fn exact_symbol_source_should_retain_only_its_defining_file() {
+    let source = "**Source Code**\n\n\
+        **`backend/local_bootstrap.py`** — reset_local_database(function)\n\n\
+        ```python\n205 def reset_local_database():\n```\n\n\
+        **`frontend/fetchHugint.js`** — fetchHugint(function)\n\n\
+        ```javascript\n220 export const fetchHugint = async () => {};\n```\n\n\
+        **`frontend/errors.js`** — RequestError(class)\n\n\
+        ```javascript\n1 export class RequestError {}\n```";
+    let exact = ResolvedSymbol {
+        local_id: Some("function:fetch".to_owned()),
+        name: "fetchHugint".to_owned(),
+        qualified_name: Some("fetchHugint".to_owned()),
+        kind: "function".to_owned(),
+        file_path: "frontend/fetchHugint.js".to_owned(),
+        start_line: 220,
+        score: Some(120.0),
+    };
+
+    let narrowed = super::source_markdown_for_exact_symbols(source, &[exact]);
+
+    assert!(narrowed.contains("fetchHugint.js"));
+    assert!(narrowed.contains("export const fetchHugint"));
+    assert!(!narrowed.contains("local_bootstrap"));
+    assert!(!narrowed.contains("errors.js"));
+}
+
+#[test]
+fn blast_radius_should_recover_an_exact_symbol_missed_by_structured_resolution() {
+    let approximate = ResolvedSymbol {
+        local_id: Some("function:normalize".to_owned()),
+        name: "normalizeBaseUrl".to_owned(),
+        qualified_name: Some("normalizeBaseUrl".to_owned()),
+        kind: "function".to_owned(),
+        file_path: "frontend/fetchHugint.js".to_owned(),
+        start_line: 64,
+        score: Some(34.0),
+    };
+    let source = "**Blast radius — what depends on these**\n\n\
+        - `fetchHugint` (frontend/fetchHugint.js:220) — 108 callers\n\n\
+        **Source Code**";
+
+    let exact = super::exact_query_symbols_with_source_fallback(
+        "Símbolo exacto fetchHugint y sus callers",
+        &[approximate],
+        source,
+        5,
+    );
+
+    assert_eq!(exact.len(), 1);
+    assert_eq!(exact[0].name, "fetchHugint");
+    assert_eq!(exact[0].start_line, 220);
+}
+
+#[test]
 fn explore_follow_up_should_retain_the_required_query() {
     let actions = explore_next_actions(
         "commerce",
@@ -156,6 +239,7 @@ fn explore_follow_up_should_retain_the_required_query() {
         "create_order callers",
         &[],
         &code_system_graph_core::ExecutionPolicy::default(),
+        true,
     );
     let action = actions
         .iter()
@@ -170,6 +254,20 @@ fn explore_follow_up_should_retain_the_required_query() {
         action.arguments.get("repository").map(String::as_str),
         Some("api")
     );
+}
+
+#[test]
+fn completed_exact_exploration_should_not_suggest_repeating_explore() {
+    let actions = explore_next_actions(
+        "commerce",
+        &repository(),
+        "create_order",
+        &[],
+        &code_system_graph_core::ExecutionPolicy::default(),
+        false,
+    );
+
+    assert_eq!(actions, []);
 }
 
 #[test]

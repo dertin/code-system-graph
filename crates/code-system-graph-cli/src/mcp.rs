@@ -25,7 +25,7 @@ use crate::{
 mod mcp_support;
 
 use mcp_support::{
-    ADMIN_TOOL_NAMES, AdminAudit, AgentToolResult, CacheCleanInput, CacheCleanReport, CommunitiesInput, ContractsInput, MARKDOWN_MIME_TYPE, ManifestAdminReport, ManualLinkWriteInput, ResourceErrorKind, SourceContextInput, WorkspaceInput, WorkspaceUpdateInput, admin_audit_envelope, admin_mutation_envelope, configured_manifest_path, contracts_envelope, read_resource, resource_templates, resource_uris, source_context_envelope, status_envelope
+    ADMIN_TOOL_NAMES, AdminAudit, AgentPresentationContext, AgentToolResult, CacheCleanInput, CacheCleanReport, CommunitiesInput, ContractsInput, MARKDOWN_MIME_TYPE, ManifestAdminReport, ManualLinkWriteInput, ResourceErrorKind, SourceContextInput, WorkspaceInput, WorkspaceUpdateInput, admin_audit_envelope, admin_mutation_envelope, configured_manifest_path, contracts_envelope, read_resource, resource_templates, resource_uris, source_context_envelope, status_envelope
 };
 
 const EXPLORE_TOOL_NAME: &str = "explore";
@@ -120,19 +120,23 @@ impl CodeSystemGraphServer {
     fn markdown_result(&self, result: AgentToolResult<'_>) -> CallToolResult {
         let maximum = usize::try_from(self.execution_policy.max_mcp_tool_response_bytes)
             .expect("validated policy bytes are usize-representable");
-        let (markdown, is_error) = result.render(maximum);
-        let content = vec![ContentBlock::text(markdown)];
-        if is_error {
-            CallToolResult::error(content)
+        let context = AgentPresentationContext::load(&self.database_path, &self.workspace);
+        let (markdown, is_error) = result.render(maximum, &context);
+        let structured_content = result.structured_content(&context);
+        let content_blocks = vec![ContentBlock::text(markdown)];
+        let mut response = if is_error {
+            CallToolResult::error(content_blocks)
         } else {
-            CallToolResult::success(content)
-        }
+            CallToolResult::success(content_blocks)
+        };
+        response.structured_content = Some(structured_content);
+        response
     }
 
     /// Traces a bounded path through the current federated snapshot.
     #[tool(
         name = "trace",
-        description = "Finds a bounded, explainable path between two persisted entities across repository boundaries. Use when both endpoint identifiers are known; use query first to discover identifiers. Returns bounded Markdown with trace segments and freshness metadata.",
+        description = "Finds a bounded, explainable path between two persisted entities across repository boundaries. Use when both endpoint identifiers are known; use query first to discover identifiers. Returns a readable relationship chain in Markdown plus complete structuredContent.",
         annotations(
             title = "Cross-repository path trace",
             read_only_hint = true,
@@ -162,7 +166,7 @@ impl CodeSystemGraphServer {
     /// Searches ranked federated entities without returning source bodies.
     #[tool(
         name = "query",
-        description = "Searches persisted architecture entities, contracts, and communities across the workspace without returning source bodies. Use to discover entity identifiers before trace, source_context, or impact. Returns bounded Markdown with ranked matches and freshness metadata.",
+        description = "Searches persisted architecture entities, contracts, and communities across the workspace without returning source bodies. Use to discover entity identifiers before trace, source_context, or impact. Returns concise Markdown led by deduplicated cross-repository relationships; repository results include bounded semantic relationships from their uniquely owned components. IDs, scores, attribution, and pagination remain in structuredContent.",
         annotations(
             title = "Federated entity search",
             read_only_hint = true,
@@ -191,7 +195,7 @@ impl CodeSystemGraphServer {
     /// Explores bounded repository-local source and flow context without persisting source.
     #[tool(
         name = "explore",
-        description = "Retrieves bounded, ephemeral repository-local source and call-flow context through CodeGraph. Use for symbols, callers, callees, tests, and implementation details; use query for persisted cross-repository entities. Returns bounded Markdown with source-bearing local context that is never persisted.",
+        description = "Retrieves bounded, ephemeral repository-local source and call-flow context through CodeGraph. Use only for a focused symbol, source file, caller/callee path, test, or implementation detail. Do not use it to re-check a repository alias, documentation line, or cross-repository relationship already answered by query/source_context/trace. Returns bounded Markdown with source-bearing local context that is never persisted.",
         annotations(
             title = "Repository source exploration",
             read_only_hint = true,
@@ -259,7 +263,7 @@ impl CodeSystemGraphServer {
     /// Computes conservative impact without executing tests or repository commands.
     #[tool(
         name = "impact",
-        description = "Analyzes bounded upstream or downstream effects and conservative risk for one persisted graph target across repositories. Use for a known entity; use analyze_changes for staged, worktree, or committed Git changes. Returns bounded Markdown with impact, freshness, and optional ephemeral CodeGraph enrichment.",
+        description = "Analyzes bounded upstream or downstream effects and conservative risk for one persisted graph target across repositories. Use for a known entity; use analyze_changes for staged, worktree, or committed Git changes. Returns a semantic Markdown summary plus complete structuredContent.",
         annotations(
             title = "Cross-repository impact analysis",
             read_only_hint = true,
@@ -361,7 +365,7 @@ impl CodeSystemGraphServer {
     /// Reports persisted snapshot health without reading repository source files.
     #[tool(
         name = "status",
-        description = "Reports persisted graph health, freshness, and current snapshot metadata for the configured workspace. Use to verify workspace readiness before other analysis; not for entity search. Returns bounded source-free Markdown.",
+        description = "Reports persisted graph health, freshness, and current snapshot metadata for the configured workspace. Use to verify workspace readiness before other analysis; not for entity search. Returns concise source-free Markdown plus complete structuredContent.",
         annotations(
             title = "Workspace graph status",
             read_only_hint = true,
@@ -395,7 +399,7 @@ impl CodeSystemGraphServer {
     /// Returns bounded persisted graph and evidence metadata for one entity.
     #[tool(
         name = "source_context",
-        description = "Returns bounded, source-free persisted graph context and evidence metadata for one exact entity. Use after query to explain relationships and provenance without source bodies. It does not return implementation source. Returns bounded Markdown with evidence and freshness metadata.",
+        description = "Returns bounded, source-free persisted semantic context and evidence metadata for one exact entity. Use after query to explain incoming and outgoing dependencies, repository scope, provenance, and gaps without source bodies. Adds repository-level projections from uniquely owned components and exact event delivery paths while keeping structural links out of the prose. Returns semantic Markdown plus complete structuredContent.",
         annotations(
             title = "Persisted entity context",
             read_only_hint = true,
@@ -734,14 +738,14 @@ impl ServerHandler for CodeSystemGraphServer {
     fn get_info(&self) -> ServerInfo {
         let instructions = if self.codegraph.enabled {
             "Code System Graph exposes bounded cross-repository intelligence. Tool and resource results \
-             are delivered as one bounded Markdown text block without structuredContent; schema version 2 \
-             remains the logical contract, and only the schema catalog embeds fenced JSON. Use query for persisted entity discovery, explore for ephemeral \
+             pair one bounded semantic Markdown text block with complete structuredContent using agent delivery schema version 5; \
+             only the schema catalog embeds fenced JSON. Use query for persisted entity discovery, explore for ephemeral \
              repository source, source_context for source-free evidence, impact for known targets, \
              and analyze_changes for Git diffs. Administrative tools mutate state only when enabled."
         } else {
             "Code System Graph exposes bounded cross-repository intelligence. Tool and resource results \
-             are delivered as one bounded Markdown text block without structuredContent; schema version 2 \
-             remains the logical contract, and only the schema catalog embeds fenced JSON. Use query for persisted entity discovery, source_context for source-free \
+             pair one bounded semantic Markdown text block with complete structuredContent using agent delivery schema version 5; \
+             only the schema catalog embeds fenced JSON. Use query for persisted entity discovery, source_context for source-free \
              evidence, impact for known targets, and analyze_changes for Git diffs. Repository-local \
              source access is unavailable because CodeGraph is disabled. Administrative tools mutate \
              state only when enabled."

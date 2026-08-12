@@ -6,19 +6,11 @@ use code_system_graph_core::ExecutionPolicy;
 use code_system_graph_store_sqlite::SqliteStore;
 use rmcp::ServerHandler;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::ContentBlock;
 
 use super::{CodeSystemGraphServer, mcp_support};
 #[cfg(unix)]
 use crate::{CODEGRAPH_DISABLED_CODE, ExploreInput};
 use crate::{SearchInput, scan_workspace};
-
-fn tool_text(result: &rmcp::model::CallToolResult) -> &str {
-    match result.content.first() {
-        Some(ContentBlock::Text(content)) => &content.text,
-        _ => panic!("tool result did not contain one text block"),
-    }
-}
 
 #[test]
 fn server_should_publish_read_only_tools() {
@@ -95,19 +87,38 @@ async fn query_actions_should_match_mcp_codegraph_capability()
     };
 
     let hit = disabled.query(Parameters(input("orders"))).await;
-    assert!(tool_text(&hit).contains("source\\_context"));
+    assert!(hit.structured_content.as_ref().is_some_and(|content| {
+        content["data"]["next_actions"]
+            .as_array()
+            .is_some_and(|actions| {
+                actions
+                    .iter()
+                    .any(|action| action["tool"] == "source_context")
+            })
+    }));
 
     let missing = disabled
         .query(Parameters(input("api source_literal_that_does_not_exist")))
         .await;
-    assert!(!tool_text(&missing).contains("\nexplore\n"));
-    assert!(!tool_text(&missing).contains("use Explore"));
+    assert!(!missing.structured_content.as_ref().is_some_and(|content| {
+        content["data"]["next_actions"]
+            .as_array()
+            .is_some_and(|actions| actions.iter().any(|action| action["tool"] == "explore"))
+    }));
 
     let enabled_missing = enabled
         .query(Parameters(input("api source_literal_that_does_not_exist")))
         .await;
-    assert!(tool_text(&enabled_missing).contains("\nexplore\n"));
-    assert!(tool_text(&enabled_missing).contains("use Explore"));
+    assert!(
+        enabled_missing
+            .structured_content
+            .as_ref()
+            .is_some_and(|content| {
+                content["data"]["next_actions"]
+                    .as_array()
+                    .is_some_and(|actions| actions.iter().any(|action| action["tool"] == "explore"))
+            })
+    );
     Ok(())
 }
 
@@ -177,9 +188,9 @@ fn initialize_contract_should_align_instructions_with_advertised_tools() {
 
         assert_eq!(explore_advertised, codegraph_enabled);
         assert_eq!(instructions.contains("explore"), codegraph_enabled);
-        assert!(instructions.contains("bounded Markdown"));
-        assert!(instructions.contains("without structuredContent"));
-        assert!(instructions.contains("schema version 2"));
+        assert!(instructions.contains("semantic Markdown"));
+        assert!(instructions.contains("structuredContent"));
+        assert!(instructions.contains("schema version 5"));
         assert!(!instructions.contains("versioned JSON"));
     }
 
@@ -332,7 +343,7 @@ fn schema_resource_should_catalog_every_tool_input_and_result()
     ] {
         assert!(catalog["schemas"].get(name).is_some(), "missing {name}");
     }
-    assert_eq!(catalog["schema_version"], 2);
+    assert_eq!(catalog["schema_version"], 5);
     assert!(catalog["application_interfaces"]["schemas"].is_array());
     assert!(serde_json::to_vec(&catalog)?.len() <= 2 * 1024 * 1024);
     Ok(())

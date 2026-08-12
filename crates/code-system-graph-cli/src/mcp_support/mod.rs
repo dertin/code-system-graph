@@ -5,10 +5,10 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use code_system_graph_core::{
-    ChangeImpactReport, ContractAction, ContractReport, ContractRequest, ImpactReport, ImpactRequest, ManualLinkConfig, PullRequestInspection, SearchReport, inspect_contracts, public_schema_catalog
+    ChangeImpactReport, ContractAction, ContractReport, ContractRequest, ImpactReport, ImpactRequest, ManualLinkConfig, PullRequestInspection, inspect_contracts, public_schema_catalog
 };
 use code_system_graph_model::{
-    CommunityId, Evidence, FreshnessSummary, Node, NodeId, OverallFreshness, RepoFreshness, RepoFreshnessState, ToolEnvelope, ToolStatus, TraceReport
+    CommunityId, Edge, EdgeKind, EpistemicStatus, Evidence, FreshnessSummary, Node, NodeId, OverallFreshness, RepoFreshness, RepoFreshnessState, ToolEnvelope, ToolStatus
 };
 use code_system_graph_store_sqlite::SqliteStore;
 use schemars::{JsonSchema, schema_for};
@@ -16,14 +16,16 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::{
-    ChangesInput, CommunityInput, CommunityReport, ExploreInput, ExploreReport, ManifestMutationSummary, PullRequestInput, ScanSummary, SearchInput, TraceInput
+    ChangesInput, CommunityInput, CommunityReport, ExploreInput, ManifestMutationSummary, PullRequestInput, ScanSummary, SearchInput, TraceInput
 };
 
+mod agent_views;
 mod presentation;
 #[cfg(test)]
 mod presentation_goldens;
 mod resources;
 
+pub(super) use agent_views::AgentPresentationContext;
 pub(super) use presentation::AgentToolResult;
 pub(super) use resources::{ResourceErrorKind, read_resource, resource_templates, resource_uris};
 
@@ -383,13 +385,23 @@ pub(super) struct GraphStatusReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub(super) struct SourceContextRelation {
+    pub edge: Edge,
+    pub source: Node,
+    pub target: Node,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub(super) struct SourceContextReport {
     pub workspace: String,
     pub entity: Node,
-    pub related_entities: Vec<Node>,
+    pub relations: Vec<SourceContextRelation>,
     pub evidence: Vec<Evidence>,
+    pub total_relations: usize,
+    pub structural_relations_omitted: usize,
+    pub relations_truncated: bool,
     pub total_evidence: usize,
-    pub truncated: bool,
+    pub evidence_truncated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -485,6 +497,10 @@ pub(super) fn contracts_envelope(
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "The read-only envelope keeps semantic-edge selection, bounded evidence priority, freshness, and errors atomic"
+)]
 pub(super) fn source_context_envelope(
     database_path: &Path,
     configured_workspace: &str,
@@ -510,37 +526,62 @@ pub(super) fn source_context_envelope(
             .find(|node| node.id == input.node_id)
             .cloned()
             .ok_or_else(|| format!("node `{}` was not found", input.node_id.as_str()))?;
-        let related_ids = edges
+        let node_by_id = nodes
             .iter()
-            .filter_map(|edge| {
-                if edge.source == input.node_id {
-                    Some(edge.target.clone())
-                } else if edge.target == input.node_id {
-                    Some(edge.source.clone())
-                } else {
-                    None
-                }
-            })
-            .collect::<BTreeSet<_>>();
-        let related_entities = nodes
-            .into_iter()
-            .filter(|node| related_ids.contains(&node.id))
+            .map(|node| (node.id.clone(), node.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let (mut incident_edges, structural_relations_omitted) =
+            semantic_incident_edges(&edges, &input.node_id);
+        incident_edges.sort_by(|left, right| left.id.cmp(&right.id));
+        let total_relations = incident_edges.len();
+        let relations = incident_edges
+            .iter()
             .take(MAX_PAGE_SIZE)
+            .filter_map(|edge| {
+                Some(SourceContextRelation {
+                    edge: edge.clone(),
+                    source: node_by_id.get(&edge.source)?.clone(),
+                    target: node_by_id.get(&edge.target)?.clone(),
+                })
+            })
             .collect::<Vec<_>>();
-        let evidence_ids = edges
+        let direct_evidence_ids = incident_edges
             .iter()
-            .filter(|edge| edge.source == input.node_id || edge.target == input.node_id)
             .flat_map(|edge| edge.evidence.iter().cloned())
             .collect::<BTreeSet<_>>();
-        let selected = store
+        let semantic_endpoint_ids = incident_edges
+            .iter()
+            .flat_map(|edge| [edge.source.clone(), edge.target.clone()])
+            .collect::<BTreeSet<_>>();
+        let structural_owner_evidence_ids = edges
+            .iter()
+            .filter(|edge| {
+                edge.kind == EdgeKind::Contains
+                    && edge.status == EpistemicStatus::Confirmed
+                    && semantic_endpoint_ids.contains(&edge.target)
+                    && node_by_id
+                        .get(&edge.target)
+                        .is_some_and(|node| node.repo_id.is_none())
+            })
+            .flat_map(|edge| edge.evidence.iter().cloned())
+            .collect::<BTreeSet<_>>();
+        let all_evidence = store
             .load_current_evidence(configured_workspace)
             .map_err(|error| error.to_string())?
             .into_iter()
-            .filter(|item| evidence_ids.contains(&item.id))
+            .map(|evidence| (evidence.id.clone(), evidence))
+            .collect::<BTreeMap<_, _>>();
+        let ordered_evidence_ids = direct_evidence_ids
+            .iter()
+            .chain(structural_owner_evidence_ids.difference(&direct_evidence_ids))
             .collect::<Vec<_>>();
-        let total_evidence = selected.len();
-        let evidence = selected
+        let total_evidence = ordered_evidence_ids
+            .iter()
+            .filter(|evidence_id| all_evidence.contains_key(*evidence_id))
+            .count();
+        let evidence = ordered_evidence_ids
             .into_iter()
+            .filter_map(|evidence_id| all_evidence.get(evidence_id).cloned())
             .take(input.evidence_limit)
             .collect::<Vec<_>>();
         let freshness = freshness_summary(
@@ -552,17 +593,23 @@ pub(super) fn source_context_envelope(
             SourceContextReport {
                 workspace: configured_workspace.to_owned(),
                 entity,
-                related_entities,
+                relations,
                 evidence,
+                total_relations,
+                structural_relations_omitted,
+                relations_truncated: total_relations > MAX_PAGE_SIZE,
                 total_evidence,
-                truncated: total_evidence > input.evidence_limit,
+                evidence_truncated: total_evidence > input.evidence_limit,
             },
             freshness,
         ))
     })();
     match result {
         Ok((report, freshness)) => {
-            let status = if report.truncated || freshness.overall != OverallFreshness::Fresh {
+            let status = if report.relations_truncated
+                || report.evidence_truncated
+                || freshness.overall != OverallFreshness::Fresh
+            {
                 ToolStatus::Degraded
             } else {
                 ToolStatus::Ok
@@ -577,6 +624,15 @@ pub(super) fn source_context_envelope(
         }
         Err(error) => error_envelope("Persisted source context could not be loaded.", error),
     }
+}
+
+fn semantic_incident_edges(edges: &[Edge], node_id: &NodeId) -> (Vec<Edge>, usize) {
+    let (structural, semantic): (Vec<_>, Vec<_>) = edges
+        .iter()
+        .filter(|edge| edge.source == *node_id || edge.target == *node_id)
+        .cloned()
+        .partition(|edge| matches!(edge.kind, EdgeKind::Contains | EdgeKind::MemberOf));
+    (semantic, structural.len())
 }
 
 pub(super) fn admin_audit_envelope(
@@ -684,46 +740,59 @@ pub(super) fn configured_manifest_path(
 }
 
 pub(super) fn schema_catalog() -> Value {
+    use agent_views::{
+        AGENT_DELIVERY_SCHEMA_VERSION, AgentExploreReport, AgentQueryReport, AgentSourceContextReport, AgentStatusReport, AgentStructuredEnvelope, AgentTraceReport
+    };
+
     let mut schemas = BTreeMap::new();
     insert_schema::<TraceInput>(&mut schemas, "trace.input");
-    insert_schema::<ToolEnvelope<TraceReport>>(&mut schemas, "trace.result");
+    insert_schema::<AgentStructuredEnvelope<AgentTraceReport>>(&mut schemas, "trace.result");
     insert_schema::<SearchInput>(&mut schemas, "query.input");
-    insert_schema::<ToolEnvelope<SearchReport>>(&mut schemas, "query.result");
+    insert_schema::<AgentStructuredEnvelope<AgentQueryReport>>(&mut schemas, "query.result");
     insert_schema::<CommunitiesInput>(&mut schemas, "communities.input");
-    insert_schema::<ToolEnvelope<CommunityReport>>(&mut schemas, "communities.result");
+    insert_schema::<AgentStructuredEnvelope<CommunityReport>>(&mut schemas, "communities.result");
     insert_schema::<ExploreInput>(&mut schemas, "explore.input");
-    insert_schema::<ToolEnvelope<ExploreReport>>(&mut schemas, "explore.result");
+    insert_schema::<AgentStructuredEnvelope<AgentExploreReport>>(&mut schemas, "explore.result");
     insert_schema::<ImpactRequest>(&mut schemas, "impact.input");
-    insert_schema::<ToolEnvelope<ImpactReport>>(&mut schemas, "impact.result");
+    insert_schema::<AgentStructuredEnvelope<ImpactReport>>(&mut schemas, "impact.result");
     insert_schema::<ChangesInput>(&mut schemas, "analyze_changes.input");
-    insert_schema::<ToolEnvelope<ChangeImpactReport>>(&mut schemas, "analyze_changes.result");
+    insert_schema::<AgentStructuredEnvelope<ChangeImpactReport>>(
+        &mut schemas,
+        "analyze_changes.result",
+    );
     insert_schema::<PullRequestInput>(&mut schemas, "analyze_pull_request.input");
-    insert_schema::<ToolEnvelope<PullRequestInspection>>(
+    insert_schema::<AgentStructuredEnvelope<PullRequestInspection>>(
         &mut schemas,
         "analyze_pull_request.result",
     );
     insert_schema::<WorkspaceInput>(&mut schemas, "status.input");
-    insert_schema::<ToolEnvelope<GraphStatusReport>>(&mut schemas, "status.result");
+    insert_schema::<AgentStructuredEnvelope<AgentStatusReport>>(&mut schemas, "status.result");
     insert_schema::<ContractsInput>(&mut schemas, "contracts.input");
-    insert_schema::<ToolEnvelope<ContractReport>>(&mut schemas, "contracts.result");
+    insert_schema::<AgentStructuredEnvelope<ContractReport>>(&mut schemas, "contracts.result");
     insert_schema::<SourceContextInput>(&mut schemas, "source_context.input");
-    insert_schema::<ToolEnvelope<SourceContextReport>>(&mut schemas, "source_context.result");
+    insert_schema::<AgentStructuredEnvelope<AgentSourceContextReport>>(
+        &mut schemas,
+        "source_context.result",
+    );
     insert_schema::<WorkspaceInput>(&mut schemas, "scan.input");
-    insert_schema::<ToolEnvelope<AdminAudit<ScanSummary>>>(&mut schemas, "scan.result");
+    insert_schema::<AgentStructuredEnvelope<AdminAudit<ScanSummary>>>(&mut schemas, "scan.result");
     insert_schema::<WorkspaceUpdateInput>(&mut schemas, "update_workspace.input");
-    insert_schema::<ToolEnvelope<AdminAudit<ManifestAdminReport>>>(
+    insert_schema::<AgentStructuredEnvelope<AdminAudit<ManifestAdminReport>>>(
         &mut schemas,
         "update_workspace.result",
     );
     insert_schema::<ManualLinkWriteInput>(&mut schemas, "write_manual_link.input");
-    insert_schema::<ToolEnvelope<AdminAudit<ManifestAdminReport>>>(
+    insert_schema::<AgentStructuredEnvelope<AdminAudit<ManifestAdminReport>>>(
         &mut schemas,
         "write_manual_link.result",
     );
     insert_schema::<CacheCleanInput>(&mut schemas, "clean_cache.input");
-    insert_schema::<ToolEnvelope<AdminAudit<CacheCleanReport>>>(&mut schemas, "clean_cache.result");
+    insert_schema::<AgentStructuredEnvelope<AdminAudit<CacheCleanReport>>>(
+        &mut schemas,
+        "clean_cache.result",
+    );
     insert_schema::<WorkspaceInput>(&mut schemas, "recompute_communities.input");
-    insert_schema::<ToolEnvelope<AdminAudit<ScanSummary>>>(
+    insert_schema::<AgentStructuredEnvelope<AdminAudit<ScanSummary>>>(
         &mut schemas,
         "recompute_communities.result",
     );
@@ -744,7 +813,7 @@ pub(super) fn schema_catalog() -> Value {
         },
     );
     json!({
-        "schema_version": 2,
+        "schema_version": AGENT_DELIVERY_SCHEMA_VERSION,
         "media_type": "application/schema+json",
         "schemas": schemas,
         "application_interfaces": application_interfaces

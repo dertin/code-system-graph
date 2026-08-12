@@ -7,7 +7,7 @@ use code_system_graph_model::RepositoryRecord;
 
 use super::runtime::{ExploreBudgetLedger, ExploreExecutionContext, ExploreProviderData};
 use super::{
-    ExploreInput, ExploreLocalRelationship, explore_provider_request, fallback_explore_anchors, select_explore_anchors, truncate_utf8_owned
+    ExploreInput, ExploreLocalRelationship, exact_query_symbols_with_source_fallback, explore_provider_request, fallback_explore_anchors, select_explore_anchors, source_markdown_for_exact_symbols, truncate_utf8_owned
 };
 use crate::{
     CodeGraphConfig, CodeGraphProvider, LocalCodeIntelligenceProvider, LocalContextRequest, LocalNeighborDirection, LocalNeighborsRequest
@@ -75,6 +75,17 @@ pub(super) async fn run_explore_provider_stages(
         &mut data,
     )
     .await;
+    let exact_symbols = exact_query_symbols_with_source_fallback(
+        input.query,
+        &data.resolved_symbols,
+        &data.source_markdown,
+        resolved_limit,
+    );
+    if !exact_symbols.is_empty() {
+        data.source_markdown =
+            source_markdown_for_exact_symbols(&data.source_markdown, &exact_symbols);
+        data.resolved_symbols = exact_symbols;
+    }
     let anchor_limit = usize::try_from(input.policy.max_explore_anchors)
         .expect("validated policy count is usize-representable");
     let anchors = select_explore_anchors(&data.resolved_symbols, anchor_limit);

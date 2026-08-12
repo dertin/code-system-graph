@@ -2,7 +2,6 @@
 
 use std::fmt::{Debug, Display};
 
-use code_system_graph_model::{FreshnessSummary, ToolStatus};
 use serde_json::{Map, Value};
 
 const TRUNCATION_NOTICE: &str = "\n## Truncation\n\nAdditional result content was omitted by the effective MCP response-byte limit.\n";
@@ -16,10 +15,6 @@ enum DocumentBlock {
         source_truncated: bool,
         items: Vec<String>,
     },
-    Source {
-        heading: String,
-        value: String,
-    },
 }
 
 impl DocumentBlock {
@@ -32,16 +27,6 @@ impl DocumentBlock {
                 source_truncated,
                 items,
             } => collection_block(heading, *total, items.len(), *source_truncated, items),
-            Self::Source {
-                heading: source_heading,
-                value,
-            } => {
-                format!(
-                    "\n## {}\n{}",
-                    heading(source_heading),
-                    fenced("text", value)
-                )
-            }
         }
     }
 }
@@ -59,50 +44,6 @@ impl MarkdownDocument {
             blocks: Vec::new(),
             compact: String::new(),
         }
-    }
-
-    pub(crate) fn tool(
-        name: &str,
-        schema_version: u32,
-        status: ToolStatus,
-        freshness: &FreshnessSummary,
-        warnings: &[String],
-        coverage_present: bool,
-        path: Option<&str>,
-    ) -> Self {
-        let status_text = tool_status(status);
-        let freshness_text = format!("{:?}", freshness.overall).to_lowercase();
-        let warning = warnings.first().map_or_else(
-            || "none".to_owned(),
-            |value| compact_text(&inline(value), 18),
-        );
-        let path = path.map_or_else(
-            || "absent".to_owned(),
-            |value| compact_text(&inline(value), 18),
-        );
-        let compact = format!(
-            "# {}\nstatus={status_text} freshness={freshness_text} truncated=true\nwarning={warning}\ncoverage={} path={path}\n",
-            compact_text(&heading(name), 24),
-            if coverage_present {
-                "present"
-            } else {
-                "absent"
-            },
-        );
-        let mut document = Self {
-            blocks: vec![DocumentBlock::Control(format!("# {}\n", heading(name)))],
-            compact,
-        };
-        document.blocks.push(DocumentBlock::Control(format!(
-            "\n## Status\n\n- State: `{status_text}`\n- Delivery schema: `{schema_version}`\n"
-        )));
-        document.control_string_collection("Warnings", warnings);
-        document.blocks.push(DocumentBlock::Control(format!(
-            "\n## Freshness\n\n- Overall: `{freshness_text}`\n"
-        )));
-        document.control_debug_collection("Stale repositories", &freshness.stale_repositories);
-        document.control_string_collection("Freshness reasons", &freshness.reasons);
-        document
     }
 
     pub(crate) fn resource(name: &str, schema_version: u32) -> Self {
@@ -140,48 +81,6 @@ impl MarkdownDocument {
         self.text(name, &format!("{value:?}"));
     }
 
-    pub(crate) fn debug_collection<T: Debug>(&mut self, name: &str, items: &[T]) {
-        self.bounded_fragments(
-            name,
-            items.len(),
-            false,
-            items
-                .iter()
-                .map(|item| format!("\n- {}\n", inline(&format!("{item:?}"))))
-                .collect(),
-        );
-    }
-
-    pub(crate) fn string_collection(&mut self, name: &str, items: &[String]) {
-        self.bounded_fragments(
-            name,
-            items.len(),
-            false,
-            items
-                .iter()
-                .map(|item| format!("\n- {}\n", inline(item)))
-                .collect(),
-        );
-    }
-
-    fn control_debug_collection<T: Debug>(&mut self, name: &str, items: &[T]) {
-        self.control_collection_metadata(name, items.len(), items.len(), false);
-        for item in items {
-            self.blocks.push(DocumentBlock::Control(format!(
-                "\n- {}\n",
-                inline(&format!("{item:?}"))
-            )));
-        }
-    }
-
-    fn control_string_collection(&mut self, name: &str, items: &[String]) {
-        self.control_collection_metadata(name, items.len(), items.len(), false);
-        for item in items {
-            self.blocks
-                .push(DocumentBlock::Control(format!("\n- {}\n", inline(item))));
-        }
-    }
-
     pub(crate) fn bounded_collection<T: Debug>(
         &mut self,
         name: &str,
@@ -214,26 +113,6 @@ impl MarkdownDocument {
             total,
             source_truncated,
             items,
-        });
-    }
-
-    fn control_collection_metadata(
-        &mut self,
-        name: &str,
-        total: usize,
-        retained: usize,
-        truncated: bool,
-    ) {
-        self.blocks.push(DocumentBlock::Control(format!(
-            "\n## {}\n\n- Total: `{total}`\n- Retained: `{retained}`\n- Truncated: `{truncated}`\n",
-            heading(name)
-        )));
-    }
-
-    pub(crate) fn source(&mut self, name: &str, value: &str) {
-        self.blocks.push(DocumentBlock::Source {
-            heading: name.to_owned(),
-            value: safe_multiline(value),
         });
     }
 
@@ -303,12 +182,6 @@ fn fit_document(blocks: Vec<DocumentBlock>, maximum: usize, compact: &str) -> St
                 if let Some(value) =
                     bounded_collection_block(&heading, total, source_truncated, &items, remaining)
                 {
-                    output.push_str(&value);
-                }
-            }
-            DocumentBlock::Source { heading, value } => {
-                let remaining = available.saturating_sub(output.len());
-                if let Some(value) = bounded_source_block(&heading, &value, remaining) {
                     output.push_str(&value);
                 }
             }
@@ -395,41 +268,6 @@ fn fit_atomic_blocks(blocks: Vec<String>, maximum: usize) -> String {
         output.push_str(TRUNCATION_NOTICE);
     }
     output
-}
-
-fn bounded_source_block(name: &str, value: &str, maximum: usize) -> Option<String> {
-    let heading = format!("\n## {}\n\n", heading(name));
-    let minimum = heading.len().saturating_add("```text\n\n```\n".len());
-    if minimum > maximum {
-        return None;
-    }
-
-    let mut boundary = 0_usize;
-    let mut current_backticks = 0_usize;
-    let mut longest_backticks = 0_usize;
-    for (offset, character) in value.char_indices() {
-        current_backticks = if character == '`' {
-            current_backticks + 1
-        } else {
-            0
-        };
-        longest_backticks = longest_backticks.max(current_backticks);
-        let next_boundary = offset + character.len_utf8();
-        let fence_bytes = longest_backticks.max(2) + 1;
-        let candidate_bytes = heading
-            .len()
-            .saturating_add(next_boundary)
-            .saturating_add(fence_bytes.saturating_mul(2))
-            .saturating_add("text\n\n\n".len());
-        if candidate_bytes > maximum {
-            break;
-        }
-        boundary = next_boundary;
-    }
-
-    let retained = &value[..boundary];
-    let fence = fence_marker(retained);
-    Some(format!("{heading}{fence}text\n{retained}\n{fence}\n"))
 }
 
 fn render_nested_schema_catalog(
@@ -566,14 +404,6 @@ fn compact_json(value: &Value) -> String {
     }
 }
 
-fn tool_status(status: ToolStatus) -> &'static str {
-    match status {
-        ToolStatus::Ok => "ok",
-        ToolStatus::Degraded => "degraded",
-        ToolStatus::Error => "error",
-    }
-}
-
 fn compact_text(value: &str, maximum: usize) -> String {
     let value = value.replace(['\n', '\r', '\t'], " ");
     let boundary = utf8_boundary_at_or_before(&value, maximum);
@@ -664,109 +494,7 @@ fn safe_character(character: char) -> char {
 
 #[cfg(test)]
 mod tests {
-    use code_system_graph_model::{FreshnessSummary, OverallFreshness, ToolStatus};
-
     use super::{MarkdownDocument, render_schema_catalog};
-
-    fn freshness() -> FreshnessSummary {
-        FreshnessSummary {
-            overall: OverallFreshness::Fresh,
-            stale_repositories: Vec::new(),
-            reasons: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn complete_document_that_exactly_fits_should_not_claim_truncation() {
-        let document = MarkdownDocument::tool(
-            "query",
-            2,
-            ToolStatus::Ok,
-            &freshness(),
-            &[],
-            true,
-            Some("src/lib.rs"),
-        );
-        let complete = document.render(4_096);
-        let exact = complete.len();
-        let document = MarkdownDocument::tool(
-            "query",
-            2,
-            ToolStatus::Ok,
-            &freshness(),
-            &[],
-            true,
-            Some("src/lib.rs"),
-        );
-        assert_eq!(document.render(exact), complete);
-        assert!(!complete.contains("## Truncation"));
-    }
-
-    #[test]
-    fn minimum_budget_should_keep_mandatory_tool_control() {
-        let minimum =
-            usize::try_from(code_system_graph_core::MIN_MCP_MARKDOWN_BYTES).expect("MCP minimum");
-        let rendered = MarkdownDocument::tool(
-            "query",
-            2,
-            ToolStatus::Degraded,
-            &freshness(),
-            &["provider timed out".to_owned()],
-            true,
-            Some("src/💡.rs"),
-        )
-        .render(minimum);
-        assert!(rendered.len() <= minimum);
-        for required in [
-            "status=degraded",
-            "freshness=fresh",
-            "warning=provider timed out",
-            "coverage=present",
-            "path=src/💡.rs",
-            "## Truncation",
-        ] {
-            assert!(rendered.contains(required), "{rendered}");
-        }
-    }
-
-    #[test]
-    fn oversized_source_should_keep_utf8_prefix_and_close_fence() {
-        let mut document = MarkdownDocument::tool(
-            "explore",
-            2,
-            ToolStatus::Degraded,
-            &freshness(),
-            &[],
-            true,
-            Some("src/lib.rs"),
-        );
-        document.source("Source", &"💡 source line\n".repeat(128));
-        let rendered = document.render(512);
-        assert!(rendered.contains("💡 source"), "{rendered}");
-        assert_eq!(rendered.matches("```text").count(), 1);
-        assert_eq!(rendered.matches("\n```\n").count(), 1);
-        assert!(rendered.contains("## Truncation"));
-        assert!(std::str::from_utf8(rendered.as_bytes()).is_ok());
-    }
-
-    #[test]
-    fn source_fitting_should_ignore_backticks_outside_the_retained_prefix() {
-        let mut document = MarkdownDocument::tool(
-            "explore",
-            2,
-            ToolStatus::Degraded,
-            &freshness(),
-            &[],
-            true,
-            Some("src/lib.rs"),
-        );
-        document.source("Source", &format!("useful source\n{}", "`".repeat(2_048)));
-        let rendered = document.render(512);
-
-        assert!(rendered.contains("useful source"), "{rendered}");
-        assert!(rendered.contains("## Source"), "{rendered}");
-        assert!(rendered.contains("## Truncation"), "{rendered}");
-    }
 
     #[test]
     fn byte_fitting_should_recompute_delivered_collection_metadata() {

@@ -1,7 +1,8 @@
 # Code System Graph 1.1.0 Release
 
-Code System Graph 1.1.0 is an intentionally breaking agent-delivery release. MCP tools and
-resources are bounded Markdown, typed HTTP/CLI envelopes use delivery schema v2, Explore performs
+Code System Graph 1.1.0 is an intentionally breaking agent-delivery release. MCP tools pair
+bounded Markdown with typed agent delivery schema v5, resources are bounded Markdown, typed
+HTTP/CLI envelopes use delivery schema v2, Explore performs
 multi-step ephemeral source/flow enrichment under one global policy, and Query supplies grounded
 next actions. The source tree and package version are `1.1.0`. Continuous integration
 runs on GitHub at `https://github.com/dertin/code-system-graph`.
@@ -36,8 +37,8 @@ Code System Graph 1.1.0 includes:
 - configurable per-repository corroboration bounds and opt-in Git-native ignore discovery;
 - portable Agent Plugins 1.0.0 generation and ownership-checked local bindings for versioned base
   plugins with a read-only MCP and existing routing guidance;
-- schema-v2 JSON over CLI/HTTP and single-block Markdown over MCP, without `structuredContent` or
-  result `outputSchema`;
+- schema-v2 JSON over CLI/HTTP and one bounded Markdown block plus typed agent-delivery
+  `structuredContent` over MCP, without result `outputSchema` metadata;
 - bounded Explore source, symbols, callers/callees, federated handoffs, coverage, actions, and
   execution accounting;
 - one immutable global `executionPolicy` covering scan, Explore, Query, tools, and resources, with
@@ -54,8 +55,9 @@ Code System Graph 1.1.0 includes:
   older generated state is not accepted as a runtime binding.
 - Direct `csgraph mcp` invocations must add `--config <global-manifest>`; `--binding` mode resolves
   the manifest recorded in the binding.
-- MCP consumers must read the sole Markdown text block. They must not expect `structuredContent`,
-  JSON tool envelopes, or result `outputSchema` metadata.
+- MCP consumers receive one Markdown text block plus typed `structuredContent`. They must not
+  expect a JSON text block, the CLI/HTTP envelope inside `content`, or result `outputSchema`
+  metadata.
 - HTTP and CLI consumers must accept `schema_version: 2`; Explore data is now `ExploreReport`, with
   source in `source_markdown` rather than `LocalContextResult.content`.
 - Workspace manifests may omit all new policy fields to use the documented defaults. Inputs such

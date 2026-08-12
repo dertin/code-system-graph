@@ -305,7 +305,7 @@ fn plugin_create_should_render_official_structure_and_be_idempotent() -> anyhow:
     assert!(!skill.contains("plugin create"));
     assert!(!skill.contains("local binding"));
     assert!(skill.contains("reports another workspace, stop using it"));
-    assert!(skill.contains("Call `status` before"));
+    assert!(skill.contains("Call `status` with `workspace: \"plugin-workspace\"` before"));
     assert!(skill.contains("Do not run `scan`, `sync`, `codegraph init`"));
     assert!(
         !output
