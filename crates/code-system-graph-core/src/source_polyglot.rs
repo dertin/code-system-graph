@@ -601,6 +601,10 @@ fn http_observation(
     lines: SourceLineRange,
 ) -> SourceObservation {
     let literal_missing = literal.is_none();
+    let unmapped_authority = role == SourceRole::Consumer
+        && literal
+            .as_deref()
+            .is_some_and(|value| value.starts_with("http://") || value.starts_with("https://"));
     let path = literal.and_then(|value| literal_path(&value));
     let mut warnings = Vec::new();
     if method.is_none() {
@@ -611,11 +615,15 @@ fn http_observation(
     } else if path.is_none() {
         warnings.push(SourceWarning::UnsupportedLiteralPath);
     }
+    if unmapped_authority {
+        warnings.push(SourceWarning::UnmappedAuthority);
+    }
     if role == SourceRole::Provider && symbol_name.is_none() {
         warnings.push(SourceWarning::MissingSymbol);
     }
     let confirmed = method.is_some()
         && path.is_some()
+        && !unmapped_authority
         && (role != SourceRole::Provider || symbol_name.is_some());
     SourceObservation {
         language,

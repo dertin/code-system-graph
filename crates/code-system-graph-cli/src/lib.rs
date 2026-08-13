@@ -5,6 +5,7 @@ mod agent_plugin;
 mod explore;
 pub mod http_server;
 pub mod mcp;
+mod repository_ownership;
 mod sync;
 mod work_state;
 mod worker;
@@ -22,13 +23,13 @@ pub use agent_plugin::{
 };
 use atomic_write_file::AtomicWriteFile;
 use code_system_graph_core::{
-    AffectedTestsRequest, AgentNextAction, AnalyzerVersions, ArtifactKey, BatchAction, BatchPlanError, BitbucketProvider, ChangeAnalysisError, ChangeAnalysisOptions, ChangeError, ChangeImpactReport, ChangeProvider, ChangeRequest, ChangeScope, ChangeSet, CodeGraphConfig, CodeGraphProvider, CommunityError, ConfigDoctorInput, ConfigError, ConfigExtractionError, ContractReport, ContractRequest, CorroborationReport, DataDocument, DataExtractionError, DeclaredImplementation, DeclaredTestCase, DoctorReport, DoctorRequest, DocumentationDocument, DocumentationExtractionError, EXTRACTION_CONTRACT_VERSION, EffectiveRepositoryConfig, EventDocument, EventExtractionError, EventGraphFacts, ExecutionPolicy, ExitCode, ExportReport, ExportRequest, ExtractionBudgets, ExtractionGraphFacts, ExtractionLimitExceeded, ExtractionTracker, ExtractorBatch, ExtractorBatchPlan, FederatedGraph, FreshnessDoctorInput, GeneratedClientError, GeneratedClientMetadata, GitCliChangeProvider, GitHubProvider, GraphqlDocument, GraphqlExtractionError, GraphqlGraphFacts, HttpBoundary, HttpExtractionError, ImpactContext, ImpactError, ImpactReport, ImpactRequest, ImpactTarget, IncrementalPlan, InfrastructureDocument, InfrastructureExtractionError, IntegrityDoctorInput, InterfaceError, LinkError, LocalCodeIntelligenceProvider, LocalContextRequest, LocalEnrichmentInput, LocalEnrichmentStatus, LocalImpactItem, LocalImpactRequest, LocalNeighborDirection, LocalNeighborsRequest, ManifestEdit, ManifestEditError, ManifestError, ManualLinkConfig, ManualLinkError, PackageGraphFacts, PackageManifest, PackageManifestError, PrAuthToken, ProtobufDocument, ProtobufExtractionError, ProtobufGraphFacts, ProviderBudget, ProviderCapability, ProviderDoctorInput, ProviderDoctorStatus, ProviderRequest, ProviderStatus, PullRequestCoordinates, PullRequestError, PullRequestInspectRequest, PullRequestInspection, PullRequestListPage, PullRequestListRequest, PullRequestListState, PullRequestProvider, PullRequestProviderConfig, PullRequestProviderKind, QueryError, RecommendedCommand, RegisteredWorkspace, RegistryError, ReqwestPrHttpTransport, SafeConfigDocument, SchemaDoctorInput, SearchFilters, SearchReport, SearchRequest, SourceEpistemicStatus, SourceGraphFacts, SourceLanguage, SourceObservation, SourceRole, SourceSyntaxError, SourceSyntaxLanguage, SourceWarning, SymbolAnchor, SymbolCorroboration, TraceError, TraversalReport, TraversalRequest, WorkspaceManifest, affected_link_keys, analyze_changes, analyze_communities_with_progress, analyze_impact, apply_openapi_override, classify_interface_error, commit_manifest_edit, compare_community_snapshots, corroborate_repository, declared_implementation, declared_test_case, doctor, documents_to_graph, encode_native_path, event_documents_to_graph, export_graph, extract_asyncapi, extract_codeowners, extract_data_artifact, extract_docker_compose, extract_generated_client_metadata, extract_graphql_document_with_tracker, extract_graphql_persisted_operations_with_tracker, extract_helm, extract_kubernetes, extract_markdown, extract_openapi_with_tracker, extract_package_manifest_with_tracker, extract_protobuf_with_tracker, extract_safe_config, extract_service_catalog, extract_terraform, graphql_documents_to_graph, inspect_contracts, inspect_source_syntax, link_declared_implementations_with_ambiguities, link_declared_tests_with_ambiguities, link_http_boundaries_with_ambiguities, link_registered_package_owners, load_extractor_batch_with_budgets, merge_affected_link_neighborhoods, package_manifest_to_graph, parse_event_source, parse_go_source_with_tracker, parse_graphql_source_with_tracker, parse_java_source_with_tracker, parse_javascript_source_at_path_with_tracker, parse_literal_sql_source_at_root, parse_manifest, parse_manifest_with_extensions, parse_protobuf_generated_source, parse_python_source_with_tracker, parse_rust_source_with_tracker, parse_typescript_source_at_path_with_tracker, plan_extractor_batches, plan_incremental_scan, precheck_focused_source_values, preview_add_manual_link, preview_add_repository, preview_remove_repository, protobuf_documents_to_graph, register_workspace, resolve_manual_links, resolve_repository_config, resolve_repository_config_with_use_gitignore, search, source_observations_to_graph, store_extractor_batch, traverse
+    AffectedTestsRequest, AgentNextAction, AnalyzerVersions, ArtifactKey, BatchAction, BatchPlanError, BitbucketProvider, ChangeAnalysisError, ChangeAnalysisOptions, ChangeError, ChangeImpactReport, ChangeProvider, ChangeRequest, ChangeScope, ChangeSet, CodeGraphConfig, CodeGraphProvider, CommunityError, ConfigDoctorInput, ConfigError, ConfigExtractionError, ContractReport, ContractRequest, CorroborationReport, DataDocument, DataExtractionError, DeclaredImplementation, DeclaredTestCase, DoctorReport, DoctorRequest, DocumentationDocument, DocumentationExtractionError, EXTRACTION_CONTRACT_VERSION, EffectiveRepositoryConfig, EventDocument, EventExtractionError, EventGraphFacts, ExecutionPolicy, ExitCode, ExportReport, ExportRequest, ExtractionBudgets, ExtractionGraphFacts, ExtractionLimitExceeded, ExtractionTracker, ExtractorBatch, ExtractorBatchPlan, FederatedGraph, FreshnessDoctorInput, GeneratedClientError, GeneratedClientMetadata, GitCliChangeProvider, GitHubProvider, GraphqlDocument, GraphqlExtractionError, GraphqlGraphFacts, HttpBoundary, HttpExtractionError, ImpactContext, ImpactError, ImpactReport, ImpactRequest, ImpactTarget, IncrementalPlan, InfrastructureDocument, InfrastructureExtractionError, IntegrityDoctorInput, InterfaceError, LinkError, LocalCodeIntelligenceProvider, LocalContextRequest, LocalEnrichmentInput, LocalEnrichmentStatus, LocalImpactItem, LocalImpactRequest, LocalNeighborDirection, LocalNeighborsRequest, ManifestEdit, ManifestEditError, ManifestError, ManualLinkConfig, ManualLinkError, PackageGraphFacts, PackageManifest, PackageManifestError, PrAuthToken, ProtobufDocument, ProtobufExtractionError, ProtobufGraphFacts, ProviderBudget, ProviderCapability, ProviderDoctorInput, ProviderDoctorStatus, ProviderRequest, ProviderStatus, PullRequestCoordinates, PullRequestError, PullRequestInspectRequest, PullRequestInspection, PullRequestListPage, PullRequestListRequest, PullRequestListState, PullRequestProvider, PullRequestProviderConfig, PullRequestProviderKind, QueryError, RecommendedCommand, RegisteredWorkspace, RegistryError, ReqwestPrHttpTransport, SafeConfigDocument, SchemaDoctorInput, SearchFilters, SearchReport, SearchRequest, SourceEpistemicStatus, SourceGraphFacts, SourceLanguage, SourceObservation, SourceRole, SourceSymbolIdentity, SourceSyntaxError, SourceSyntaxLanguage, SourceWarning, SymbolAnchor, SymbolCorroboration, TraceError, TraversalReport, TraversalRequest, WorkspaceManifest, affected_link_keys, analyze_changes, analyze_communities_with_progress, analyze_impact, apply_openapi_override, classify_interface_error, commit_manifest_edit, compare_community_snapshots, corroborate_repository, declared_implementation, declared_test_case, doctor, documents_to_graph, encode_native_path, event_documents_to_graph, export_graph, extract_asyncapi, extract_codeowners, extract_data_artifact, extract_docker_compose, extract_generated_client_metadata, extract_graphql_document_with_tracker, extract_graphql_persisted_operations_with_tracker, extract_helm, extract_kubernetes, extract_markdown, extract_openapi_with_tracker, extract_package_manifest_with_tracker, extract_protobuf_with_tracker, extract_safe_config, extract_service_catalog, extract_terraform, graphql_documents_to_graph, inspect_contracts, inspect_source_syntax, link_declared_implementations_with_ambiguities, link_declared_tests_with_ambiguities, link_http_boundaries_with_ambiguities, link_registered_package_owners, load_extractor_batch_with_budgets, merge_affected_link_neighborhoods, package_manifest_to_graph, parse_event_source, parse_go_source_with_tracker, parse_graphql_source_with_tracker, parse_java_source_with_tracker, parse_javascript_source_at_path_with_tracker, parse_literal_sql_source_at_root, parse_manifest, parse_manifest_with_extensions, parse_protobuf_generated_source, parse_python_source_with_tracker, parse_rust_source_with_tracker, parse_typescript_source_at_path_with_tracker, plan_extractor_batches, plan_incremental_scan, precheck_focused_source_values, preview_add_manual_link, preview_add_repository, preview_remove_repository, protobuf_documents_to_graph, register_workspace, resolve_manual_links, resolve_repository_config, resolve_repository_config_with_use_gitignore, search, source_observations_to_graph, store_extractor_batch, traverse
 };
 pub use code_system_graph_core::{
     ConfigSource, DEFAULT_EXCLUDES, IgnorePolicy, PROTECTED_EXCLUDES, discover_repository_files
 };
 use code_system_graph_model::{
-    ArtifactFingerprint, CheckoutId, Community, CommunityAlgorithm, CommunityConfig, CommunityDelta, CommunityId, CommunityScope, Edge, EdgeId, EdgeKind, EpistemicStatus, Evidence, EvidenceId, ExtractorRun, ExtractorRunStatus, FreshnessSummary, LinkDecision, LinkStatus, Node, NodeId, NodeKind, OverallFreshness, Provenance, RepoFreshness, RepoFreshnessState, RepoId, RepositoryRecord, StoredExtractorBatch, ToolEnvelope, ToolStatus, TraceReport, WorkspaceRecord, stable_id, stable_id_bytes
+    ArtifactFingerprint, CheckoutId, Community, CommunityAlgorithm, CommunityConfig, CommunityDelta, CommunityId, CommunityScope, Edge, EdgeId, EdgeKind, EpistemicStatus, Evidence, EvidenceId, ExtractorRun, ExtractorRunStatus, FreshnessSummary, LinkDecision, LinkStatus, Node, NodeId, NodeKind, OverallFreshness, Provenance, RepoFreshness, RepoFreshnessState, RepoId, RepositoryCoverageGap, RepositoryRecord, StoredExtractorBatch, ToolEnvelope, ToolStatus, TraceReport, WorkspaceRecord, stable_id, stable_id_bytes
 };
 use code_system_graph_store_sqlite::{
     ManualLinkDisposition, ManualLinkRecord, ProviderCapabilityRecord, QueryCacheRecord, SnapshotBatch, SqliteStore, StoreError, StoreLock, latest_schema_version
@@ -50,7 +51,7 @@ pub use worker::{
 
 const MAX_TRACE_DEPTH: usize = 32;
 const MAX_SCAN_DEGRADATIONS: usize = 25;
-const QUERY_DELIVERY_REVISION: u32 = 2;
+const QUERY_DELIVERY_REVISION: u32 = 3;
 const GENERATED_STATE_IGNORE_RULE: &[u8] = b".code-system-graph/";
 pub(crate) const CODEGRAPH_DISABLED_CODE: &str = "codegraph_disabled";
 pub(crate) const CODEGRAPH_DISABLED_MESSAGE: &str =
@@ -950,6 +951,7 @@ struct GraphAssembly {
     link_decisions: Vec<LinkDecision>,
     link_node_keys: BTreeMap<NodeId, String>,
     degradations: Vec<String>,
+    coverage_gaps: Vec<RepositoryCoverageGap>,
 }
 
 struct FocusedBatchState {
@@ -1475,6 +1477,7 @@ fn scan_workspace_direct_with_mode(
                 manual_links: &candidate.manual_links,
                 community_snapshot: Some(&candidate.community_snapshot),
             },
+            &candidate.coverage_gaps,
         )?;
         work_state
             .complete_candidate(&context.manifest.name)
@@ -1594,6 +1597,7 @@ fn scan_workspace_direct_with_mode(
         evidence,
         link_decisions,
         degradations: graph_degradations,
+        coverage_gaps,
         ..
     } = graph;
     let community_config = default_community_config();
@@ -1665,6 +1669,7 @@ fn scan_workspace_direct_with_mode(
         affected_test_count: corroboration.affected_tests,
         execution: artifact_execution,
         degradations: staged_degradations,
+        coverage_gaps,
     };
     work_state
         .store_candidate_snapshot(
@@ -1688,6 +1693,7 @@ fn scan_workspace_direct_with_mode(
             manual_links: &candidate.manual_links,
             community_snapshot: Some(&candidate.community_snapshot),
         },
+        &candidate.coverage_gaps,
     )?;
     let mut degradations = candidate.degradations.clone();
     for item in &corroboration.reports {
@@ -1726,11 +1732,12 @@ fn scan_workspace_direct_with_mode(
 fn publish_snapshot_candidate(
     store: &mut SqliteStore,
     batch: SnapshotBatch<'_>,
+    coverage_gaps: &[RepositoryCoverageGap],
 ) -> Result<(), StoreError> {
     const REPORT_INTERVAL: u64 = 1_024;
     let mut pending = 0_u64;
     worker::report_progress(code_system_graph_core::JobPhase::Publication, 1);
-    store.publish_snapshot_with_progress(batch, |rows| {
+    store.publish_snapshot_with_progress_and_coverage(batch, coverage_gaps, |rows| {
         worker::check_time(code_system_graph_core::JobPhase::Publication);
         pending = pending.saturating_add(rows);
         if pending >= REPORT_INTERVAL {
@@ -1758,8 +1765,9 @@ pub fn trace_workspace(
         });
     }
     let store = SqliteStore::open_read_only(database_path)?;
-    let (nodes, edges) = store.load_current_graph(workspace)?;
-    let freshness = freshness_summary(&store.load_current_freshness(workspace)?);
+    let snapshot = store.current_snapshot_summary(workspace)?;
+    let (nodes, edges) = store.load_graph_snapshot(&snapshot.snapshot_id)?;
+    let freshness = freshness_summary(&store.load_freshness_snapshot(&snapshot.snapshot_id)?);
     let graph = FederatedGraph::new(nodes, edges)?;
     let report = graph.trace(
         &NodeId::new(&input.from),
@@ -1849,18 +1857,18 @@ pub(crate) fn search_workspace_for_delivery(
     {
         return Ok(envelope);
     }
-    let (mut nodes, edges) = store.load_current_graph(workspace)?;
+    let (mut nodes, edges) = store.load_graph_snapshot(&snapshot.snapshot_id)?;
     let registry = store.load_workspace_registry(workspace)?;
     apply_repository_alias_labels(&mut nodes, &registry);
-    let repository_freshness = store.load_current_freshness(workspace)?;
+    let repository_freshness = store.load_freshness_snapshot(&snapshot.snapshot_id)?;
     let freshness = freshness_summary(&repository_freshness);
     let fts_hits = if input.query.trim().is_empty() {
         Vec::new()
     } else {
-        store.search_current_nodes_ranked(workspace, &input.query, 500)?
+        store.search_snapshot_nodes_ranked(&snapshot.snapshot_id, &input.query, 500)?
     };
-    let community_snapshot = store.load_current_community_snapshot(workspace)?;
-    let evidence = store.load_current_evidence(workspace)?;
+    let community_snapshot = store.load_community_snapshot(&snapshot.snapshot_id)?;
+    let evidence = store.load_evidence_snapshot(&snapshot.snapshot_id)?;
     let request = SearchRequest {
         query: input.query.clone(),
         filters: SearchFilters {
@@ -1938,8 +1946,17 @@ fn query_cache_fingerprint(
     policy: &ExecutionPolicy,
     capabilities: QueryActionCapabilities,
 ) -> Result<String, ApplicationError> {
+    query_cache_fingerprint_for_revision(input, policy, capabilities, QUERY_DELIVERY_REVISION)
+}
+
+fn query_cache_fingerprint_for_revision(
+    input: &SearchInput,
+    policy: &ExecutionPolicy,
+    capabilities: QueryActionCapabilities,
+    revision: u32,
+) -> Result<String, ApplicationError> {
     let input_json = serde_json::to_vec(&(
-        QUERY_DELIVERY_REVISION,
+        revision,
         input,
         policy.agent_delivery_fingerprint(),
         capabilities,
@@ -2379,10 +2396,11 @@ pub async fn analyze_workspace_changes_with_cancellation(
         )
     })?;
     let store = SqliteStore::open_read_only(database_path)?;
-    let (nodes, edges) = store.load_current_graph(workspace)?;
-    let evidence = store.load_current_evidence(workspace)?;
-    let community = store.load_current_community_snapshot(workspace)?;
-    let freshness = store.load_current_freshness(workspace)?;
+    let snapshot = store.current_snapshot_summary(workspace)?;
+    let (nodes, edges) = store.load_graph_snapshot(&snapshot.snapshot_id)?;
+    let evidence = store.load_evidence_snapshot(&snapshot.snapshot_id)?;
+    let community = store.load_community_snapshot(&snapshot.snapshot_id)?;
+    let freshness = store.load_freshness_snapshot(&snapshot.snapshot_id)?;
     let report = analyze_changes(
         &change_set,
         &nodes,
@@ -2580,11 +2598,12 @@ fn load_impact_context(
     workspace: &str,
 ) -> Result<LoadedImpactContext, ApplicationError> {
     let store = SqliteStore::open_read_only(database_path)?;
-    let (nodes, edges) = store.load_current_graph(workspace)?;
-    let persisted_freshness = store.load_current_freshness(workspace)?;
+    let snapshot = store.current_snapshot_summary(workspace)?;
+    let (nodes, edges) = store.load_graph_snapshot(&snapshot.snapshot_id)?;
+    let persisted_freshness = store.load_freshness_snapshot(&snapshot.snapshot_id)?;
     let freshness = freshness_summary(&persisted_freshness);
-    let communities = store.load_current_community_snapshot(workspace)?;
-    let evidence = store.load_current_evidence(workspace)?;
+    let communities = store.load_community_snapshot(&snapshot.snapshot_id)?;
+    let evidence = store.load_evidence_snapshot(&snapshot.snapshot_id)?;
     let registry = store.load_workspace_registry(workspace)?;
     let node_evidence = node_evidence(&edges, &evidence);
     let context = ImpactContext {
@@ -2835,8 +2854,8 @@ fn unavailable_local_enrichment(
 
 fn impact_target_node<'a>(context: &'a ImpactContext, request: &ImpactRequest) -> Option<&'a Node> {
     context.nodes.iter().find(|node| match &request.target {
-        ImpactTarget::NodeId(node_id) => node.id == *node_id,
-        ImpactTarget::StableKey(stable_key) => node.stable_key == *stable_key,
+        ImpactTarget::NodeId { node_id } => node.id == *node_id,
+        ImpactTarget::StableKey { stable_key } => node.stable_key == *stable_key,
     })
 }
 
@@ -3722,8 +3741,10 @@ fn evaluate_repository_freshness(
     (previous.state, previous.reason.clone())
 }
 
-fn freshness_summary(repositories: &[RepoFreshness]) -> FreshnessSummary {
-    let overall = if repositories
+pub(crate) fn freshness_summary(repositories: &[RepoFreshness]) -> FreshnessSummary {
+    let overall = if repositories.is_empty() {
+        OverallFreshness::Unknown
+    } else if repositories
         .iter()
         .all(|freshness| freshness.state == RepoFreshnessState::Fresh)
     {
@@ -4090,7 +4111,11 @@ fn assemble_focused_batches(
                     ))
                 })?;
             tracker.charge_work(reserved_observations)?;
-            precheck_focused_source_values(&source, &mut tracker)?;
+            precheck_focused_source_values(
+                &source,
+                source_syntax_language(&fingerprint.extractor),
+                &mut tracker,
+            )?;
             let mut observations = match fingerprint.extractor.as_str() {
                 "code-system-graph.source.javascript" => {
                     parse_javascript_source_at_path_with_tracker(
@@ -4142,6 +4167,22 @@ fn assemble_focused_batches(
                             .push(SourceWarning::SyntaxErrorRecovery);
                     }
                 }
+            }
+            let unmapped_authorities = observations
+                .iter()
+                .filter(|observation| {
+                    observation
+                        .warnings
+                        .contains(&SourceWarning::UnmappedAuthority)
+                })
+                .count();
+            if unmapped_authorities > 0 {
+                degradations.push(format!(
+                    "{} contains {} absolute HTTP consumer URL{} without an explicit workspace authority mapping; those dependencies were not linked",
+                    fingerprint.path.display,
+                    unmapped_authorities,
+                    if unmapped_authorities == 1 { "" } else { "s" }
+                ));
             }
             let batch = ExtractorBatch::new(fingerprint.clone(), observations);
             persist(store_extractor_batch(
@@ -4805,12 +4846,19 @@ fn assemble_graph(
         .record
         .repositories
         .iter()
-        .map(|repository| (repository.alias.as_str(), &repository.id))
+        .map(|repository| {
+            (
+                repository.alias.as_str(),
+                &repository.id,
+                repository.normalized_remote.as_deref(),
+            )
+        })
         .collect::<Vec<_>>();
     let ExtractionGraphFacts {
         nodes: extraction_nodes,
         edges: extraction_edges,
         evidence: extraction_evidence,
+        coverage_gaps,
     } = documents_to_graph(
         &data_inputs,
         &infrastructure_inputs,
@@ -4836,7 +4884,7 @@ fn assemble_graph(
         ))
     });
     http_links.ambiguities.dedup();
-    let degradations = http_links
+    let mut degradations = http_links
         .ambiguities
         .iter()
         .map(|ambiguity| {
@@ -4848,6 +4896,11 @@ fn assemble_graph(
             )
         })
         .collect::<Vec<_>>();
+    degradations.extend(
+        coverage_gaps
+            .iter()
+            .map(|gap| format!("repository {}: {}", gap.repo_id.as_str(), gap.reason)),
+    );
     let mut edges = http_links.edges;
     edges.extend(test_links.edges);
     edges.extend(implementation_links.edges);
@@ -5006,6 +5059,7 @@ fn assemble_graph(
         link_decisions: Vec::new(),
         link_node_keys,
         degradations,
+        coverage_gaps,
     })
 }
 
@@ -5329,13 +5383,8 @@ fn apply_codegraph_corroboration(graph: &mut GraphAssembly, reports: &[Repositor
             };
             let implementation_ids = ["javascript", "typescript", "rust", "python", "go", "java"]
                 .map(|language| {
-                    NodeId::new(stable_id(
-                        "node",
-                        &format!(
-                            "symbol:{}:{language}:{source_path}:{symbol}",
-                            item.repo_id.as_str()
-                        ),
-                    ))
+                    SourceSymbolIdentity::new(item.repo_id.clone(), language, source_path, symbol)
+                        .node_id()
                 })
                 .into_iter()
                 .filter(|candidate| {
@@ -6251,9 +6300,12 @@ mod codegraph_job_tests {
 
 #[cfg(test)]
 mod codex_review_regression_tests {
+    use code_system_graph_core::ExecutionPolicy;
     use code_system_graph_model::validate_safe_path_display;
 
-    use super::ApplicationError;
+    use super::{
+        ApplicationError, QUERY_DELIVERY_REVISION, QueryActionCapabilities, SearchInput, query_cache_fingerprint_for_revision
+    };
 
     #[test]
     fn unsafe_artifact_path_error_must_not_echo_rejected_display() {
@@ -6266,5 +6318,32 @@ mod codex_review_regression_tests {
             rendered,
             "artifact path contains unsafe control or bidirectional characters"
         );
+    }
+
+    #[test]
+    fn natural_query_semantics_should_not_reuse_revision_two_cache_entries() {
+        let input = SearchInput {
+            query: "orders payments architecture".to_owned(),
+            node_kinds: Vec::new(),
+            repo_ids: Vec::new(),
+            service_ids: Vec::new(),
+            community_ids: Vec::new(),
+            offset: 0,
+            limit: 20,
+        };
+        let policy = ExecutionPolicy::default();
+        let current = query_cache_fingerprint_for_revision(
+            &input,
+            &policy,
+            QueryActionCapabilities::NONE,
+            QUERY_DELIVERY_REVISION,
+        )
+        .expect("current fingerprint");
+        let legacy =
+            query_cache_fingerprint_for_revision(&input, &policy, QueryActionCapabilities::NONE, 2)
+                .expect("legacy fingerprint");
+
+        assert_eq!(QUERY_DELIVERY_REVISION, 3);
+        assert_ne!(current, legacy);
     }
 }

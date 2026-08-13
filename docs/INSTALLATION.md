@@ -157,8 +157,9 @@ Version 1.1.0 deliberately rejects 1.0.x databases, query caches, checkpoints, g
 bindings, and delivery contracts. Archive or remove the old `.code-system-graph` database and
 operational sidecars, regenerate any Agent Plugin/binding, then run a complete scan. Backup and
 restore accept only the exact 1.1.0 schema and never migrate older state. Direct MCP registrations
-must add `--config`; MCP consumers must switch from JSON/`structuredContent` to the sole Markdown
-text block, while HTTP/CLI consumers must accept delivery schema v2.
+must add `--config`; MCP consumers receive one human-oriented Markdown text block plus typed
+`structuredContent` as its complete machine-readable mirror, while HTTP/CLI consumers must accept
+delivery schema v2.
 
 ## Uninstall
 

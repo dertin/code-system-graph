@@ -1475,9 +1475,11 @@ async fn handle_impact(
     codegraph_binary: Option<OsString>,
 ) -> anyhow::Result<()> {
     let target = if stable_key {
-        ImpactTarget::StableKey(target)
+        ImpactTarget::StableKey { stable_key: target }
     } else {
-        ImpactTarget::NodeId(NodeId::new(target))
+        ImpactTarget::NodeId {
+            node_id: NodeId::new(target),
+        }
     };
     let request = ImpactRequest {
         target,

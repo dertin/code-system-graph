@@ -491,7 +491,7 @@ async fn explore_route_should_return_ephemeral_local_context() -> anyhow::Result
     let impact = Client::new()
         .post(server.url("/v1/tools/impact"))
         .json(&json!({
-            "target": {"kind": "node_id", "value": target},
+            "target": {"node_id": target},
             "direction": "upstream"
         }))
         .send()

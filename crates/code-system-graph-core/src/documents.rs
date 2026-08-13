@@ -538,6 +538,10 @@ fn repository_dependency_context(body: &str, link_offset: usize) -> bool {
         .rfind('\n')
         .map_or(0, |offset| offset.saturating_add(1));
     let prefix = body[line_start..link_offset].to_ascii_lowercase();
+    let clause = prefix
+        .rsplit(['.', ';', ':', '!', '?'])
+        .next()
+        .unwrap_or(&prefix);
     let negative = [
         "does not depend on",
         "doesn't depend on",
@@ -546,7 +550,7 @@ fn repository_dependency_context(body: &str, link_offset: usize) -> bool {
         "not produced by",
         "not created by",
     ];
-    if negative.iter().any(|phrase| prefix.contains(phrase)) {
+    if negative.iter().any(|phrase| clause.contains(phrase)) {
         return false;
     }
     [
@@ -558,7 +562,14 @@ fn repository_dependency_context(body: &str, link_offset: usize) -> bool {
         "created by",
     ]
     .iter()
-    .any(|phrase| prefix.contains(phrase))
+    .any(|phrase| {
+        clause
+            .trim_end()
+            .strip_suffix(phrase)
+            .is_some_and(|before| {
+                before.is_empty() || before.chars().last().is_some_and(char::is_whitespace)
+            })
+    })
 }
 
 fn append_heading_text(heading: &mut String, text: &str) {
@@ -701,8 +712,9 @@ fn hosted_repository_slug(value: &str) -> Option<String> {
     if segments.len() != 2 {
         return None;
     }
+    let owner = segments[0];
     let repository = segments[1].trim_end_matches(".git");
-    (!repository.is_empty()).then(|| repository.to_owned())
+    (!owner.is_empty() && !repository.is_empty()).then(|| format!("{host}/{owner}/{repository}"))
 }
 
 fn sanitize_reference(
@@ -1376,8 +1388,21 @@ mod tests {
                 .collect::<Vec<_>>(),
             [(
                 ExplicitReferenceKind::RepositoryDependency,
-                "hugint-transpiler"
+                "github.com/huginthub/hugint-transpiler"
             )]
+        );
+    }
+
+    #[test]
+    fn markdown_dependency_language_must_immediately_govern_the_repository_link() {
+        let result = markdown(
+            "README.md",
+            "This service requires Redis; examples are in [payments](https://github.com/other/payments).\n",
+        );
+
+        assert_eq!(
+            result.records[0].references[0].kind,
+            ExplicitReferenceKind::Repository
         );
     }
 
@@ -1394,7 +1419,10 @@ mod tests {
                 .iter()
                 .map(|reference| (reference.kind, reference.target.as_str()))
                 .collect::<Vec<_>>(),
-            [(ExplicitReferenceKind::Repository, "hugint-transpiler")]
+            [(
+                ExplicitReferenceKind::Repository,
+                "github.com/huginthub/hugint-transpiler"
+            )]
         );
     }
 

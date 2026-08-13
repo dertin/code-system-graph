@@ -3,12 +3,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use code_system_graph_model::{
-    Edge, EdgeId, EdgeKind, EpistemicStatus, Evidence, EvidenceId, Node, NodeId, NodeKind, Provenance, RepoId, stable_id
+    Edge, EdgeId, EdgeKind, EpistemicStatus, Evidence, EvidenceId, Node, NodeId, NodeKind, Provenance, RepoId, RepositoryCoverageGap, stable_id
 };
 
 use crate::{
     DataAccessObservation, DataAccessRole, DataArtifactKind, DataArtifactReference, DataArtifactReferenceKind, DataDocument, DatabaseForeignKey, DatabaseTable, DeploymentKind, DeploymentUnit, DocumentKind, DocumentRecord, DocumentationDocument, ExplicitReference, ExplicitReferenceKind, InfrastructureDocument, InfrastructureEvidence, InfrastructureResource, InfrastructureResourceKind, OwnershipRule, SafeConfigDocument
 };
+
+type RepositoryReference<'a> = (&'a str, &'a RepoId, Option<&'a str>);
 
 /// Graph-ready facts assembled from supported extraction documents.
 #[derive(Debug, Clone, Default)]
@@ -19,6 +21,8 @@ pub struct ExtractionGraphFacts {
     pub edges: Vec<Edge>,
     /// Value-free evidence supporting the emitted relationships.
     pub evidence: Vec<Evidence>,
+    /// Explicit repository dependencies that could not be resolved without guessing.
+    pub coverage_gaps: Vec<RepositoryCoverageGap>,
 }
 
 #[derive(Debug, Clone)]
@@ -37,6 +41,8 @@ struct PendingAccess {
     content_hash: String,
     access: DataAccessObservation,
 }
+
+type KnownSourceSymbols = BTreeMap<(RepoId, String, String), Node>;
 
 #[derive(Debug, Clone)]
 struct PendingForeignKey {
@@ -157,6 +163,10 @@ impl GraphBuilder {
             evidence.entry(item.id.clone()).or_insert(item);
         }
         self.facts.evidence = evidence.into_values().collect();
+        self.facts.coverage_gaps.sort_by(|left, right| {
+            (&left.repo_id, &left.reason).cmp(&(&right.repo_id, &right.reason))
+        });
+        self.facts.coverage_gaps.dedup();
         self.facts
     }
 }
@@ -173,9 +183,10 @@ pub fn documents_to_graph(
     documentation_inputs: &[(&RepoId, &str, &str, &DocumentationDocument)],
     config_inputs: &[(&RepoId, &str, &str, &SafeConfigDocument)],
     known_nodes: &[Node],
-    repository_aliases: &[(&str, &RepoId)],
+    repository_aliases: &[RepositoryReference<'_>],
 ) -> ExtractionGraphFacts {
     let mut builder = GraphBuilder::default();
+    let source_symbols = index_known_source_symbols(known_nodes);
 
     append_config_documents(&mut builder, config_inputs);
     let tables = append_data_documents(&mut builder, data_inputs);
@@ -189,8 +200,8 @@ pub fn documents_to_graph(
 
     // Data observations can resolve across documents, so they are linked after every declaration
     // has entered the exact-match table index.
-    link_data_observations(&mut builder, data_inputs, &tables);
-    link_data_artifact_references(&mut builder, data_inputs, &tables);
+    link_data_observations(&mut builder, data_inputs, &tables, &source_symbols);
+    link_data_artifact_references(&mut builder, data_inputs, &tables, &source_symbols);
     builder.finish()
 }
 
@@ -426,6 +437,7 @@ fn link_data_observations(
     builder: &mut GraphBuilder,
     inputs: &[(&RepoId, &str, &str, &DataDocument)],
     tables: &BTreeMap<String, TableInfo>,
+    source_symbols: &KnownSourceSymbols,
 ) {
     let mut accesses = Vec::new();
     let mut foreign_keys = Vec::new();
@@ -455,7 +467,7 @@ fn link_data_observations(
             }));
         }
     }
-    link_accesses(builder, accesses, tables);
+    link_accesses(builder, accesses, tables, source_symbols);
     link_foreign_keys(builder, foreign_keys, tables);
 }
 
@@ -463,6 +475,7 @@ fn link_data_artifact_references(
     builder: &mut GraphBuilder,
     inputs: &[(&RepoId, &str, &str, &DataDocument)],
     tables: &BTreeMap<String, TableInfo>,
+    source_symbols: &KnownSourceSymbols,
 ) {
     let mut referenced_accesses = Vec::new();
     for (repo_id, source_path, content_hash, document) in inputs {
@@ -502,7 +515,7 @@ fn link_data_artifact_references(
             );
             let source = reference.owner.as_deref().map_or_else(
                 || source_artifact.clone(),
-                |owner| data_symbol_node(repo_id, source_path, owner),
+                |owner| data_symbol_node(repo_id, source_path, owner, source_symbols),
             );
             for (target_repo, target_path, target_hash, target_document) in targets {
                 let target_artifact = append_artifact(
@@ -550,7 +563,7 @@ fn link_data_artifact_references(
             }
         }
     }
-    link_accesses(builder, referenced_accesses, tables);
+    link_accesses(builder, referenced_accesses, tables, source_symbols);
 }
 
 fn effective_data_reference_path(
@@ -601,6 +614,7 @@ fn link_accesses(
     builder: &mut GraphBuilder,
     accesses: Vec<PendingAccess>,
     tables: &BTreeMap<String, TableInfo>,
+    source_symbols: &KnownSourceSymbols,
 ) {
     let mut model_tables = BTreeMap::<String, BTreeSet<String>>::new();
     for pending in &accesses {
@@ -635,7 +649,12 @@ fn link_accesses(
         let Some(target) = resolve_table(tables, target_name) else {
             continue;
         };
-        let symbol = data_symbol_node(&pending.repo_id, &pending.source_path, owner);
+        let symbol = data_symbol_node(
+            &pending.repo_id,
+            &pending.source_path,
+            owner,
+            source_symbols,
+        );
         let evidence = extraction_evidence(
             &pending.repo_id,
             &pending.source_path,
@@ -1035,7 +1054,7 @@ fn append_documentation_documents(
     builder: &mut GraphBuilder,
     inputs: &[(&RepoId, &str, &str, &DocumentationDocument)],
     known_nodes: &[Node],
-    repository_aliases: &[(&str, &RepoId)],
+    repository_aliases: &[RepositoryReference<'_>],
 ) {
     let mut references = Vec::new();
     for (repo_id, source_path, content_hash, document) in inputs {
@@ -1067,7 +1086,7 @@ fn append_documentation_documents(
 
     let mut candidates = builder.facts.nodes.clone();
     candidates.extend_from_slice(known_nodes);
-    for (alias, repo_id) in repository_aliases {
+    for (alias, repo_id, _) in repository_aliases {
         if !alias.is_empty() {
             candidates.push(repository_node(repo_id));
         }
@@ -1078,7 +1097,7 @@ fn append_documentation_documents(
 fn link_document_references(
     builder: &mut GraphBuilder,
     candidates: &[Node],
-    repository_aliases: &[(&str, &RepoId)],
+    repository_aliases: &[RepositoryReference<'_>],
     references: Vec<PendingReference>,
 ) {
     for pending in references {
@@ -1088,6 +1107,16 @@ fn link_document_references(
             &pending.repo_id,
             &pending.reference,
         ) else {
+            if pending.reference.kind == ExplicitReferenceKind::RepositoryDependency {
+                builder.facts.coverage_gaps.push(RepositoryCoverageGap {
+                    repo_id: pending.repo_id.clone(),
+                    reason: format!(
+                        "An explicit repository dependency at {}:{} could not be matched to an exact registered remote; no dependency edge was asserted.",
+                        pending.source_path,
+                        pending.reference.evidence.start
+                    ),
+                });
+            }
             continue;
         };
         let evidence = extraction_evidence(
@@ -1370,7 +1399,7 @@ fn resolve_infrastructure_target(
 
 fn resolve_reference(
     candidates: &[Node],
-    repository_aliases: &[(&str, &RepoId)],
+    repository_aliases: &[RepositoryReference<'_>],
     repo_id: &RepoId,
     reference: &ExplicitReference,
 ) -> Option<Node> {
@@ -1393,7 +1422,7 @@ fn resolve_reference(
 
 fn reference_matches(
     node: &Node,
-    repository_aliases: &[(&str, &RepoId)],
+    repository_aliases: &[RepositoryReference<'_>],
     repo_id: &RepoId,
     kind: ExplicitReferenceKind,
     target: &str,
@@ -1422,9 +1451,10 @@ fn reference_matches(
     ) {
         return node.repo_id.as_ref().is_some_and(|candidate| {
             candidate.as_str() == target
-                || repository_aliases
-                    .iter()
-                    .any(|(alias, repo)| *alias == target && *repo == candidate)
+                || repository_aliases.iter().any(|(alias, repo, remote)| {
+                    (*alias == target || remote.is_some_and(|remote| remote == target))
+                        && *repo == candidate
+                })
         });
     }
     if node.stable_key == target || node.label == target {
@@ -1445,8 +1475,8 @@ fn reference_matches(
                 .and_then(|(alias, name)| {
                     repository_aliases
                         .iter()
-                        .find(|(candidate, _)| *candidate == alias)
-                        .map(|(_, repository)| (repository, name))
+                        .find(|(candidate, _, _)| *candidate == alias)
+                        .map(|(_, repository, _)| (repository, name))
                 })
                 .is_some_and(|(repository, name)| {
                     node.stable_key == format!("service:{}:{name}", repository.as_str())
@@ -1537,13 +1567,36 @@ fn column_node(table_key: &str, name: &str) -> Node {
     )
 }
 
-fn data_symbol_node(repo_id: &RepoId, source_path: &str, owner: &str) -> Node {
-    graph_node(
-        format!("data-symbol:{}:{source_path}:{owner}", repo_id.as_str()),
-        NodeKind::SymbolRef,
-        Some(repo_id.clone()),
-        owner,
-    )
+fn index_known_source_symbols(nodes: &[Node]) -> KnownSourceSymbols {
+    nodes
+        .iter()
+        .filter_map(|node| {
+            let identity = crate::SourceSymbolIdentity::from_node(node)?;
+            identity.language()?;
+            Some((
+                (
+                    identity.repository().clone(),
+                    identity.source_path().to_owned(),
+                    identity.symbol().to_owned(),
+                ),
+                node.clone(),
+            ))
+        })
+        .collect()
+}
+
+fn data_symbol_node(
+    repo_id: &RepoId,
+    source_path: &str,
+    owner: &str,
+    source_symbols: &KnownSourceSymbols,
+) -> Node {
+    if let Some(node) =
+        source_symbols.get(&(repo_id.clone(), source_path.to_owned(), owner.to_owned()))
+    {
+        return node.clone();
+    }
+    crate::SourceSymbolIdentity::data(repo_id.clone(), source_path, owner).node(owner)
 }
 
 fn deployment_node(technology: &str, namespace: Option<&str>, name: &str) -> Node {
@@ -1669,7 +1722,7 @@ fn line_from_usize(line: usize) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
-    use code_system_graph_model::{EdgeKind, NodeKind, RepoId};
+    use code_system_graph_model::{EdgeKind, Node, NodeId, NodeKind, RepoId, stable_id};
 
     use super::documents_to_graph;
     use crate::{
@@ -1749,6 +1802,88 @@ mod tests {
                         && node.label == "users"
                 })
         }));
+    }
+
+    #[test]
+    fn data_reader_reuses_exact_known_source_symbol() {
+        let repo = RepoId::new("repo:data");
+        let line = DataEvidenceLine::new(7).expect("valid evidence line");
+        let declaration = DataDocument {
+            source_path: "schema.sql".to_owned(),
+            artifact_kind: DataArtifactKind::DeclarativeSqlSchema,
+            database_name: None,
+            schema_name: None,
+            tables: vec![DatabaseTable {
+                database: None,
+                schema: None,
+                name: "users".to_owned(),
+                columns: Vec::new(),
+                indexes: Vec::new(),
+                foreign_keys: Vec::new(),
+                evidence: line,
+            }],
+            migration: None,
+            accesses: Vec::new(),
+            frameworks: Vec::new(),
+            references: Vec::new(),
+            owners: Vec::new(),
+            warnings: Vec::new(),
+            incomplete: false,
+        };
+        let reader = DataDocument {
+            source_path: "src/users.rs".to_owned(),
+            artifact_kind: DataArtifactKind::LiteralQuerySource,
+            database_name: None,
+            schema_name: None,
+            tables: Vec::new(),
+            migration: None,
+            accesses: vec![DataAccessObservation {
+                role: DataAccessRole::Reader,
+                table: "users".to_owned(),
+                model: None,
+                owner: Some("load_users".to_owned()),
+                operation: Some(DataOperation::Select),
+                evidence: line,
+            }],
+            frameworks: Vec::new(),
+            references: Vec::new(),
+            owners: vec!["load_users".to_owned()],
+            warnings: Vec::new(),
+            incomplete: false,
+        };
+        let stable_key = "symbol:repo:data:rust:src/users.rs:load_users".to_owned();
+        let source_symbol = Node {
+            id: NodeId::new(stable_id("node", &stable_key)),
+            kind: NodeKind::SymbolRef,
+            repo_id: Some(repo.clone()),
+            stable_key,
+            label: "rust::load_users".to_owned(),
+        };
+
+        let facts = documents_to_graph(
+            &[
+                (&repo, "schema.sql", "schema-hash", &declaration),
+                (&repo, "src/users.rs", "source-hash", &reader),
+            ],
+            &[],
+            &[],
+            &[],
+            std::slice::from_ref(&source_symbol),
+            &[],
+        );
+
+        assert!(facts.nodes.iter().any(|node| node == &source_symbol));
+        assert!(
+            !facts
+                .nodes
+                .iter()
+                .any(|node| node.stable_key.starts_with("data-symbol:"))
+        );
+        assert!(
+            facts.edges.iter().any(|edge| {
+                edge.source == source_symbol.id && edge.kind == EdgeKind::ReadsTable
+            })
+        );
     }
 
     #[test]
@@ -2108,8 +2243,16 @@ async fn load_user(pool: &sqlx::PgPool) {
             &[],
             &[],
             &[
-                ("hugint-platform", &platform),
-                ("hugint-transpiler", &transpiler),
+                (
+                    "hugint-platform",
+                    &platform,
+                    Some("github.com/huginthub/hugint-platform"),
+                ),
+                (
+                    "hugint-transpiler",
+                    &transpiler,
+                    Some("github.com/huginthub/hugint-transpiler"),
+                ),
             ],
         );
 
@@ -2131,6 +2274,64 @@ async fn load_user(pool: &sqlx::PgPool) {
             })
             .expect("cross-repository dependency");
         assert_ne!(relation.source, relation.target);
+    }
+
+    #[test]
+    fn repository_link_with_wrong_owner_does_not_match_alias_basename() {
+        let platform = RepoId::new("repo:platform");
+        let payments = RepoId::new("repo:payments");
+        let document = extract_markdown(
+            "README.md",
+            "Generated by [payments](https://github.com/evil-owner/payments).\n",
+        )
+        .expect("valid Markdown");
+
+        let facts = documents_to_graph(
+            &[],
+            &[],
+            &[(&platform, "README.md", "readme-hash", &document)],
+            &[],
+            &[],
+            &[("payments", &payments, Some("github.com/acme/payments"))],
+        );
+
+        assert!(
+            facts
+                .edges
+                .iter()
+                .all(|edge| edge.kind != EdgeKind::DependsOnRepository)
+        );
+        assert_eq!(facts.coverage_gaps.len(), 1);
+        assert_eq!(facts.coverage_gaps[0].repo_id, platform);
+    }
+
+    #[test]
+    fn repository_link_with_wrong_host_does_not_match_remote_slug() {
+        let platform = RepoId::new("repo:platform");
+        let payments = RepoId::new("repo:payments");
+        let document = extract_markdown(
+            "README.md",
+            "Generated by [payments](https://github.com/acme/payments).\n",
+        )
+        .expect("valid Markdown");
+
+        let facts = documents_to_graph(
+            &[],
+            &[],
+            &[(&platform, "README.md", "readme-hash", &document)],
+            &[],
+            &[],
+            &[("payments", &payments, Some("gitlab.com/acme/payments"))],
+        );
+
+        assert!(
+            facts
+                .edges
+                .iter()
+                .all(|edge| edge.kind != EdgeKind::DependsOnRepository)
+        );
+        assert_eq!(facts.coverage_gaps.len(), 1);
+        assert_eq!(facts.coverage_gaps[0].repo_id, platform);
     }
 
     #[test]

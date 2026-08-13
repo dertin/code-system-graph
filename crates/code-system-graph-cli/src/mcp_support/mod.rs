@@ -8,7 +8,7 @@ use code_system_graph_core::{
     ChangeImpactReport, ContractAction, ContractReport, ContractRequest, ImpactReport, ImpactRequest, ManualLinkConfig, PullRequestInspection, inspect_contracts, public_schema_catalog
 };
 use code_system_graph_model::{
-    CommunityId, Edge, EdgeKind, EpistemicStatus, Evidence, FreshnessSummary, Node, NodeId, OverallFreshness, RepoFreshness, RepoFreshnessState, ToolEnvelope, ToolStatus
+    CommunityId, Edge, EdgeKind, EpistemicStatus, Evidence, FreshnessSummary, Node, NodeId, OverallFreshness, RepoFreshness, ToolEnvelope, ToolStatus
 };
 use code_system_graph_store_sqlite::SqliteStore;
 use schemars::{JsonSchema, schema_for};
@@ -16,18 +16,23 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::{
-    ChangesInput, CommunityInput, CommunityReport, ExploreInput, ManifestMutationSummary, PullRequestInput, ScanSummary, SearchInput, TraceInput
+    ChangesInput, CommunityInput, CommunityReport, ExploreInput, ManifestMutationSummary, PullRequestInput, ScanSummary, SearchInput, TraceInput, freshness_summary
 };
 
+mod agent_context;
 mod agent_views;
 mod presentation;
 #[cfg(test)]
 mod presentation_goldens;
 mod resources;
+mod vocabulary;
+mod workspace_policy;
 
-pub(super) use agent_views::AgentPresentationContext;
+pub(super) use agent_context::AgentPresentationContext;
 pub(super) use presentation::AgentToolResult;
 pub(super) use resources::{ResourceErrorKind, read_resource, resource_templates, resource_uris};
+use workspace_policy::validate_optional_workspace;
+pub(super) use workspace_policy::{ReadWorkspaceInput, WorkspaceInput, validate_workspace};
 
 pub(super) const ADMIN_TOOL_NAMES: [&str; 5] = [
     "scan",
@@ -39,13 +44,6 @@ pub(super) const ADMIN_TOOL_NAMES: [&str; 5] = [
 pub(super) const MARKDOWN_MIME_TYPE: &str = "text/markdown";
 
 const MAX_PAGE_SIZE: usize = 100;
-
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub(super) struct WorkspaceInput {
-    /// Workspace selected when the MCP server was constructed.
-    pub workspace: String,
-}
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(super) struct WorkspaceUpdateInput {
@@ -124,16 +122,17 @@ pub(super) struct CacheCleanInput {
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(super) struct ContractsInput {
-    /// Workspace selected when the MCP server was constructed.
-    pub workspace: String,
+    /// Optional assertion of the workspace already bound to this MCP server.
+    #[serde(default)]
+    pub workspace: Option<String>,
     /// Action-specific contract operation.
     #[serde(flatten)]
-    operation: ContractsOperation,
+    pub(super) operation: ContractsOperation,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
-enum ContractsOperation {
+pub(super) enum ContractsOperation {
     /// List contracts in stable order.
     List {
         /// Bounded result size.
@@ -176,8 +175,9 @@ enum ContractsOperation {
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(super) struct CommunitiesInput {
-    /// Workspace selected when the MCP server was constructed.
-    pub workspace: String,
+    /// Optional assertion of the workspace already bound to this MCP server.
+    #[serde(default)]
+    pub workspace: Option<String>,
     /// Action-specific community operation.
     #[serde(flatten)]
     operation: CommunitiesOperation,
@@ -273,8 +273,8 @@ impl ManualLinkWriteInput {
 }
 
 impl ContractsInput {
-    pub(super) fn workspace(&self) -> &str {
-        &self.workspace
+    pub(super) fn workspace(&self) -> Option<&str> {
+        self.workspace.as_deref()
     }
 
     fn request(&self) -> ContractRequest {
@@ -319,11 +319,22 @@ impl ContractsInput {
             },
         }
     }
+
+    fn validate_bounds(&self) -> Result<(), &'static str> {
+        match self.operation {
+            ContractsOperation::List { limit } | ContractsOperation::ValidateAll { limit }
+                if !(1..=MAX_PAGE_SIZE).contains(&limit) =>
+            {
+                Err("limit must be between 1 and 100")
+            }
+            _ => Ok(()),
+        }
+    }
 }
 
 impl CommunitiesInput {
-    pub(super) fn workspace(&self) -> &str {
-        &self.workspace
+    pub(super) fn workspace(&self) -> Option<&str> {
+        self.workspace.as_deref()
     }
 
     pub(super) fn application_input(&self) -> CommunityInput {
@@ -357,8 +368,9 @@ impl CommunitiesInput {
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(super) struct SourceContextInput {
-    /// Workspace selected when the MCP server was constructed.
-    pub workspace: String,
+    /// Optional assertion of the workspace already bound to this MCP server.
+    #[serde(default)]
+    pub workspace: Option<String>,
     /// Stable graph node identifier whose persisted context is requested.
     pub node_id: NodeId,
     /// Maximum number of evidence metadata records.
@@ -428,9 +440,9 @@ pub(super) struct CacheCleanReport {
 pub(super) fn status_envelope(
     database_path: &Path,
     configured_workspace: &str,
-    requested_workspace: &str,
+    requested_workspace: Option<&str>,
 ) -> ToolEnvelope<GraphStatusReport> {
-    if let Err(message) = validate_workspace(configured_workspace, requested_workspace) {
+    if let Err(message) = validate_optional_workspace(configured_workspace, requested_workspace) {
         return error_envelope("Workspace policy rejected the request.", message);
     }
     match load_status(database_path, configured_workspace) {
@@ -457,24 +469,52 @@ pub(super) fn contracts_envelope(
     configured_workspace: &str,
     input: &ContractsInput,
 ) -> ToolEnvelope<ContractReport> {
-    if let Err(message) = validate_workspace(configured_workspace, input.workspace()) {
+    if let Err(message) = validate_optional_workspace(configured_workspace, input.workspace()) {
         return error_envelope("Workspace policy rejected the request.", message);
+    }
+    if let Err(message) = input.validate_bounds() {
+        return error_envelope("Contract bounds are invalid.", message);
     }
     let result = (|| {
         let store =
             SqliteStore::open_read_only(database_path).map_err(|error| error.to_string())?;
+        let request = input.request();
+        if request.action == ContractAction::List {
+            let snapshot = store
+                .current_snapshot_summary(configured_workspace)
+                .map_err(|error| error.to_string())?;
+            let (total, nodes) = store
+                .load_nodes_by_kinds_snapshot(
+                    &snapshot.snapshot_id,
+                    &code_system_graph_core::CONTRACT_NODE_KINDS,
+                    request.limit,
+                )
+                .map_err(|error| error.to_string())?;
+            let freshness = freshness_summary(
+                &store
+                    .load_freshness_snapshot(&snapshot.snapshot_id)
+                    .map_err(|error| error.to_string())?,
+            );
+            let mut report = inspect_contracts(&nodes, &[], &[], &[], &request)
+                .map_err(|error| error.to_string())?;
+            report.truncated = total > report.contracts.len();
+            return Ok((report, freshness));
+        }
+        let snapshot = store
+            .current_snapshot_summary(configured_workspace)
+            .map_err(|error| error.to_string())?;
         let (nodes, edges) = store
-            .load_current_graph(configured_workspace)
+            .load_graph_snapshot(&snapshot.snapshot_id)
             .map_err(|error| error.to_string())?;
         let evidence = store
-            .load_current_evidence(configured_workspace)
+            .load_evidence_snapshot(&snapshot.snapshot_id)
             .map_err(|error| error.to_string())?;
         let freshness = freshness_summary(
             &store
-                .load_current_freshness(configured_workspace)
+                .load_freshness_snapshot(&snapshot.snapshot_id)
                 .map_err(|error| error.to_string())?,
         );
-        let report = inspect_contracts(&nodes, &edges, &evidence, &[], &input.request())
+        let report = inspect_contracts(&nodes, &edges, &evidence, &[], &request)
             .map_err(|error| error.to_string())?;
         Ok::<_, String>((report, freshness))
     })();
@@ -506,7 +546,9 @@ pub(super) fn source_context_envelope(
     configured_workspace: &str,
     input: &SourceContextInput,
 ) -> ToolEnvelope<SourceContextReport> {
-    if let Err(message) = validate_workspace(configured_workspace, &input.workspace) {
+    if let Err(message) =
+        validate_optional_workspace(configured_workspace, input.workspace.as_deref())
+    {
         return error_envelope("Workspace policy rejected the request.", message);
     }
     if !(1..=MAX_PAGE_SIZE).contains(&input.evidence_limit) {
@@ -518,8 +560,11 @@ pub(super) fn source_context_envelope(
     let result = (|| {
         let store =
             SqliteStore::open_read_only(database_path).map_err(|error| error.to_string())?;
+        let snapshot = store
+            .current_snapshot_summary(configured_workspace)
+            .map_err(|error| error.to_string())?;
         let (nodes, edges) = store
-            .load_current_graph(configured_workspace)
+            .load_graph_snapshot(&snapshot.snapshot_id)
             .map_err(|error| error.to_string())?;
         let entity = nodes
             .iter()
@@ -566,7 +611,7 @@ pub(super) fn source_context_envelope(
             .flat_map(|edge| edge.evidence.iter().cloned())
             .collect::<BTreeSet<_>>();
         let all_evidence = store
-            .load_current_evidence(configured_workspace)
+            .load_evidence_snapshot(&snapshot.snapshot_id)
             .map_err(|error| error.to_string())?
             .into_iter()
             .map(|evidence| (evidence.id.clone(), evidence))
@@ -586,7 +631,7 @@ pub(super) fn source_context_envelope(
             .collect::<Vec<_>>();
         let freshness = freshness_summary(
             &store
-                .load_current_freshness(configured_workspace)
+                .load_freshness_snapshot(&snapshot.snapshot_id)
                 .map_err(|error| error.to_string())?,
         );
         Ok::<_, String>((
@@ -765,7 +810,7 @@ pub(super) fn schema_catalog() -> Value {
         &mut schemas,
         "analyze_pull_request.result",
     );
-    insert_schema::<WorkspaceInput>(&mut schemas, "status.input");
+    insert_schema::<ReadWorkspaceInput>(&mut schemas, "status.input");
     insert_schema::<AgentStructuredEnvelope<AgentStatusReport>>(&mut schemas, "status.result");
     insert_schema::<ContractsInput>(&mut schemas, "contracts.input");
     insert_schema::<AgentStructuredEnvelope<ContractReport>>(&mut schemas, "contracts.result");
@@ -831,13 +876,13 @@ fn load_status(
     {
         return Err(format!("workspace `{workspace}` is not registered"));
     }
-    let repositories = store
-        .load_current_freshness(workspace)
-        .map_err(|error| error.to_string())?;
-    let freshness = freshness_summary(&repositories);
     let snapshot = store
         .current_snapshot_summary(workspace)
         .map_err(|error| error.to_string())?;
+    let repositories = store
+        .load_freshness_snapshot(&snapshot.snapshot_id)
+        .map_err(|error| error.to_string())?;
+    let freshness = freshness_summary(&repositories);
     Ok((
         GraphStatusReport {
             workspace: workspace.to_owned(),
@@ -853,52 +898,6 @@ fn load_status(
         },
         freshness,
     ))
-}
-
-fn freshness_summary(repositories: &[RepoFreshness]) -> FreshnessSummary {
-    let overall = if repositories.is_empty() {
-        OverallFreshness::Unknown
-    } else if repositories
-        .iter()
-        .all(|item| item.state == RepoFreshnessState::Fresh)
-    {
-        OverallFreshness::Fresh
-    } else if repositories.iter().any(|item| {
-        matches!(
-            item.state,
-            RepoFreshnessState::Unavailable
-                | RepoFreshnessState::Unknown
-                | RepoFreshnessState::Corrupt
-        )
-    }) {
-        OverallFreshness::Partial
-    } else {
-        OverallFreshness::Stale
-    };
-    let stale_repositories = repositories
-        .iter()
-        .filter(|item| item.state != RepoFreshnessState::Fresh)
-        .map(|item| item.repo_id.clone())
-        .collect();
-    let reasons = repositories
-        .iter()
-        .filter_map(|item| item.reason.clone())
-        .collect();
-    FreshnessSummary {
-        overall,
-        stale_repositories,
-        reasons,
-    }
-}
-
-fn validate_workspace(configured: &str, requested: &str) -> Result<(), String> {
-    if requested == configured {
-        Ok(())
-    } else {
-        Err(format!(
-            "workspace `{requested}` is outside this server's configured `{configured}` policy"
-        ))
-    }
 }
 
 fn insert_schema<T: JsonSchema>(catalog: &mut BTreeMap<String, Value>, name: &str) {
@@ -943,7 +942,23 @@ fn native_path(path: &code_system_graph_model::NativePath) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    use code_system_graph_model::RepoFreshnessState;
+
     use super::*;
+
+    #[test]
+    fn partial_repository_coverage_should_remain_partial_in_mcp_freshness() {
+        let summary = freshness_summary(&[RepoFreshness {
+            repo_id: code_system_graph_model::RepoId::new("repo:api"),
+            checkout_id: code_system_graph_model::CheckoutId::new("checkout:api"),
+            head_commit: None,
+            manifest_hash: "manifest".to_owned(),
+            state: RepoFreshnessState::Partial,
+            reason: Some("coverage is incomplete".to_owned()),
+        }]);
+
+        assert_eq!(summary.overall, OverallFreshness::Partial);
+    }
 
     #[test]
     fn administrative_audit_should_be_append_only_and_source_free()

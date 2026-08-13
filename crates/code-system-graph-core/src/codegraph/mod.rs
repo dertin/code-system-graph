@@ -112,6 +112,38 @@ impl CodeGraphProvider {
         self.maximum_concurrency_observed.load(Ordering::Acquire)
     }
 
+    /// Reads one repository-relative file through `CodeGraph`'s bounded public CLI contract.
+    ///
+    /// This is used only when semantic Explore resolves an exact file but the broader context
+    /// query cannot select source for it. The path must remain inside the indexed repository.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError`] for unsafe paths, cancellation, timeout, or invalid output.
+    pub async fn build_local_file_context(
+        &self,
+        mut input: LocalContextRequest,
+        file_path: &str,
+    ) -> Result<LocalContextResult, ProviderError> {
+        let path = Path::new(file_path);
+        if file_path.is_empty()
+            || !path.is_relative()
+            || path
+                .components()
+                .any(|component| !matches!(component, Component::Normal(_) | Component::CurDir))
+        {
+            return Err(ProviderError::InvalidRequest(
+                "file path must be a safe repository-relative path".to_owned(),
+            ));
+        }
+        let deadline = tokio::time::Instant::now() + input.request.budget.timeout;
+        let _permit = self.enter(&input.request, deadline).await?;
+        self.compatible_cli_version(&mut input.request, deadline)
+            .await?;
+        update_remaining_timeout(&mut input.request, deadline)?;
+        self.cli.local_file_context(&input, file_path).await
+    }
+
     /// Reads the structured local-index status without starting MCP or modifying the index.
     ///
     /// # Errors

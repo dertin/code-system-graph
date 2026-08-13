@@ -79,7 +79,9 @@ fn context(state: RepoFreshnessState) -> ImpactContext {
 
 fn request() -> ImpactRequest {
     ImpactRequest {
-        target: ImpactTarget::NodeId(NodeId::new("contract")),
+        target: ImpactTarget::NodeId {
+            node_id: NodeId::new("contract"),
+        },
         direction: ImpactDirection::Upstream,
         options: ImpactOptions::default(),
     }
@@ -89,7 +91,7 @@ fn request() -> ImpactRequest {
 fn partial_impact_options_should_inherit_individual_defaults()
 -> Result<(), Box<dyn std::error::Error>> {
     let request: ImpactRequest = serde_json::from_value(serde_json::json!({
-        "target": {"kind": "node_id", "value": "contract"},
+        "target": {"node_id": "contract"},
         "direction": "upstream",
         "options": {"limit": 7}
     }))?;
@@ -100,6 +102,41 @@ fn partial_impact_options_should_inherit_individual_defaults()
     );
     assert!(request.options.include_depth_buckets);
     Ok(())
+}
+
+#[test]
+fn impact_request_should_accept_safe_agent_shorthand() -> Result<(), Box<dyn std::error::Error>> {
+    let request: ImpactRequest = serde_json::from_value(serde_json::json!({
+        "key": "event:Kafka::payments.updated"
+    }))?;
+
+    assert_eq!(request.direction, ImpactDirection::Both);
+    assert_eq!(
+        request.target,
+        ImpactTarget::StableKey {
+            stable_key: "event:Kafka::payments.updated".to_owned()
+        }
+    );
+    Ok(())
+}
+
+#[test]
+fn impact_request_should_reject_multiple_target_selectors() {
+    let result = serde_json::from_value::<ImpactRequest>(serde_json::json!({
+        "target": {"node_id": "contract"},
+        "key": "event:Kafka::payments.updated"
+    }));
+
+    assert!(result.is_err());
+}
+
+#[test]
+fn impact_request_should_reject_ambiguous_nested_target() {
+    let result = serde_json::from_value::<ImpactRequest>(serde_json::json!({
+        "target": {"node_id": "contract", "stable_key": "contract:key"}
+    }));
+
+    assert!(result.is_err());
 }
 
 #[test]

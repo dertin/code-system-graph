@@ -117,7 +117,7 @@ impl BoundaryExtractor for FocusedSourceExtractor {
         let reserved_observations = u64::try_from(syntax.boundary_candidate_count)
             .map_err(|_| ExtractorError::InvalidInput("too many syntax candidates".to_owned()))?;
         tracker.charge_work(reserved_observations)?;
-        precheck_focused_source_values(source, &mut tracker)?;
+        precheck_focused_source_values(source, syntax_language(self.language), &mut tracker)?;
         let observations = match self.language {
             FocusedSourceLanguage::JavaScript => parse_javascript_source_at_path_with_tracker(
                 &input.file.path.display,
@@ -214,6 +214,7 @@ fn syntax_language(language: FocusedSourceLanguage) -> SourceSyntaxLanguage {
 #[doc(hidden)]
 pub fn precheck_focused_source_values(
     source: &str,
+    language: SourceSyntaxLanguage,
     tracker: &mut ExtractionTracker,
 ) -> Result<(), crate::ExtractionLimitExceeded> {
     let bytes = source.as_bytes();
@@ -224,7 +225,11 @@ pub fn precheck_focused_source_values(
             tracker.check_structured_time()?;
         }
         let byte = bytes[cursor];
-        if matches!(byte, b'"' | b'\'' | b'`') {
+        if matches!(byte, b'"' | b'\'' | b'`')
+            && (byte != b'\''
+                || language != SourceSyntaxLanguage::Rust
+                || rust_char_literal_end(bytes, cursor).is_some())
+        {
             tracker.charge_work(1)?;
             let delimiter = byte;
             cursor = cursor.saturating_add(1);
@@ -266,6 +271,27 @@ pub fn precheck_focused_source_values(
         cursor = cursor.saturating_add(1);
     }
     Ok(())
+}
+
+fn rust_char_literal_end(bytes: &[u8], index: usize) -> Option<usize> {
+    let value = index.checked_add(1)?;
+    let closing = if bytes.get(value) == Some(&b'\\') {
+        match bytes.get(value + 1)? {
+            b'u' if bytes.get(value + 2) == Some(&b'{') => {
+                (value + 3..bytes.len()).find(|cursor| bytes[*cursor] == b'}')? + 1
+            }
+            b'x' => value.checked_add(4)?,
+            _ => value.checked_add(2)?,
+        }
+    } else {
+        let width = std::str::from_utf8(bytes.get(value..)?)
+            .ok()?
+            .chars()
+            .next()?
+            .len_utf8();
+        value.checked_add(width)?
+    };
+    (bytes.get(closing) == Some(&b'\'')).then_some(closing + 1)
 }
 
 /// Built-in `OpenAPI` Generator metadata extractor.
@@ -595,7 +621,7 @@ mod tests {
     use code_system_graph_model::{CheckoutId, NativePath, NativePathEncoding, RepoId};
 
     use super::{
-        BoundaryExtractor, ExtractInput, ExtractionBudgets, ExtractorError, FileDescriptor, FocusedSourceExtractor, FocusedSourceLanguage, GeneratedClientMetadataExtractor, PackageManifestExtractor
+        BoundaryExtractor, ExtractInput, ExtractionBudgets, ExtractorError, FileDescriptor, FocusedSourceExtractor, FocusedSourceLanguage, GeneratedClientMetadataExtractor, PackageManifestExtractor, SourceSyntaxLanguage
     };
 
     fn file(path: &str) -> FileDescriptor {
@@ -668,6 +694,24 @@ mod tests {
                 Err(ExtractorError::LimitExceeded(error)) if error.resource == resource
             ));
         }
+    }
+
+    #[test]
+    fn rust_preflight_should_not_treat_a_lifetime_as_one_large_char_literal() {
+        let mut source = "type View<'a> = &'a str;\n".to_owned();
+        source.push_str(&"x;".repeat(35_000));
+        let budgets = ExtractionBudgets::default();
+        let mut tracker =
+            crate::ExtractionTracker::new("src/view.rs", "code-system-graph.source.rust", &budgets);
+
+        assert!(
+            super::precheck_focused_source_values(
+                &source,
+                SourceSyntaxLanguage::Rust,
+                &mut tracker
+            )
+            .is_ok()
+        );
     }
 
     #[tokio::test]

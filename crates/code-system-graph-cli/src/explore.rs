@@ -5,6 +5,8 @@ mod model;
 mod provider;
 mod runtime;
 
+use std::path::Component;
+
 use code_system_graph_core::{ExecutionPolicy, ResolvedSymbol};
 use correlation::{
     ExploreCorrelationInput, ExploreCorrelationOutput, correlate_explore_handoffs, explore_repository_context, explore_repository_contexts
@@ -56,6 +58,28 @@ fn truncate_utf8_owned(mut value: String, maximum: usize) -> String {
     }
     value.truncate(boundary);
     value
+}
+
+fn scoped_explore_query<'a>(repository_alias: &str, query: &'a str) -> &'a str {
+    let trimmed = query.trim();
+    let Some(remainder) = trimmed
+        .strip_prefix(repository_alias)
+        .and_then(|value| value.strip_prefix('/'))
+    else {
+        return query;
+    };
+    let path = Path::new(remainder);
+    if remainder.is_empty()
+        || remainder.chars().any(char::is_whitespace)
+        || !path.is_relative()
+        || path
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_) | Component::CurDir))
+    {
+        query
+    } else {
+        remainder
+    }
 }
 
 fn fallback_explore_anchors(source_markdown: &str, maximum: usize) -> Vec<ResolvedSymbol> {
@@ -160,7 +184,19 @@ fn query_mentions_symbol(query: &str, symbol: &str) -> bool {
     if symbol.is_empty() {
         return false;
     }
-    query.match_indices(symbol).any(|(start, _)| {
+    query.char_indices().any(|(start, _)| {
+        let Some(candidate) = query.get(start..start.saturating_add(symbol.len())) else {
+            return false;
+        };
+        let generic_http_method = matches!(
+            symbol,
+            "delete" | "get" | "head" | "options" | "patch" | "post" | "put" | "request" | "trace"
+        );
+        if generic_http_method && candidate != symbol
+            || !generic_http_method && !candidate.eq_ignore_ascii_case(symbol)
+        {
+            return false;
+        }
         let before = query[..start].chars().next_back();
         let after = query[start + symbol.len()..].chars().next();
         let is_identifier =
@@ -217,7 +253,9 @@ fn source_markdown_for_exact_symbols(
     let mut found = false;
     for line in source_markdown.lines() {
         if let Some(path) = source_section_path(line) {
-            collecting = paths.contains(path);
+            collecting = paths
+                .iter()
+                .any(|expected| path == *expected || path.ends_with(&format!("/{expected}")));
             found |= collecting;
         }
         if collecting {
@@ -566,6 +604,7 @@ pub async fn explore_repository(
                 return explore_scoped_error_envelope(freshness, ToolStatus::Error, message);
             }
         };
+    let provider_query = scoped_explore_query(&repository.alias, &input.query);
     if snapshot.incomplete_stage.is_some() {
         return partial_snapshot_envelope(workspace, input, repository, snapshot, policy);
     }
@@ -574,7 +613,7 @@ pub async fn explore_repository(
         Err(message) => {
             return provider_unavailable_envelope(
                 workspace,
-                &input.query,
+                provider_query,
                 repository,
                 snapshot,
                 freshness,
@@ -588,7 +627,7 @@ pub async fn explore_repository(
         provider: &provider,
         repository: &repository,
         project_path: &project_path,
-        query: &input.query,
+        query: provider_query,
         policy,
         context: &execution_context,
         max_files,
@@ -600,7 +639,7 @@ pub async fn explore_repository(
         anchors,
     } = outcome;
     let exact_symbol_resolved =
-        !exact_query_symbols(&input.query, &provider_data.resolved_symbols).is_empty();
+        !exact_query_symbols(provider_query, &provider_data.resolved_symbols).is_empty();
     ledger.gaps.extend(snapshot.gaps);
 
     let repository_contexts = explore_repository_contexts(&snapshot.registry, &snapshot.freshness);
@@ -621,7 +660,7 @@ pub async fn explore_repository(
     let next_actions = explore_next_actions(
         workspace,
         &repository,
-        &input.query,
+        provider_query,
         &federated_handoffs,
         policy,
         !exact_symbol_resolved,

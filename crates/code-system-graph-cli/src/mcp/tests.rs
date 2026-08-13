@@ -7,10 +7,18 @@ use code_system_graph_store_sqlite::SqliteStore;
 use rmcp::ServerHandler;
 use rmcp::handler::server::wrapper::Parameters;
 
+use super::mcp_support::{ContractsInput, ContractsOperation};
 use super::{CodeSystemGraphServer, mcp_support};
 #[cfg(unix)]
 use crate::{CODEGRAPH_DISABLED_CODE, ExploreInput};
-use crate::{SearchInput, scan_workspace};
+use crate::{QueryActionCapabilities, SearchInput, scan_workspace, search_workspace_for_delivery};
+
+fn call_text(result: &rmcp::model::CallToolResult) -> &str {
+    match result.content.first() {
+        Some(rmcp::model::ContentBlock::Text(content)) => &content.text,
+        _ => panic!("tool result did not contain Markdown text"),
+    }
+}
 
 #[test]
 fn server_should_publish_read_only_tools() {
@@ -43,6 +51,13 @@ fn server_should_publish_read_only_tools() {
         })
     }));
     assert!(tools.iter().all(|tool| tool.output_schema.is_none()));
+    let impact = tools
+        .iter()
+        .find(|tool| tool.name == "impact")
+        .expect("impact tool");
+    let description = impact.description.as_deref().expect("impact description");
+    assert!(description.contains("{\"node_id\":\"node:...\"}"));
+    assert!(description.contains("{\"stable_key\":\"table:::payments\"}"));
 }
 
 #[test]
@@ -122,6 +137,125 @@ async fn query_actions_should_match_mcp_codegraph_capability()
     Ok(())
 }
 
+#[tokio::test]
+async fn presentation_context_should_be_cached_by_arc_and_fail_closed_across_snapshots()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temporary = tempfile::tempdir()?;
+    let database = temporary.path().join("graph.db");
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fixtures/platform-demo/code-system-graph.yaml");
+    scan_workspace(&manifest, &database)?;
+    let server = CodeSystemGraphServer::new(database.clone(), "commerce-platform".to_owned());
+    let snapshot = SqliteStore::open_read_only(&database)?
+        .current_snapshot_summary("commerce-platform")?
+        .snapshot_id;
+    let first = server.presentation_context_for_snapshot(&snapshot).await;
+    let second = server.presentation_context_for_snapshot(&snapshot).await;
+    assert!(std::sync::Arc::ptr_eq(&first, &second));
+
+    let input = SearchInput {
+        query: "orders".to_owned(),
+        node_kinds: Vec::new(),
+        repo_ids: Vec::new(),
+        service_ids: Vec::new(),
+        community_ids: Vec::new(),
+        offset: 0,
+        limit: 5,
+    };
+    let envelope = search_workspace_for_delivery(
+        &database,
+        "commerce-platform",
+        &input,
+        &ExecutionPolicy::default(),
+        QueryActionCapabilities {
+            source_context: true,
+            explore: false,
+        },
+    )?;
+    let result = server
+        .contextual_markdown_result(
+            mcp_support::AgentToolResult::Query(&envelope),
+            Some("snapshot:replaced".to_owned()),
+        )
+        .await;
+
+    assert!(
+        call_text(&result).contains("snapshot changed"),
+        "{}",
+        call_text(&result)
+    );
+    assert!(result.structured_content.as_ref().is_some_and(|content| {
+        content["status"] == "degraded"
+            && content["warnings"].as_array().is_some_and(|warnings| {
+                warnings.iter().any(|warning| {
+                    warning
+                        .as_str()
+                        .is_some_and(|warning| warning.contains("snapshot changed"))
+                })
+            })
+    }));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_presentation_cache_misses_should_publish_one_canonical_arc()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temporary = tempfile::tempdir()?;
+    let database = temporary.path().join("graph.db");
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fixtures/platform-demo/code-system-graph.yaml");
+    scan_workspace(&manifest, &database)?;
+    let server = CodeSystemGraphServer::new(database.clone(), "commerce-platform".to_owned());
+    let snapshot = SqliteStore::open_read_only(&database)?
+        .current_snapshot_summary("commerce-platform")?
+        .snapshot_id;
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(8));
+    let handles: [_; 8] = std::array::from_fn(|_| {
+        let server = server.clone();
+        let snapshot = snapshot.clone();
+        let barrier = std::sync::Arc::clone(&barrier);
+        tokio::spawn(async move {
+            barrier.wait().await;
+            server.presentation_context_for_snapshot(&snapshot).await
+        })
+    });
+    let mut contexts = Vec::new();
+    for handle in handles {
+        contexts.push(handle.await.expect("context loader task"));
+    }
+
+    assert!(
+        contexts[1..]
+            .iter()
+            .all(|context| std::sync::Arc::ptr_eq(&contexts[0], context))
+    );
+    assert_eq!(server.presentation_cache.lock().await.load_count, 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn contract_list_should_render_direct_repository_aliases_without_full_context()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temporary = tempfile::tempdir()?;
+    let database = temporary.path().join("graph.db");
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fixtures/platform-demo/code-system-graph.yaml");
+    scan_workspace(&manifest, &database)?;
+    let server = CodeSystemGraphServer::new(database, "commerce-platform".to_owned());
+
+    let result = server
+        .contracts(Parameters(ContractsInput {
+            workspace: None,
+            operation: ContractsOperation::List { limit: 10 },
+        }))
+        .await;
+    let markdown = call_text(&result);
+
+    assert!(markdown.contains("repository `api`"), "{markdown}");
+    assert_eq!(server.presentation_cache.lock().await.load_count, 0);
+    Ok(())
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn explore_handler_should_reject_disabled_codegraph_before_execution()
@@ -145,7 +279,7 @@ async fn explore_handler_should_reject_disabled_codegraph_before_execution()
 
     let result = server
         .explore(Parameters(ExploreInput {
-            workspace: "commerce-platform".to_owned(),
+            workspace: Some("commerce-platform".to_owned()),
             repository: Some("orders".to_owned()),
             query: "create_order callers".to_owned(),
             max_files: Some(4),
@@ -395,4 +529,55 @@ fn conditional_tool_inputs_should_require_action_specific_fields() {
     assert!(workspace_update.is_err());
     assert!(manual_link.is_err());
     assert!(communities.is_err());
+}
+
+#[test]
+fn contract_runtime_bounds_should_reject_values_beyond_the_advertised_schema()
+-> Result<(), Box<dyn std::error::Error>> {
+    let input: mcp_support::ContractsInput = serde_json::from_value(serde_json::json!({
+        "action": "list",
+        "limit": 101
+    }))?;
+    let result = mcp_support::contracts_envelope(
+        std::path::Path::new("database-must-not-be-opened.db"),
+        "commerce",
+        &input,
+    );
+
+    assert_eq!(result.status, code_system_graph_model::ToolStatus::Error);
+    assert!(
+        result
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("between 1 and 100"))
+    );
+    Ok(())
+}
+
+#[test]
+fn bound_read_only_tools_should_not_require_workspace_repetition() {
+    let status = serde_json::from_value::<mcp_support::ReadWorkspaceInput>(serde_json::json!({}));
+    let contracts = serde_json::from_value::<mcp_support::ContractsInput>(serde_json::json!({
+        "action": "list"
+    }));
+    let communities = serde_json::from_value::<mcp_support::CommunitiesInput>(serde_json::json!({
+        "action": "list"
+    }));
+    let source_context =
+        serde_json::from_value::<mcp_support::SourceContextInput>(serde_json::json!({
+            "node_id": "node:a"
+        }));
+    let explore = serde_json::from_value::<crate::ExploreInput>(serde_json::json!({
+        "repository": "api",
+        "query": "handler"
+    }));
+    let administrative =
+        serde_json::from_value::<mcp_support::WorkspaceInput>(serde_json::json!({}));
+
+    assert!(status.is_ok());
+    assert!(contracts.is_ok());
+    assert!(communities.is_ok());
+    assert!(source_context.is_ok());
+    assert!(explore.is_ok());
+    assert!(administrative.is_err());
 }

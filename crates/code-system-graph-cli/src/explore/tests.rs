@@ -14,7 +14,28 @@ use super::provider::{
 use super::runtime::{
     ExploreBlockingError, ExploreBudgetLedger, ExploreExecutionContext, ExploreProviderData, ExploreSnapshotData, run_bounded_explore_blocking
 };
-use super::{correlate_explore_with_deadline, explore_next_actions, partial_snapshot_envelope};
+use super::{
+    correlate_explore_with_deadline, explore_next_actions, partial_snapshot_envelope, scoped_explore_query
+};
+
+#[test]
+fn exact_file_query_should_drop_a_redundant_repository_prefix() {
+    assert_eq!(
+        scoped_explore_query("aiohttp-client", "aiohttp-client/client.py"),
+        "client.py"
+    );
+    assert_eq!(
+        scoped_explore_query(
+            "aiohttp-client",
+            "How does aiohttp-client/client.py call the APIs?"
+        ),
+        "How does aiohttp-client/client.py call the APIs?"
+    );
+    assert_eq!(
+        scoped_explore_query("aiohttp-client", "aiohttp-client/../outside.py"),
+        "aiohttp-client/../outside.py"
+    );
+}
 
 fn repository() -> RepositoryRecord {
     RepositoryRecord {
@@ -178,6 +199,40 @@ fn exact_symbol_in_query_should_exclude_approximate_resolutions() {
 }
 
 #[test]
+fn http_route_queries_should_not_become_exact_generic_method_queries() {
+    let symbols = vec![ResolvedSymbol {
+        local_id: None,
+        name: "get".to_owned(),
+        qualified_name: Some("FakeClient::get".to_owned()),
+        kind: "method".to_owned(),
+        file_path: "src/lib.rs".to_owned(),
+        start_line: 6,
+        score: None,
+    }];
+
+    let exact = super::exact_query_symbols("Does code issue GET /v1/diagnostic?", &symbols);
+
+    assert_eq!(exact.len(), 0);
+}
+
+#[test]
+fn qualified_method_queries_should_remain_exact() {
+    let symbols = vec![ResolvedSymbol {
+        local_id: None,
+        name: "get".to_owned(),
+        qualified_name: Some("FakeClient::get".to_owned()),
+        kind: "method".to_owned(),
+        file_path: "src/lib.rs".to_owned(),
+        start_line: 6,
+        score: None,
+    }];
+
+    let exact = super::exact_query_symbols("Inspect exact FakeClient::get", &symbols);
+
+    assert_eq!(exact, symbols);
+}
+
+#[test]
 fn exact_symbol_source_should_retain_only_its_defining_file() {
     let source = "**Source Code**\n\n\
         **`backend/local_bootstrap.py`** — reset_local_database(function)\n\n\
@@ -196,14 +251,36 @@ fn exact_symbol_source_should_retain_only_its_defining_file() {
         score: Some(120.0),
     };
 
-    let (narrowed, truncated) =
-        super::source_markdown_for_exact_symbols(source, &[exact], source.len());
+    let (narrowed, truncated) = super::source_markdown_for_exact_symbols(source, &[exact], 4_096);
 
     assert!(!truncated);
     assert!(narrowed.contains("fetchHugint.js"));
     assert!(narrowed.contains("export const fetchHugint"));
     assert!(!narrowed.contains("local_bootstrap"));
     assert!(!narrowed.contains("errors.js"));
+}
+
+#[test]
+fn exact_symbol_source_should_match_an_absolute_provider_section_path() {
+    let source = "**Source Code**\n\n\
+        **`/workspace/repo/src/lib.rs`** — get(method)\n\n\
+        ```rust\nfn get() {}\n```\n";
+    let exact = ResolvedSymbol {
+        local_id: None,
+        name: "get".to_owned(),
+        qualified_name: Some("FakeClient::get".to_owned()),
+        kind: "method".to_owned(),
+        file_path: "src/lib.rs".to_owned(),
+        start_line: 1,
+        score: None,
+    };
+
+    let (narrowed, truncated) = super::source_markdown_for_exact_symbols(source, &[exact], 4_096);
+
+    assert!(!truncated);
+    assert!(narrowed.starts_with("> Source narrowed"));
+    assert!(narrowed.contains("fn get() {}"));
+    assert!(!narrowed.contains("**Source Code**"));
 }
 
 #[test]
@@ -317,7 +394,7 @@ fn later_snapshot_deadline_should_preserve_loaded_context_in_degraded_data() {
     let envelope = partial_snapshot_envelope(
         "commerce",
         &super::ExploreInput {
-            workspace: "commerce".to_owned(),
+            workspace: Some("commerce".to_owned()),
             repository: Some("api".to_owned()),
             query: "create_order callers".to_owned(),
             max_files: None,
@@ -328,7 +405,7 @@ fn later_snapshot_deadline_should_preserve_loaded_context_in_degraded_data() {
     );
 
     assert_eq!(envelope.status, ToolStatus::Degraded);
-    assert_eq!(envelope.freshness.overall, OverallFreshness::Fresh);
+    assert_eq!(envelope.freshness.overall, OverallFreshness::Unknown);
     let report = envelope.data.expect("loaded registry should remain usable");
     assert_eq!(report.repository.alias, "api");
     assert!(

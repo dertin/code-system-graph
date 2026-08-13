@@ -2,6 +2,7 @@
 
 use std::path::Path;
 
+use code_system_graph_core::CONTRACT_NODE_KINDS;
 #[cfg(test)]
 use code_system_graph_model::RepoFreshnessState;
 use code_system_graph_model::{
@@ -674,7 +675,7 @@ fn read_evidence_resource(
     }
     let store = SqliteStore::open_read_only(database_path).map_err(internal_store)?;
     let evidence = store
-        .load_current_evidence(workspace)
+        .load_current_evidence_by_id(workspace, evidence_id)
         .map_err(|error| match error {
             StoreError::CurrentSnapshotMissing(_) => ResourceError {
                 kind: ResourceErrorKind::Missing,
@@ -682,8 +683,6 @@ fn read_evidence_resource(
             },
             other => internal_store(other),
         })?
-        .into_iter()
-        .find(|item| item.id.as_str() == evidence_id)
         .ok_or_else(|| ResourceError {
             kind: ResourceErrorKind::Missing,
             message: format!("evidence `{evidence_id}` was not found in workspace `{workspace}`"),
@@ -701,13 +700,38 @@ fn node_resource(
     item_limit: usize,
     predicate: impl Fn(NodeKind) -> bool,
 ) -> Result<EntitiesResource, ResourceError> {
-    let (nodes, _) = store
-        .load_current_graph(workspace)
+    let all_kinds = [
+        NodeKind::Repository,
+        NodeKind::Artifact,
+        NodeKind::Service,
+        NodeKind::Package,
+        NodeKind::SymbolRef,
+        NodeKind::TestCase,
+        NodeKind::HttpOperation,
+        NodeKind::GraphqlOperation,
+        NodeKind::RpcMethod,
+        NodeKind::EventChannel,
+        NodeKind::EventSchema,
+        NodeKind::Database,
+        NodeKind::DatabaseTable,
+        NodeKind::DatabaseColumn,
+        NodeKind::ConfigKey,
+        NodeKind::Deployment,
+        NodeKind::Document,
+        NodeKind::Adr,
+        NodeKind::Owner,
+        NodeKind::ChangeSet,
+        NodeKind::PullRequest,
+        NodeKind::Community,
+    ];
+    let kinds = all_kinds
+        .into_iter()
+        .filter(|kind| predicate(*kind))
+        .collect::<Vec<_>>();
+    let (total, items) = store
+        .load_current_nodes_by_kinds(workspace, &kinds, item_limit)
         .map_err(internal_store)?;
-    let entities = bounded_collection(
-        nodes.into_iter().filter(|node| predicate(node.kind)),
-        item_limit,
-    );
+    let entities = BoundedCollection { total, items };
     Ok(EntitiesResource {
         schema_version: 2,
         workspace: workspace.to_owned(),
@@ -751,17 +775,7 @@ fn community_view(community: Community, item_limit: usize) -> CommunityView {
 }
 
 fn is_contract(kind: NodeKind) -> bool {
-    matches!(
-        kind,
-        NodeKind::HttpOperation
-            | NodeKind::GraphqlOperation
-            | NodeKind::RpcMethod
-            | NodeKind::EventChannel
-            | NodeKind::EventSchema
-            | NodeKind::DatabaseTable
-            | NodeKind::DatabaseColumn
-            | NodeKind::ConfigKey
-    )
+    CONTRACT_NODE_KINDS.contains(&kind)
 }
 
 fn repository_view(repository: &RepositoryRecord) -> RepositoryView {

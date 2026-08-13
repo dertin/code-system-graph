@@ -2,7 +2,9 @@
 
 use std::path::Path;
 
-use code_system_graph_core::{ExecutionPolicy, LocalNeighborResult, ProviderError, ResolvedSymbol};
+use code_system_graph_core::{
+    ExecutionPolicy, LocalNeighbor, LocalNeighborResult, ProviderError, ResolvedSymbol
+};
 use code_system_graph_model::RepositoryRecord;
 
 use super::runtime::{ExploreBudgetLedger, ExploreExecutionContext, ExploreProviderData};
@@ -81,6 +83,16 @@ pub(super) async fn run_explore_provider_stages(
         &data.source_markdown,
         resolved_limit,
     );
+    recover_exact_file_source(
+        &stage,
+        &exact_symbols,
+        input.max_files,
+        source_bytes,
+        operation_limit,
+        &mut ledger,
+        &mut data,
+    )
+    .await;
     if !exact_symbols.is_empty() {
         let (source_markdown, narrowed_source_truncated) =
             source_markdown_for_exact_symbols(&data.source_markdown, &exact_symbols, source_bytes);
@@ -117,6 +129,114 @@ pub(super) async fn run_explore_provider_stages(
     }
 }
 
+async fn recover_exact_file_source(
+    stage: &ExploreProviderStage<'_>,
+    exact_symbols: &[ResolvedSymbol],
+    max_files: usize,
+    source_bytes: usize,
+    operation_limit: usize,
+    ledger: &mut ExploreBudgetLedger,
+    data: &mut ExploreProviderData,
+) {
+    if data.source_context || exact_symbols.is_empty() {
+        return;
+    }
+    let file_paths = exact_symbols
+        .iter()
+        .map(|symbol| symbol.file_path.as_str())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .take(max_files);
+    let mut recovered = String::new();
+    for file_path in file_paths {
+        if !ledger.try_reserve_operations(1, operation_limit, stage.context) {
+            ledger.gaps.push(
+                "exact file source fallback stopped because the Explore deadline or operation budget was exhausted"
+                    .to_owned(),
+            );
+            break;
+        }
+        let remaining = source_bytes.saturating_sub(recovered.len());
+        if remaining == 0 {
+            ledger
+                .truncations
+                .push("maxExploreSourceMarkdownBytes".to_owned());
+            break;
+        }
+        let result = stage
+            .provider
+            .build_local_file_context(
+                LocalContextRequest {
+                    request: explore_provider_request(
+                        stage.repository,
+                        stage.project_path,
+                        remaining,
+                        1,
+                        stage.context.deadline,
+                        &stage.context.cancellation,
+                    ),
+                    query: file_path.to_owned(),
+                    max_files: 1,
+                },
+                file_path,
+            )
+            .await;
+        match result {
+            Ok(result) => {
+                if let Some(source) = retained_provider_source(result.content, remaining) {
+                    if !recovered.is_empty() {
+                        recovered.push_str("\n\n");
+                    }
+                    recovered.push_str(&source);
+                }
+                if result.execution.truncated {
+                    ledger
+                        .truncations
+                        .push("maxExploreSourceMarkdownBytes".to_owned());
+                }
+                ledger.record_execution(result.execution);
+            }
+            Err(error) => ledger.gaps.push(format!(
+                "exact file source for `{file_path}` unavailable: {error}"
+            )),
+        }
+    }
+    if recovered.is_empty() {
+        ledger.gaps.push(
+            "source context did not return source for the resolved exact file anchors".to_owned(),
+        );
+    } else {
+        data.source_markdown = recovered;
+        data.source_context = true;
+    }
+}
+
+fn retained_provider_source(content: String, maximum_bytes: usize) -> Option<String> {
+    let trimmed = content.trim();
+    if trimmed.is_empty() || is_codegraph_no_match(trimmed) {
+        return None;
+    }
+    Some(truncate_utf8_owned(content, maximum_bytes))
+}
+
+fn is_codegraph_no_match(content: &str) -> bool {
+    let line = content.trim();
+    if line.contains(['\n', '\r']) {
+        return false;
+    }
+    let Some(query) = line
+        .strip_prefix("No relevant code found for \"")
+        .and_then(|remainder| {
+            remainder
+                .strip_suffix("\".")
+                .or_else(|| remainder.strip_suffix('\"'))
+        })
+    else {
+        return false;
+    };
+    !query.is_empty() && !query.contains('\"')
+}
+
 pub(super) fn create_explore_provider(
     binary: Option<std::ffi::OsString>,
     policy: &ExecutionPolicy,
@@ -139,10 +259,14 @@ pub(super) fn validate_explore_input(
     input: &ExploreInput,
     policy: &ExecutionPolicy,
 ) -> Result<usize, String> {
-    if input.workspace != workspace {
+    if input
+        .workspace
+        .as_deref()
+        .is_some_and(|requested| requested != workspace)
+    {
         return Err(format!(
             "workspace `{}` is outside this server's configured workspace `{workspace}`",
-            input.workspace
+            input.workspace.as_deref().unwrap_or_default()
         ));
     }
     let source_file_limit = usize::try_from(policy.max_explore_source_files)
@@ -188,8 +312,10 @@ async fn collect_explore_source(
         .await;
     match result {
         Ok(result) => {
-            data.source_markdown = truncate_utf8_owned(result.content, source_bytes);
-            data.source_context = true;
+            if let Some(source) = retained_provider_source(result.content, source_bytes) {
+                data.source_markdown = source;
+                data.source_context = true;
+            }
             if result.execution.truncated {
                 ledger
                     .truncations
@@ -274,6 +400,16 @@ async fn collect_explore_neighbors(
     data: &mut ExploreProviderData,
 ) {
     for (anchor_index, anchor) in anchors.iter().enumerate() {
+        if !supports_exact_local_relationships(anchor) {
+            ledger.gaps.push(format!(
+                "local caller/callee relationships for method `{}` were omitted because the provider does not prove receiver dispatch",
+                anchor
+                    .qualified_name
+                    .as_deref()
+                    .unwrap_or(anchor.name.as_str())
+            ));
+            continue;
+        }
         let remaining = ledger.remaining_enrichment_bytes(limits.enrichment_bytes);
         if remaining < 2 {
             ledger
@@ -333,6 +469,14 @@ async fn collect_explore_neighbors(
     }
 }
 
+fn supports_exact_local_relationships(anchor: &ResolvedSymbol) -> bool {
+    !anchor.kind.eq_ignore_ascii_case("method")
+}
+
+fn unproven_receiver_dispatch(neighbor: &LocalNeighbor) -> bool {
+    neighbor.kind.eq_ignore_ascii_case("method")
+}
+
 pub(super) fn local_relationships_truncated(
     observed: usize,
     maximum: usize,
@@ -354,6 +498,15 @@ pub(super) fn record_explore_neighbor_results(
         match result {
             Ok(mut result) => {
                 completed_directions += 1;
+                let provider_neighbor_count = result.neighbors.len();
+                result
+                    .neighbors
+                    .retain(|neighbor| !unproven_receiver_dispatch(neighbor));
+                if result.neighbors.len() != provider_neighbor_count {
+                    ledger.gaps.push(format!(
+                        "generic method neighbors for `{symbol}` were omitted because the provider does not prove receiver dispatch"
+                    ));
+                }
                 if result.neighbors.len() > limits.neighbor_limit || result.execution.truncated {
                     ledger
                         .truncations
@@ -384,12 +537,79 @@ pub(super) fn record_explore_neighbor_results(
 
 #[cfg(test)]
 mod tests {
-    use super::local_relationships_truncated;
+    use code_system_graph_core::{LocalNeighbor, ResolvedSymbol};
+
+    use super::{
+        is_codegraph_no_match, local_relationships_truncated, retained_provider_source, supports_exact_local_relationships, unproven_receiver_dispatch
+    };
+
+    #[test]
+    fn codegraph_no_match_should_be_an_absence_state_instead_of_source() {
+        assert!(is_codegraph_no_match(
+            "No relevant code found for \"client.py\""
+        ));
+        assert!(is_codegraph_no_match(
+            "No relevant code found for \"client.py\"."
+        ));
+        assert_eq!(
+            retained_provider_source("No relevant code found for \"client.py\"".to_owned(), 1_024,),
+            None
+        );
+    }
+
+    #[test]
+    fn source_containing_the_no_match_phrase_should_remain_source() {
+        let source =
+            "```rust\nconst MESSAGE: &str = \"No relevant code found for client.py\";\n```";
+
+        assert!(!is_codegraph_no_match(source));
+        assert_eq!(
+            retained_provider_source(source.to_owned(), 1_024).as_deref(),
+            Some(source)
+        );
+    }
 
     #[test]
     fn exact_relationship_limit_only_truncates_when_work_remains() {
         assert!(!local_relationships_truncated(4, 4, false));
         assert!(local_relationships_truncated(4, 4, true));
         assert!(local_relationships_truncated(5, 4, false));
+    }
+
+    #[test]
+    fn method_neighbors_should_be_omitted_when_receiver_dispatch_is_unproven() {
+        let method = ResolvedSymbol {
+            local_id: None,
+            name: "get".to_owned(),
+            qualified_name: Some("FakeClient::get".to_owned()),
+            kind: "method".to_owned(),
+            file_path: "src/lib.rs".to_owned(),
+            start_line: 6,
+            score: None,
+        };
+        let function = ResolvedSymbol {
+            kind: "function".to_owned(),
+            ..method.clone()
+        };
+
+        assert!(!supports_exact_local_relationships(&method));
+        assert!(supports_exact_local_relationships(&function));
+    }
+
+    #[test]
+    fn every_method_neighbor_should_require_proven_receiver_dispatch() {
+        let method = LocalNeighbor {
+            name: "execute".to_owned(),
+            kind: "method".to_owned(),
+            file_path: "src/lib.rs".to_owned(),
+            start_line: 6,
+        };
+        let function = LocalNeighbor {
+            kind: "function".to_owned(),
+            ..method.clone()
+        };
+
+        assert!(unproven_receiver_dispatch(&method));
+        assert!(!unproven_receiver_dispatch(&function));
     }
 }

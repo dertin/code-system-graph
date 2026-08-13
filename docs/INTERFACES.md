@@ -30,8 +30,9 @@ timeouts, internal errors, and cancellation.
 
 The read-only catalog covers status, query, trace, impact, changes, contracts, communities,
 source-context handoff, and explicitly consented pull-request inspection. Inputs have generated
-JSON input schemas and non-overridable server bounds. Each call result contains one Markdown text
-block, no duplicated JSON envelope, no `structuredContent`, and no result `outputSchema`.
+JSON input schemas and non-overridable server bounds. Each call result contains one human-oriented
+Markdown text block plus typed `structuredContent` as its complete machine-readable mirror; no
+result `outputSchema` is advertised.
 
 Stable resources:
 

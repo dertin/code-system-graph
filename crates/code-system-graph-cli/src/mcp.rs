@@ -2,6 +2,7 @@
 
 use std::ffi::OsString;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use code_system_graph_core::{
@@ -16,6 +17,7 @@ use rmcp::model::{
 };
 use rmcp::service::{RequestContext, RoleServer};
 use rmcp::{ErrorData as McpError, ServerHandler, tool, tool_handler, tool_router};
+use tokio::sync::{Mutex, Notify};
 
 use crate::{
     CODEGRAPH_DISABLED_CODE, CODEGRAPH_DISABLED_MESSAGE, ChangesInput, CommunityReport, ExploreInput, PullRequestInput, QueryActionCapabilities, ScanOverrides, SearchInput, TraceInput, add_manual_link_to_manifest, add_repository_to_manifest, analyze_workspace_changes, communities_workspace, explore_repository, impact_workspace, impact_workspace_with_codegraph, inspect_pull_request, remove_repository_from_manifest, scan_workspace_with_overrides, search_workspace_for_delivery, trace_workspace
@@ -25,10 +27,19 @@ use crate::{
 mod mcp_support;
 
 use mcp_support::{
-    ADMIN_TOOL_NAMES, AdminAudit, AgentPresentationContext, AgentToolResult, CacheCleanInput, CacheCleanReport, CommunitiesInput, ContractsInput, MARKDOWN_MIME_TYPE, ManifestAdminReport, ManualLinkWriteInput, ResourceErrorKind, SourceContextInput, WorkspaceInput, WorkspaceUpdateInput, admin_audit_envelope, admin_mutation_envelope, configured_manifest_path, contracts_envelope, read_resource, resource_templates, resource_uris, source_context_envelope, status_envelope
+    ADMIN_TOOL_NAMES, AdminAudit, AgentPresentationContext, AgentToolResult, CacheCleanInput, CacheCleanReport, CommunitiesInput, ContractsInput, MARKDOWN_MIME_TYPE, ManifestAdminReport, ManualLinkWriteInput, ReadWorkspaceInput, ResourceErrorKind, SourceContextInput, WorkspaceInput, WorkspaceUpdateInput, admin_audit_envelope, admin_mutation_envelope, configured_manifest_path, contracts_envelope, read_resource, resource_templates, resource_uris, source_context_envelope, status_envelope
 };
 
 const EXPLORE_TOOL_NAME: &str = "explore";
+type PresentationCache = Arc<Mutex<PresentationCacheState>>;
+
+#[derive(Debug, Default)]
+struct PresentationCacheState {
+    ready: Option<(String, Arc<AgentPresentationContext>)>,
+    loading: Option<(String, Arc<Notify>)>,
+    #[cfg(test)]
+    load_count: usize,
+}
 
 /// Trusted process-level policy for bounded local intelligence.
 #[derive(Debug, Clone, Default)]
@@ -47,6 +58,7 @@ pub struct CodeSystemGraphServer {
     github_pull_requests_enabled: bool,
     bitbucket_pull_requests_enabled: bool,
     execution_policy: ExecutionPolicy,
+    presentation_cache: PresentationCache,
     tool_router: ToolRouter<Self>,
 }
 
@@ -68,6 +80,7 @@ impl CodeSystemGraphServer {
             github_pull_requests_enabled: false,
             bitbucket_pull_requests_enabled: false,
             execution_policy: ExecutionPolicy::default(),
+            presentation_cache: Arc::new(Mutex::new(PresentationCacheState::default())),
             tool_router,
         }
     }
@@ -120,17 +133,111 @@ impl CodeSystemGraphServer {
     fn markdown_result(&self, result: AgentToolResult<'_>) -> CallToolResult {
         let maximum = usize::try_from(self.execution_policy.max_mcp_tool_response_bytes)
             .expect("validated policy bytes are usize-representable");
-        let context = AgentPresentationContext::load(&self.database_path, &self.workspace);
-        let (markdown, is_error) = result.render(maximum, &context);
-        let structured_content = result.structured_content(&context);
-        let content_blocks = vec![ContentBlock::text(markdown)];
-        let mut response = if is_error {
+        let context = AgentPresentationContext::default();
+        Self::deliver_markdown(result, maximum, &context)
+    }
+
+    async fn contextual_markdown_result(
+        &self,
+        result: AgentToolResult<'_>,
+        snapshot_before: Option<String>,
+    ) -> CallToolResult {
+        let maximum = usize::try_from(self.execution_policy.max_mcp_tool_response_bytes)
+            .expect("validated policy bytes are usize-representable");
+        if !result.requires_presentation_context() || !result.has_data() {
+            return Self::deliver_markdown(result, maximum, &AgentPresentationContext::default());
+        }
+        let snapshot_after = self.presentation_snapshot_id();
+        let context = match (snapshot_before, snapshot_after) {
+            (Some(before), Some(after)) if before == after => {
+                self.presentation_context_for_snapshot(&before).await
+            }
+            _ => Arc::new(AgentPresentationContext::unavailable(
+                "The current snapshot changed while this request was running; semantic projections were omitted to avoid mixing snapshots. Retry the tool call.",
+            )),
+        };
+        Self::deliver_markdown(result, maximum, context.as_ref())
+    }
+
+    fn deliver_markdown(
+        result: AgentToolResult<'_>,
+        maximum: usize,
+        context: &AgentPresentationContext,
+    ) -> CallToolResult {
+        let delivery = result.deliver(maximum, context);
+        let content_blocks = vec![ContentBlock::text(delivery.markdown)];
+        let mut response = if delivery.is_error {
             CallToolResult::error(content_blocks)
         } else {
             CallToolResult::success(content_blocks)
         };
-        response.structured_content = Some(structured_content);
+        response.structured_content = Some(delivery.structured_content);
         response
+    }
+
+    fn presentation_snapshot_id(&self) -> Option<String> {
+        SqliteStore::open_read_only(&self.database_path)
+            .and_then(|store| store.current_snapshot_summary(&self.workspace))
+            .ok()
+            .map(|snapshot| snapshot.snapshot_id)
+    }
+
+    async fn presentation_context_for_snapshot(
+        &self,
+        snapshot_id: &str,
+    ) -> Arc<AgentPresentationContext> {
+        loop {
+            let mut cache = self.presentation_cache.lock().await;
+            if let Some((cached_id, context)) = cache.ready.as_ref()
+                && cached_id == snapshot_id
+            {
+                return Arc::clone(context);
+            }
+            if let Some((_, notification)) = cache.loading.as_ref() {
+                let notification = Arc::clone(notification);
+                let notified = notification.notified();
+                drop(cache);
+                notified.await;
+                continue;
+            }
+            let notification = Arc::new(Notify::new());
+            cache.loading = Some((snapshot_id.to_owned(), Arc::clone(&notification)));
+            #[cfg(test)]
+            {
+                cache.load_count += 1;
+            }
+            drop(cache);
+
+            let database_path = self.database_path.clone();
+            let workspace = self.workspace.clone();
+            let snapshot_id_owned = snapshot_id.to_owned();
+            let loaded = tokio::task::spawn_blocking(move || {
+                AgentPresentationContext::load_snapshot(
+                    &database_path,
+                    &workspace,
+                    &snapshot_id_owned,
+                )
+            })
+            .await;
+            let result = match loaded {
+                Ok(result) => result,
+                Err(error) => Err(format!("presentation context task failed: {error}")),
+            };
+            let load_succeeded = result.is_ok();
+            let context = Arc::new(result.unwrap_or_else(|error| {
+                AgentPresentationContext::unavailable(format!(
+                    "Semantic relationship context is unavailable: {error}"
+                ))
+            }));
+            let mut cache = self.presentation_cache.lock().await;
+            if load_succeeded {
+                cache.ready = Some((snapshot_id.to_owned(), Arc::clone(&context)));
+            }
+            cache.loading = None;
+            drop(cache);
+            notification.notify_waiters();
+            return context;
+        }
     }
 
     /// Traces a bounded path through the current federated snapshot.
@@ -146,6 +253,7 @@ impl CodeSystemGraphServer {
         )
     )]
     pub async fn trace(&self, Parameters(input): Parameters<TraceInput>) -> CallToolResult {
+        let snapshot = self.presentation_snapshot_id();
         let envelope = match trace_workspace(&self.database_path, &self.workspace, &input) {
             Ok(envelope) => envelope,
             Err(error) => ToolEnvelope {
@@ -160,7 +268,8 @@ impl CodeSystemGraphServer {
                 warnings: vec![error.to_string()],
             },
         };
-        self.markdown_result(AgentToolResult::Trace(&envelope))
+        self.contextual_markdown_result(AgentToolResult::Trace(&envelope), snapshot)
+            .await
     }
 
     /// Searches ranked federated entities without returning source bodies.
@@ -176,6 +285,7 @@ impl CodeSystemGraphServer {
         )
     )]
     pub async fn query(&self, Parameters(input): Parameters<SearchInput>) -> CallToolResult {
+        let snapshot = self.presentation_snapshot_id();
         let envelope = match search_workspace_for_delivery(
             &self.database_path,
             &self.workspace,
@@ -189,7 +299,8 @@ impl CodeSystemGraphServer {
             Ok(envelope) => envelope,
             Err(error) => error_envelope("Query inputs could not be validated.", error),
         };
-        self.markdown_result(AgentToolResult::Query(&envelope))
+        self.contextual_markdown_result(AgentToolResult::Query(&envelope), snapshot)
+            .await
     }
 
     /// Explores bounded repository-local source and flow context without persisting source.
@@ -238,12 +349,15 @@ impl CodeSystemGraphServer {
         &self,
         Parameters(input): Parameters<CommunitiesInput>,
     ) -> CallToolResult {
-        if input.workspace() != self.workspace {
+        if input
+            .workspace()
+            .is_some_and(|workspace| workspace != self.workspace)
+        {
             let envelope = error_envelope::<CommunityReport>(
                 "Workspace policy rejected the request.",
                 format!(
                     "workspace `{}` is outside this server's configured workspace `{}`",
-                    input.workspace(),
+                    input.workspace().unwrap_or_default(),
                     self.workspace
                 ),
             );
@@ -263,7 +377,7 @@ impl CodeSystemGraphServer {
     /// Computes conservative impact without executing tests or repository commands.
     #[tool(
         name = "impact",
-        description = "Analyzes bounded upstream or downstream effects and conservative risk for one persisted graph target across repositories. Use for a known entity; use analyze_changes for staged, worktree, or committed Git changes. Returns a semantic Markdown summary plus complete structuredContent.",
+        description = "Analyzes bounded upstream or downstream effects and conservative risk for one persisted graph target across repositories. Select the target as {\"node_id\":\"node:...\"} or {\"stable_key\":\"table:::payments\"}; use query first when neither exact value is known. Use analyze_changes for staged, worktree, or committed Git changes. Returns a semantic Markdown summary plus complete structuredContent.",
         annotations(
             title = "Cross-repository impact analysis",
             read_only_hint = true,
@@ -273,6 +387,7 @@ impl CodeSystemGraphServer {
         )
     )]
     pub async fn impact(&self, Parameters(input): Parameters<ImpactRequest>) -> CallToolResult {
+        let snapshot = self.presentation_snapshot_id();
         let result = if self.codegraph.enabled {
             impact_workspace_with_codegraph(
                 &self.database_path,
@@ -288,7 +403,8 @@ impl CodeSystemGraphServer {
             Ok(envelope) => envelope,
             Err(error) => error_envelope("Impact inputs could not be validated.", error),
         };
-        self.markdown_result(AgentToolResult::Impact(&envelope))
+        self.contextual_markdown_result(AgentToolResult::Impact(&envelope), snapshot)
+            .await
     }
 
     /// Inspects bounded local Git changes without modifying repository state.
@@ -307,6 +423,7 @@ impl CodeSystemGraphServer {
         &self,
         Parameters(input): Parameters<ChangesInput>,
     ) -> CallToolResult {
+        let snapshot = self.presentation_snapshot_id();
         let envelope = match analyze_workspace_changes(
             &self.database_path,
             &self.workspace,
@@ -319,7 +436,8 @@ impl CodeSystemGraphServer {
             Ok(envelope) => envelope,
             Err(error) => error_envelope("Change inputs could not be validated.", error),
         };
-        self.markdown_result(AgentToolResult::AnalyzeChanges(&envelope))
+        self.contextual_markdown_result(AgentToolResult::AnalyzeChanges(&envelope), snapshot)
+            .await
     }
 
     /// Inspects one explicitly enabled public pull-request provider.
@@ -374,9 +492,18 @@ impl CodeSystemGraphServer {
             open_world_hint = false
         )
     )]
-    pub async fn status(&self, Parameters(input): Parameters<WorkspaceInput>) -> CallToolResult {
-        let envelope = status_envelope(&self.database_path, &self.workspace, &input.workspace);
-        self.markdown_result(AgentToolResult::Status(&envelope))
+    pub async fn status(
+        &self,
+        Parameters(input): Parameters<ReadWorkspaceInput>,
+    ) -> CallToolResult {
+        let snapshot = self.presentation_snapshot_id();
+        let envelope = status_envelope(
+            &self.database_path,
+            &self.workspace,
+            input.workspace.as_deref(),
+        );
+        self.contextual_markdown_result(AgentToolResult::Status(&envelope), snapshot)
+            .await
     }
 
     /// Lists a bounded page of contract entities from the immutable graph snapshot.
@@ -392,8 +519,39 @@ impl CodeSystemGraphServer {
         )
     )]
     pub async fn contracts(&self, Parameters(input): Parameters<ContractsInput>) -> CallToolResult {
+        let snapshot = self.presentation_snapshot_id();
         let envelope = contracts_envelope(&self.database_path, &self.workspace, &input);
-        self.markdown_result(AgentToolResult::Contracts(&envelope))
+        if let Some(report) = envelope
+            .data
+            .as_ref()
+            .filter(|report| report.action == code_system_graph_core::ContractAction::List)
+        {
+            let context = if snapshot == self.presentation_snapshot_id() {
+                AgentPresentationContext::load_direct_nodes(
+                    &self.database_path,
+                    &self.workspace,
+                    report
+                        .contracts
+                        .iter()
+                        .map(|contract| contract.contract.clone())
+                        .collect(),
+                )
+                .unwrap_or_else(AgentPresentationContext::unavailable)
+            } else {
+                AgentPresentationContext::unavailable(
+                    "The current snapshot changed while this request was running; contract repository attribution was omitted. Retry the tool call.",
+                )
+            };
+            let maximum = usize::try_from(self.execution_policy.max_mcp_tool_response_bytes)
+                .expect("validated policy bytes are usize-representable");
+            return Self::deliver_markdown(
+                AgentToolResult::Contracts(&envelope),
+                maximum,
+                &context,
+            );
+        }
+        self.contextual_markdown_result(AgentToolResult::Contracts(&envelope), snapshot)
+            .await
     }
 
     /// Returns bounded persisted graph and evidence metadata for one entity.
@@ -412,8 +570,10 @@ impl CodeSystemGraphServer {
         &self,
         Parameters(input): Parameters<SourceContextInput>,
     ) -> CallToolResult {
+        let snapshot = self.presentation_snapshot_id();
         let envelope = source_context_envelope(&self.database_path, &self.workspace, &input);
-        self.markdown_result(AgentToolResult::SourceContext(&envelope))
+        self.contextual_markdown_result(AgentToolResult::SourceContext(&envelope), snapshot)
+            .await
     }
 
     /// Scans and atomically publishes the configured workspace.
@@ -736,20 +896,23 @@ fn codegraph_disabled_error() -> McpError {
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for CodeSystemGraphServer {
     fn get_info(&self) -> ServerInfo {
-        let instructions = if self.codegraph.enabled {
-            "Code System Graph exposes bounded cross-repository intelligence. Tool and resource results \
-             pair one bounded semantic Markdown text block with complete structuredContent using agent delivery schema version 5; \
-             only the schema catalog embeds fenced JSON. Use query for persisted entity discovery, explore for ephemeral \
+        let capabilities = if self.codegraph.enabled {
+            "Use query for persisted entity discovery, explore for ephemeral \
              repository source, source_context for source-free evidence, impact for known targets, \
-             and analyze_changes for Git diffs. Administrative tools mutate state only when enabled."
+             and analyze_changes for Git diffs."
         } else {
-            "Code System Graph exposes bounded cross-repository intelligence. Tool and resource results \
-             pair one bounded semantic Markdown text block with complete structuredContent using agent delivery schema version 5; \
-             only the schema catalog embeds fenced JSON. Use query for persisted entity discovery, source_context for source-free \
+            "Use query for persisted entity discovery, source_context for source-free \
              evidence, impact for known targets, and analyze_changes for Git diffs. Repository-local \
-             source access is unavailable because CodeGraph is disabled. Administrative tools mutate \
-             state only when enabled."
+             source access is unavailable because CodeGraph is disabled."
         };
+        let instructions = format!(
+            "Code System Graph exposes bounded cross-repository intelligence for the already selected workspace `{}`. \
+             Omit the optional workspace assertion from read-only tools unless you need an explicit policy check. \
+             Tool and resource results \
+             pair one bounded semantic Markdown text block with complete structuredContent using agent delivery schema version 5; \
+             only the schema catalog embeds fenced JSON. {} Administrative tools mutate state only when enabled and still require the exact workspace.",
+            self.workspace, capabilities
+        );
         ServerInfo::new(
             ServerCapabilities::builder()
                 .enable_tools()

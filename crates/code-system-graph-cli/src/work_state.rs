@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use code_system_graph_core::ExecutionSummary;
 use code_system_graph_model::{
-    ArtifactFingerprint, CommunitySnapshot, Edge, Evidence, ExtractorRun, LinkDecision, Node, NodeId, StoredExtractorBatch, stable_id_bytes
+    ArtifactFingerprint, CommunitySnapshot, Edge, Evidence, ExtractorRun, LinkDecision, Node, NodeId, RepositoryCoverageGap, StoredExtractorBatch, stable_id_bytes
 };
 use code_system_graph_store_sqlite::{
     ManualLinkDisposition, ManualLinkRecord, set_owner_only_file
@@ -43,6 +43,8 @@ struct CandidateMetadata {
     affected_test_count: usize,
     execution: ExecutionSummary,
     degradations: Vec<String>,
+    #[serde(default)]
+    coverage_gaps: Vec<RepositoryCoverageGap>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,6 +76,7 @@ pub(crate) struct StagedSnapshot {
     pub(crate) affected_test_count: usize,
     pub(crate) execution: ExecutionSummary,
     pub(crate) degradations: Vec<String>,
+    pub(crate) coverage_gaps: Vec<RepositoryCoverageGap>,
 }
 
 impl WorkState {
@@ -317,6 +320,7 @@ impl WorkState {
             affected_test_count: snapshot.affected_test_count,
             execution: snapshot.execution.clone(),
             degradations: snapshot.degradations.clone(),
+            coverage_gaps: snapshot.coverage_gaps.clone(),
         };
         insert_candidate_item(
             &transaction,
@@ -494,6 +498,7 @@ impl WorkState {
             affected_test_count: metadata.affected_test_count,
             execution: metadata.execution,
             degradations: metadata.degradations,
+            coverage_gaps: metadata.coverage_gaps,
         }))
     }
 
@@ -1476,6 +1481,7 @@ mod tests {
                 ..ExecutionSummary::default()
             },
             degradations: Vec::new(),
+            coverage_gaps: Vec::new(),
         };
         state
             .store_candidate_snapshot("workspace", "compatible", &snapshot, 2)

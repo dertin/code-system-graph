@@ -55,7 +55,7 @@ async fn explore_should_default_to_the_only_registered_repository()
         &database,
         "explore-test",
         &ExploreInput {
-            workspace: "explore-test".to_owned(),
+            workspace: Some("explore-test".to_owned()),
             repository: None,
             query: "create_order callers".to_owned(),
             max_files: Some(4),
@@ -85,7 +85,7 @@ async fn explore_should_require_an_alias_for_multi_repository_workspaces()
         &database,
         "commerce-platform",
         &ExploreInput {
-            workspace: "commerce-platform".to_owned(),
+            workspace: Some("commerce-platform".to_owned()),
             repository: None,
             query: "create order".to_owned(),
             max_files: Some(4),
@@ -118,7 +118,7 @@ async fn explore_should_select_an_explicit_alias_in_multi_repository_workspaces(
         &database,
         "commerce-platform",
         &ExploreInput {
-            workspace: "commerce-platform".to_owned(),
+            workspace: Some("commerce-platform".to_owned()),
             repository: Some("api".to_owned()),
             query: "create order".to_owned(),
             max_files: Some(4),
@@ -149,7 +149,7 @@ async fn explore_provider_timeout_should_preserve_partial_context_and_return_bou
         &database,
         "explore-test",
         &ExploreInput {
-            workspace: "explore-test".to_owned(),
+            workspace: Some("explore-test".to_owned()),
             repository: None,
             query: "create_order callers".to_owned(),
             max_files: Some(4),

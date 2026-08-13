@@ -336,7 +336,7 @@ async fn stdio_explore_should_proxy_bounded_ephemeral_codegraph_context() -> any
         .call_tool(
             CallToolRequestParams::new("impact").with_arguments(serde_json::from_value(
                 serde_json::json!({
-                    "target": {"kind": "node_id", "value": target},
+                    "target": {"node_id": target},
                     "direction": "upstream"
                 }),
             )?),

@@ -613,6 +613,15 @@ pub struct FreshnessSummary {
     pub reasons: Vec<String>,
 }
 
+/// A repository-scoped extraction limitation that prevents complete dependency coverage.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RepositoryCoverageGap {
+    /// Repository whose extracted dependency coverage is incomplete.
+    pub repo_id: RepoId,
+    /// Source-free, actionable reason for the gap.
+    pub reason: String,
+}
+
 /// Status of a public tool result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]

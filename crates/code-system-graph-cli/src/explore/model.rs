@@ -11,8 +11,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ExploreInput {
-    /// Workspace selected by the delivery adapter.
-    pub workspace: String,
+    /// Optional assertion of the workspace already selected by the delivery adapter.
+    #[serde(default)]
+    pub workspace: Option<String>,
     /// Registered repository alias; omitted only when the workspace contains one repository.
     #[serde(default)]
     pub repository: Option<String>,

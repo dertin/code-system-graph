@@ -42,6 +42,7 @@ mod secret_safety;
 mod source_graph;
 mod source_http;
 mod source_polyglot;
+mod source_symbol;
 mod source_syntax;
 mod test_links;
 mod trace;
@@ -81,7 +82,9 @@ pub use data_contracts::{
 pub use documents::{
     DocumentKind, DocumentRecord, DocumentationDocument, DocumentationExtractionError, ExplicitReference, ExplicitReferenceKind, LineEvidence, OwnershipRule, extract_codeowners, extract_markdown, extract_service_catalog
 };
-pub use event_graph::{EventGraphFacts, event_documents_to_graph};
+pub use event_graph::{
+    EventDeliveryProjection, EventDeliveryProjectionReport, EventGraphFacts, event_documents_to_graph, project_event_deliveries, project_event_deliveries_bounded
+};
 pub use events::{
     DeliverySemantics, EventBroker, EventDocument, EventEvidenceLine, EventExtractionError, EventObservation, EventRole, EventSchemaDefinition, EventSchemaField, extract_asyncapi, parse_event_source
 };
@@ -116,7 +119,7 @@ pub use infrastructure::{
     DeploymentKind, DeploymentUnit, InfrastructureArtifactKind, InfrastructureDocument, InfrastructureEvidence, InfrastructureEvidenceKind, InfrastructureExtractionError, InfrastructurePort, InfrastructureResource, InfrastructureResourceKind, InfrastructureSelector, extract_docker_compose, extract_helm, extract_kubernetes, extract_terraform
 };
 pub use interfaces::{
-    Ambiguity, ConfigDoctorInput, ContractAction, ContractCompatibility, ContractCompatibilitySummary, ContractDifference, ContractFinding, ContractIssue, ContractIssueSeverity, ContractLink, ContractReport, ContractRequest, ContractView, DELIVERY_METADATA_VERSION, DoctorCategory, DoctorCheck, DoctorReport, DoctorRequest, DoctorStatus, DomainErrorKind, EvidenceMetadata, ExitCode, ExportFormat, ExportReport, ExportRequest, FreshnessDoctorInput, INTERFACE_RESULT_VERSION, INTERFACE_SCHEMA_VERSION, IntegrityDoctorInput, InterfaceError, MAX_EXPORT_EDGES, MAX_EXPORT_NODES, NextAction, Page, Pagination, ProviderDoctorInput, ProviderDoctorStatus, PublicSchema, PublicSchemaCatalog, SchemaDoctorInput, Summary, Warning, classify_exit_code, classify_interface_error, doctor, export_graph, inspect_contracts, paginate, public_schema_catalog
+    Ambiguity, CONTRACT_NODE_KINDS, ConfigDoctorInput, ContractAction, ContractCompatibility, ContractCompatibilitySummary, ContractDifference, ContractFinding, ContractIssue, ContractIssueSeverity, ContractLink, ContractReport, ContractRequest, ContractView, DELIVERY_METADATA_VERSION, DoctorCategory, DoctorCheck, DoctorReport, DoctorRequest, DoctorStatus, DomainErrorKind, EvidenceMetadata, ExitCode, ExportFormat, ExportReport, ExportRequest, FreshnessDoctorInput, INTERFACE_RESULT_VERSION, INTERFACE_SCHEMA_VERSION, IntegrityDoctorInput, InterfaceError, MAX_EXPORT_EDGES, MAX_EXPORT_NODES, NextAction, Page, Pagination, ProviderDoctorInput, ProviderDoctorStatus, PublicSchema, PublicSchemaCatalog, SchemaDoctorInput, Summary, Warning, classify_exit_code, classify_interface_error, doctor, export_graph, inspect_contracts, paginate, public_schema_catalog
 };
 pub use linker::{
     HttpLinkAmbiguity, HttpLinkResolution, LinkError, ManualLinkEndpoint, ManualLinkError, ManualLinkResolution, link_http_boundaries, link_http_boundaries_with_ambiguities, merge_affected_link_neighborhoods, resolve_manual_links
@@ -157,6 +160,7 @@ pub use source_http::{
 pub use source_polyglot::{
     parse_go_source, parse_go_source_with_tracker, parse_java_source, parse_java_source_with_tracker, parse_javascript_source, parse_javascript_source_at_path, parse_javascript_source_at_path_with_tracker, parse_typescript_source, parse_typescript_source_at_path, parse_typescript_source_at_path_with_tracker
 };
+pub use source_symbol::SourceSymbolIdentity;
 pub use source_syntax::{
     SourceSyntaxError, SourceSyntaxInspection, SourceSyntaxLanguage, inspect_source_syntax
 };
