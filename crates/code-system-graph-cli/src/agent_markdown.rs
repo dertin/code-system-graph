@@ -426,8 +426,8 @@ fn fenced(language: &str, value: &str) -> String {
 
 /// Wraps untrusted repository or provider text in an inert, dynamically sized code fence.
 ///
-/// The delimiter is longer than every backtick run in `value`, so the content cannot close the
-/// fence and inject headings or instruction-like Markdown into the surrounding agent response.
+/// The selected delimiter is longer than every matching run in `value`, so the content cannot
+/// close the fence and inject headings or instruction-like Markdown into the surrounding response.
 pub(crate) fn fenced_untrusted(value: &str) -> String {
     let value = safe_multiline(value);
     let backticks = fence_marker_for(&value, '`');
