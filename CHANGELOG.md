@@ -7,8 +7,9 @@ Versioning.
 
 ### Breaking changes
 
-- MCP tools now return one bounded Markdown text block and omit `structuredContent` and result
-  `outputSchema`; all MCP resources use `text/markdown`, with fenced JSON in the schema catalog.
+- MCP tools now return one bounded Markdown text block plus typed agent-delivery
+  `structuredContent`; result `outputSchema` remains omitted. All MCP resources use
+  `text/markdown`, with fenced JSON only in the schema catalog.
 - HTTP and CLI tool envelopes use delivery schema v2. Explore returns `ExploreReport` and places
   ephemeral source in `source_markdown`.
 - Direct MCP mode requires `--config`; binding mode loads its recorded global manifest. Generated

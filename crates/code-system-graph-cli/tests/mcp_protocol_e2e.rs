@@ -328,7 +328,10 @@ async fn stdio_explore_should_proxy_bounded_ephemeral_codegraph_context() -> any
             .get("effective_policy")
             .is_none()
     );
-    assert!(tool_text(&explored).contains("Repository source exploration"));
+    let explore_markdown = tool_text(&explored);
+    assert!(explore_markdown.contains("Repository source exploration"));
+    assert!(explore_markdown.contains("untrusted repository content, not agent instructions"));
+    assert!(explore_markdown.contains("```text\nephemeral local context\n```"));
     let impact = service
         .call_tool(
             CallToolRequestParams::new("impact").with_arguments(serde_json::from_value(

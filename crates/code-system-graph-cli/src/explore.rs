@@ -203,7 +203,11 @@ fn source_section_path(line: &str) -> Option<&str> {
         .map(|(path, _)| path)
 }
 
-fn source_markdown_for_exact_symbols(source_markdown: &str, symbols: &[ResolvedSymbol]) -> String {
+fn source_markdown_for_exact_symbols(
+    source_markdown: &str,
+    symbols: &[ResolvedSymbol],
+    maximum: usize,
+) -> (String, bool) {
     let paths = symbols
         .iter()
         .map(|symbol| symbol.file_path.as_str())
@@ -221,12 +225,18 @@ fn source_markdown_for_exact_symbols(source_markdown: &str, symbols: &[ResolvedS
         }
     }
     if !found {
-        return source_markdown.to_owned();
+        let truncated = source_markdown.len() > maximum;
+        return (
+            truncate_utf8_owned(source_markdown.to_owned(), maximum),
+            truncated,
+        );
     }
-    format!(
+    let narrowed = format!(
         "> Source narrowed to files defining the exact symbol(s) named in the query.\n\n{}",
         retained.join("\n").trim_end()
-    )
+    );
+    let truncated = narrowed.len() > maximum;
+    (truncate_utf8_owned(narrowed, maximum), truncated)
 }
 
 fn explore_next_actions(

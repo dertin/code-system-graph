@@ -82,8 +82,14 @@ pub(super) async fn run_explore_provider_stages(
         resolved_limit,
     );
     if !exact_symbols.is_empty() {
-        data.source_markdown =
-            source_markdown_for_exact_symbols(&data.source_markdown, &exact_symbols);
+        let (source_markdown, narrowed_source_truncated) =
+            source_markdown_for_exact_symbols(&data.source_markdown, &exact_symbols, source_bytes);
+        data.source_markdown = source_markdown;
+        if narrowed_source_truncated {
+            ledger
+                .truncations
+                .push("maxExploreSourceMarkdownBytes".to_owned());
+        }
         data.resolved_symbols = exact_symbols;
     }
     let anchor_limit = usize::try_from(input.policy.max_explore_anchors)

@@ -70,7 +70,10 @@ freshness, source Markdown, resolved symbols, callers/callees, persisted federat
 coverage gaps, deterministic next actions, effective limits, provider operation counts,
 concurrency, retained bytes, and degradations. `source_markdown` may contain source and exists only
 in the response. Code System Graph never persists, caches, logs, or audits it, although the MCP
-host may retain requests and responses in its own history. Set
+host may retain requests and responses in its own history. Agent-facing Markdown keeps one trusted
+H1 result title and trusted H2 semantic sections. Because repository content is untrusted, Explore
+places the retained CodeGraph Markdown inside a dynamically sized text fence: its source, fences,
+and headings remain visible as context but cannot become response headings or instructions. Set
 `CODE_SYSTEM_GRAPH_CODEGRAPH_BINARY` on the trusted server process to select a non-default executable.
 
 ## `communities`

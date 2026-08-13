@@ -196,12 +196,36 @@ fn exact_symbol_source_should_retain_only_its_defining_file() {
         score: Some(120.0),
     };
 
-    let narrowed = super::source_markdown_for_exact_symbols(source, &[exact]);
+    let (narrowed, truncated) =
+        super::source_markdown_for_exact_symbols(source, &[exact], source.len());
 
+    assert!(!truncated);
     assert!(narrowed.contains("fetchHugint.js"));
     assert!(narrowed.contains("export const fetchHugint"));
     assert!(!narrowed.contains("local_bootstrap"));
     assert!(!narrowed.contains("errors.js"));
+}
+
+#[test]
+fn exact_symbol_source_should_reapply_the_byte_limit_after_adding_its_notice() {
+    let source = "**`src/lib.rs`** — create_order(function)\n\n```rust\n1 fn create_order() { let value = \"éééé\"; }\n```";
+    let exact = ResolvedSymbol {
+        local_id: Some("function:create-order".to_owned()),
+        name: "create_order".to_owned(),
+        qualified_name: Some("create_order".to_owned()),
+        kind: "function".to_owned(),
+        file_path: "src/lib.rs".to_owned(),
+        start_line: 1,
+        score: Some(120.0),
+    };
+    let maximum = source.len();
+
+    let (narrowed, truncated) = super::source_markdown_for_exact_symbols(source, &[exact], maximum);
+
+    assert!(truncated);
+    assert!(narrowed.len() <= maximum);
+    assert!(narrowed.is_char_boundary(narrowed.len()));
+    assert!(narrowed.starts_with("> Source narrowed"));
 }
 
 #[test]
