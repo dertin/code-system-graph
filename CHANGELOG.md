@@ -3,6 +3,53 @@
 All notable public changes to Code System Graph are documented in this file. Code System Graph follows Semantic
 Versioning.
 
+## [1.1.0] - 2026-08-11
+
+### Breaking changes
+
+- MCP tools now return one bounded Markdown text block plus typed agent-delivery
+  `structuredContent`; result `outputSchema` remains omitted. All MCP resources use
+  `text/markdown`, with fenced JSON only in the schema catalog.
+- HTTP and CLI tool envelopes use delivery schema v2. Explore returns `ExploreReport` and places
+  ephemeral source in `source_markdown`.
+- Direct MCP mode requires `--config`; binding mode loads its recorded global manifest. Generated
+  plugin bindings and ownership receipts use version 2.
+- SQLite schema version 2 deliberately rejects 1.0.x databases. A fresh database and complete scan
+  are required; no legacy serializer, cache, plugin, or database compatibility path is provided.
+
+### Added
+
+- Added global Explore, Query, MCP-tool, MCP-resource, and schema-catalog limits to
+  `executionPolicy`, including checked capacity relationships and immutable policy sharing across
+  long-lived servers.
+- Added independent scan and agent-delivery fingerprints so presentation-only limits do not
+  invalidate snapshots, batches, or checkpoints.
+- Explore now reports repository context, source Markdown, resolved symbols, callers/callees,
+  evidence-correlated federated handoffs, coverage gaps, truncations, grounded next actions, and
+  exact provider execution accounting.
+- Query now returns grounded next actions and directs zero-hit source questions toward Explore when
+  a real registered repository alias is recognized.
+- Added bounded Markdown rendering with UTF-8-safe, block-stable truncation and centralized escaping
+  for headings, inline values, paths, controls, and untrusted source blocks.
+
+### Fixed
+
+- Explore now enforces one deadline across snapshot loading, provider traversal, and correlation;
+  timed-out or abandoned work is cooperatively cancelled while partial context remains available.
+- Snapshot and candidate identity now includes the complete scan fingerprint while excluding
+  agent-delivery-only settings, so scan-facing changes cannot reuse stale persisted results.
+- Explore reports observed provider concurrency and counts an anchor as traversed only after both
+  caller and callee directions complete successfully.
+- MCP rendering now preserves compact status, freshness, warnings, coverage, and paths at the
+  256-byte minimum, and reports collection retention after both item and byte limits are applied.
+
+### Release engineering
+
+- Added exhaustive typed Markdown fixtures and golden coverage for all 15 MCP tools and every MCP
+  resource, including low-budget, UTF-8, fenced-source, error, and nested-collection cases.
+- Added direct deadline and cancellation tests for Explore snapshot loading and correlation, plus
+  synchronized Markdown-only MCP instructions and CLI configuration examples.
+
 ## [1.0.3] - 2026-08-09
 
 ### Added

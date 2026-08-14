@@ -174,7 +174,7 @@ pub(super) fn verify_binding_ownership(output: &Path) -> Result<(), AgentPluginE
             }
         })?)
         .map_err(|_| conflict(output, "binding ownership identity is malformed"))?;
-    if binding.schema_version != 1 || !recognized_binding_generator(&binding.generator) {
+    if binding.schema_version != 2 || !recognized_binding_generator(&binding.generator) {
         return Err(conflict(
             output,
             "binding ownership identity is unrecognized",

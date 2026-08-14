@@ -13,7 +13,7 @@ use clap::{ArgAction, CommandFactory, Parser, Subcommand, ValueEnum};
 use code_system_graph::http_server::{BearerToken, HttpServerConfig, serve_http};
 use code_system_graph::mcp::CodeSystemGraphServer;
 use code_system_graph::{
-    AgentPluginCreateRequest, AgentPluginCreateTarget, AgentPluginError, AgentPluginUninstallRequest, ApplicationError, ChangesInput, CommunityInput, PullRequestInput, PullRequestListInput, ScanOverrides, SearchInput, TraceInput, add_repository_to_manifest, add_workspace_to_registry, agent_plugin_exit_code, analyze_workspace_changes_with_cancellation, application_exit_code, backup_database, communities_workspace, contracts_workspace, create_agent_plugin, create_diagnostic_bundle, doctor_workspace, export_workspace, impact_workspace, impact_workspace_with_codegraph, initialize_workspace, inspect_pull_request_with_cancellation, list_pull_requests, list_repository_registry, list_workspace_registry, load_agent_plugin_mcp_binding, remove_repository_from_manifest, remove_workspace_from_registry, restore_database, run_worker_from_stdio, scan_workspace_with_overrides, search_workspace, show_extended_config, status_workspace, sync_workspace_with_overrides, trace_workspace, traverse_workspace, uninstall_composed_integration
+    AgentPluginCreateRequest, AgentPluginCreateTarget, AgentPluginError, AgentPluginUninstallRequest, ApplicationError, ChangesInput, CommunityInput, PullRequestInput, PullRequestListInput, ScanOverrides, SearchInput, TraceInput, add_repository_to_manifest, add_workspace_to_registry, agent_plugin_exit_code, analyze_workspace_changes_with_cancellation, application_exit_code, backup_database, communities_workspace, contracts_workspace, create_agent_plugin, create_diagnostic_bundle, doctor_workspace, export_workspace, impact_workspace, impact_workspace_with_codegraph, initialize_workspace, inspect_pull_request_with_cancellation, list_pull_requests, list_repository_registry, list_workspace_registry, load_agent_plugin_mcp_binding, load_server_execution_policy, remove_repository_from_manifest, remove_workspace_from_registry, restore_database, run_worker_from_stdio, scan_workspace_with_overrides, search_workspace_with_policy, show_extended_config, status_workspace, sync_workspace_with_overrides, trace_workspace, traverse_workspace, uninstall_composed_integration
 };
 use code_system_graph_core::{
     ChangeAnalysisOptions, ChangeScope, ContractAction, ContractRequest, ExitCode, ExportFormat, ExportRequest, ImpactDirection, ImpactOptions, ImpactRequest, ImpactTarget, PullRequestListState, PullRequestOrderSuggestion, PullRequestOverlap, PullRequestProviderKind, PullRequestSemanticInput, TraversalAlgorithm, TraversalDirection, TraversalFilters, TraversalOptions, TraversalRequest, semantic_pull_request_overlap, suggest_pull_request_order
@@ -30,7 +30,7 @@ use serde::Serialize;
     name = "csgraph",
     version,
     about = "Federated multi-repository code intelligence",
-    after_help = "Examples:\n  csgraph init . --name commerce\n  csgraph scan --database .code-system-graph/code-system-graph.db\n  csgraph query \"orders contract\" --workspace commerce --database .code-system-graph/code-system-graph.db --json\n  csgraph mcp --workspace commerce --database .code-system-graph/code-system-graph.db"
+    after_help = "Examples:\n  csgraph init . --name commerce\n  csgraph scan --database .code-system-graph/code-system-graph.db\n  csgraph query \"orders contract\" --config code-system-graph.yaml --workspace commerce --database .code-system-graph/code-system-graph.db --json\n  csgraph mcp --config code-system-graph.yaml --workspace commerce --database .code-system-graph/code-system-graph.db"
 )]
 struct Cli {
     /// Suppress non-result diagnostics.
@@ -227,6 +227,9 @@ enum Command {
     },
     /// Search ranked entities in the current federated snapshot.
     Query {
+        /// Trusted global workspace manifest.
+        #[arg(long)]
+        config: PathBuf,
         /// `SQLite` database path.
         #[arg(long)]
         database: PathBuf,
@@ -507,6 +510,9 @@ enum Command {
     },
     /// Run the read-only MCP server over stdio.
     Mcp {
+        /// Trusted global workspace manifest; required in direct mode.
+        #[arg(long, required_unless_present = "binding", conflicts_with = "binding")]
+        config: Option<PathBuf>,
         /// `SQLite` database path.
         #[arg(long, required_unless_present = "binding", conflicts_with = "binding")]
         database: Option<PathBuf>,
@@ -611,6 +617,24 @@ fn parse_impact_direction(value: &str) -> Result<ImpactDirection, String> {
         "downstream" => Ok(ImpactDirection::Downstream),
         "both" => Ok(ImpactDirection::Both),
         _ => Err("expected `upstream`, `downstream`, or `both`".to_owned()),
+    }
+}
+
+#[cfg(test)]
+mod help_tests {
+    use clap::Parser as _;
+
+    use super::Cli;
+
+    #[test]
+    fn root_examples_should_include_the_required_manifest_for_direct_commands() {
+        let help = Cli::try_parse_from(["csgraph", "--help"])
+            .expect_err("help should stop argument parsing")
+            .to_string();
+        assert!(help.contains(
+            "csgraph query \"orders contract\" --config code-system-graph.yaml --workspace"
+        ));
+        assert!(help.contains("csgraph mcp --config code-system-graph.yaml --workspace"));
     }
 }
 
@@ -816,7 +840,7 @@ fn handle_pr_overlap(left: &std::path::Path, right: &std::path::Path) -> anyhow:
     println!(
         "{}",
         serde_json::to_string(&PrOverlapReport {
-            schema_version: 1,
+            schema_version: 2,
             overlap,
             order
         })?
@@ -1274,13 +1298,15 @@ fn handle_repo_command(action: RepoCommand) -> anyhow::Result<()> {
 }
 
 fn handle_query(
+    config: &std::path::Path,
     database: &std::path::Path,
     workspace: &str,
     question: String,
     offset: usize,
     limit: usize,
 ) -> anyhow::Result<()> {
-    let envelope = search_workspace(
+    let policy = load_server_execution_policy(config, workspace)?;
+    let envelope = search_workspace_with_policy(
         database,
         workspace,
         &SearchInput {
@@ -1292,6 +1318,7 @@ fn handle_query(
             offset,
             limit,
         },
+        &policy,
     )?;
     println!("{}", serde_json::to_string(&envelope)?);
     Ok(())
@@ -1448,9 +1475,11 @@ async fn handle_impact(
     codegraph_binary: Option<OsString>,
 ) -> anyhow::Result<()> {
     let target = if stable_key {
-        ImpactTarget::StableKey(target)
+        ImpactTarget::StableKey { stable_key: target }
     } else {
-        ImpactTarget::NodeId(NodeId::new(target))
+        ImpactTarget::NodeId {
+            node_id: NodeId::new(target),
+        }
     };
     let request = ImpactRequest {
         target,
@@ -1725,12 +1754,13 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             max_depth,
         } => handle_trace(&database, &workspace, from, to, max_depth)?,
         Command::Query {
+            config,
             database,
             workspace,
             question,
             offset,
             limit,
-        } => handle_query(&database, &workspace, question, offset, limit)?,
+        } => handle_query(&config, &database, &workspace, question, offset, limit)?,
         Command::Traverse {
             database,
             workspace,
@@ -2004,7 +2034,9 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
         } => {
             let (codegraph, codegraph_binary) =
                 codegraph_server_policy(codegraph, codegraph_binary);
+            let execution_policy = load_server_execution_policy(&config, &workspace)?;
             let mut server_config = HttpServerConfig::new(config, database, workspace)
+                .with_execution_policy(execution_policy)
                 .with_bind(SocketAddr::new(host, port))
                 .with_codegraph(codegraph, codegraph_binary);
             if let Some(name) = bearer_token_env {
@@ -2026,6 +2058,7 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             }
         }
         Command::Mcp {
+            config,
             database,
             workspace,
             binding,
@@ -2038,26 +2071,30 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             let admin = admin
                 || std::env::var("CODE_SYSTEM_GRAPH_MCP_ADMIN")
                     .is_ok_and(|value| value.trim() == "1");
-            let (database, workspace, codegraph, codegraph_binary) = if let Some(binding) = binding
-            {
-                let binding = load_agent_plugin_mcp_binding(&binding)?;
-                (
-                    PathBuf::from(binding.database),
-                    binding.workspace,
-                    binding.codegraph_enabled,
-                    binding.codegraph_binary.map(PathBuf::from),
-                )
-            } else {
-                (
-                    database.expect("clap requires database without binding"),
-                    workspace.expect("clap requires workspace without binding"),
-                    codegraph,
-                    codegraph_binary,
-                )
-            };
+            let (config, database, workspace, codegraph, codegraph_binary) =
+                if let Some(binding) = binding {
+                    let binding = load_agent_plugin_mcp_binding(&binding)?;
+                    (
+                        PathBuf::from(binding.config),
+                        PathBuf::from(binding.database),
+                        binding.workspace,
+                        binding.codegraph_enabled,
+                        binding.codegraph_binary.map(PathBuf::from),
+                    )
+                } else {
+                    (
+                        config.expect("clap requires config without binding"),
+                        database.expect("clap requires database without binding"),
+                        workspace.expect("clap requires workspace without binding"),
+                        codegraph,
+                        codegraph_binary,
+                    )
+                };
             let (codegraph, codegraph_binary) =
                 codegraph_server_policy(codegraph, codegraph_binary);
+            let execution_policy = load_server_execution_policy(&config, &workspace)?;
             let service = CodeSystemGraphServer::new(database, workspace)
+                .with_execution_policy(execution_policy)
                 .with_pull_request_providers(
                     enable_github_pull_requests,
                     enable_bitbucket_pull_requests,

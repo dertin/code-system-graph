@@ -92,22 +92,16 @@ pub fn declared_implementation(
 ) -> DeclaredImplementation {
     let method = config.implements.method.trim().to_ascii_uppercase();
     let path = normalize_http_path(&config.implements.path);
-    let stable_key = format!(
-        "symbol:{}:{}:{}:{}",
-        repo_id.as_str(),
-        config.language.trim().to_ascii_lowercase(),
-        config.path,
-        config.symbol
+    let identity = crate::SourceSymbolIdentity::new(
+        repo_id.clone(),
+        &config.language,
+        &config.path,
+        &config.symbol,
     );
+    let stable_key = identity.stable_key();
     let evidence_key = format!("{stable_key}:{method}:{path}");
     DeclaredImplementation {
-        node: Node {
-            id: NodeId::new(stable_id("node", &stable_key)),
-            kind: NodeKind::SymbolRef,
-            repo_id: Some(repo_id.clone()),
-            stable_key,
-            label: format!("{}::{}", config.language, config.symbol),
-        },
+        node: identity.node(format!("{}::{}", config.language, config.symbol)),
         method,
         path,
         evidence: Evidence {
@@ -230,7 +224,7 @@ pub fn link_declared_implementations_with_ambiguities(
     implementations: &[DeclaredImplementation],
     boundaries: &[HttpBoundary],
 ) -> HttpLinkResolution {
-    let mut edges = Vec::new();
+    let mut edges = BTreeMap::<EdgeId, Edge>::new();
     let mut ambiguities = Vec::new();
     for implementation in implementations {
         let candidates = boundaries
@@ -277,7 +271,7 @@ pub fn link_declared_implementations_with_ambiguities(
             .evidence
             .confidence
             .min(implementation.evidence.confidence);
-        edges.push(Edge {
+        let edge = Edge {
             id: EdgeId::new(stable_id("edge", &edge_key)),
             source: provider.node.id.clone(),
             target: implementation.node.id.clone(),
@@ -288,11 +282,25 @@ pub fn link_declared_implementations_with_ambiguities(
                 provider.evidence.id.clone(),
                 implementation.evidence.id.clone(),
             ],
-        });
+        };
+        edges
+            .entry(edge.id.clone())
+            .and_modify(|existing| merge_equivalent_implementation_edge(existing, &edge))
+            .or_insert(edge);
     }
-    edges.sort_by(|left, right| left.id.cmp(&right.id));
     sort_http_ambiguities(&mut ambiguities);
-    HttpLinkResolution { edges, ambiguities }
+    HttpLinkResolution {
+        edges: edges.into_values().collect(),
+        ambiguities,
+    }
+}
+
+fn merge_equivalent_implementation_edge(existing: &mut Edge, candidate: &Edge) {
+    existing.confidence = existing.confidence.max(candidate.confidence);
+    existing.status = consensus_status(existing.confidence);
+    existing.evidence.extend(candidate.evidence.iter().cloned());
+    existing.evidence.sort();
+    existing.evidence.dedup();
 }
 
 fn consensus_status(confidence: f32) -> EpistemicStatus {
@@ -385,5 +393,32 @@ async fn handler() {}
                 ("/runtime".to_owned(), 1.0, EpistemicStatus::Confirmed),
             ]
         );
+    }
+
+    #[test]
+    fn executable_route_should_merge_matching_utoipa_advisory() {
+        let repo = RepoId::new("repo:rust-api");
+        let observations = parse_rust_source(
+            r#"
+use actix_web::get;
+
+#[utoipa::path(get, path = "/payments")]
+#[get("/payments")]
+async fn handler() {}
+"#,
+        );
+        let facts =
+            source_observations_to_graph(&repo, "src/routes.rs", "content:routes", &observations);
+        let edges = link_declared_implementations(&facts.implementations, &facts.boundaries)
+            .expect("matching declarations should merge into one implementation edge");
+
+        assert!(matches!(
+            edges.as_slice(),
+            [edge]
+                if edge.kind == EdgeKind::ImplementedBy
+                    && (edge.confidence - 1.0).abs() < f32::EPSILON
+                    && edge.status == EpistemicStatus::Confirmed
+                    && edge.evidence.len() == 3
+        ));
     }
 }

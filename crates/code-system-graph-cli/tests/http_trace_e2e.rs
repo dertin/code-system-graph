@@ -398,7 +398,7 @@ async fn create_order() {}
         &python_source,
         r#"import requests
 def test_create_order():
-    requests.post("https://api.test/v1/orders")
+    requests.post("/v1/orders")
 "#,
     )?;
     let manifest = temporary.path().join("code-system-graph.yaml");
@@ -431,7 +431,7 @@ async fn create_order() {}
         &python_source,
         r#"import requests
 def test_create_order():
-    requests.post("https://api.test/v2/orders")
+    requests.post("/v2/orders")
 "#,
     )?;
     let relinked = scan_workspace(&manifest, &database)?;

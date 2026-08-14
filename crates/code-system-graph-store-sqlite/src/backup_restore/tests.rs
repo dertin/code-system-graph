@@ -301,7 +301,7 @@ fn restore_should_preserve_replaced_database_as_safety_backup()
             replaced.snapshot_id,
             report.schema_version,
         ),
-        ("snapshot:before".to_owned(), "snapshot:after".to_owned(), 1)
+        ("snapshot:before".to_owned(), "snapshot:after".to_owned(), 2)
     );
     Ok(())
 }

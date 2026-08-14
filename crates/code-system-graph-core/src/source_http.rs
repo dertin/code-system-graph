@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{ExtractionLimitExceeded, ExtractionTracker};
 
+mod rust_bindings;
+
 const HTTP_METHODS: [&str; 8] = [
     "DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT", "TRACE",
 ];
@@ -143,6 +145,8 @@ pub enum SourceWarning {
     DynamicPath,
     /// A literal URL is not an absolute URL or root-relative path.
     UnsupportedLiteralPath,
+    /// An absolute consumer URL names an authority with no explicit workspace mapping.
+    UnmappedAuthority,
     /// The framework declaration did not expose an implementation symbol.
     MissingSymbol,
     /// Tree-sitter recovered from at least one syntax error in the source artifact.
@@ -419,6 +423,7 @@ impl Token {
 struct FunctionSpan {
     name: String,
     start_token: usize,
+    body_start_token: usize,
     end_token: usize,
 }
 
@@ -482,7 +487,7 @@ fn lex_rust(source: &str) -> Vec<Token> {
                 });
                 index = next;
             }
-            '\'' => {
+            '\'' if rust_char_literal_end(&characters, index).is_some() => {
                 let (next, _) = consume_quoted(&characters, index, '\'', false, &mut line);
                 index = next;
             }
@@ -509,6 +514,22 @@ fn lex_rust(source: &str) -> Vec<Token> {
         }
     }
     tokens
+}
+
+fn rust_char_literal_end(characters: &[char], index: usize) -> Option<usize> {
+    let value = index.checked_add(1)?;
+    let closing = if characters.get(value) == Some(&'\\') {
+        match characters.get(value + 1)? {
+            'u' if characters.get(value + 2) == Some(&'{') => {
+                (value + 3..characters.len()).find(|cursor| characters[*cursor] == '}')? + 1
+            }
+            'x' => value.checked_add(4)?,
+            _ => value.checked_add(2)?,
+        }
+    } else {
+        value.checked_add(1)?
+    };
+    (characters.get(closing) == Some(&'\'')).then_some(closing + 1)
 }
 
 fn rust_raw_string_start(characters: &[char], index: usize) -> Option<usize> {
@@ -715,6 +736,7 @@ fn rust_functions(tokens: &[Token]) -> Vec<FunctionSpan> {
         functions.push(FunctionSpan {
             name: name.to_owned(),
             start_token: index,
+            body_start_token: open,
             end_token: end,
         });
     }
@@ -1098,7 +1120,7 @@ fn parse_reqwest_calls(
     functions: &[FunctionSpan],
     observations: &mut SourceObservationCollector<'_>,
 ) {
-    let clients = rust_reqwest_clients(tokens);
+    let reqwest_receivers = rust_bindings::reqwest_receiver_tokens(tokens, functions);
     for index in 0..tokens.len() {
         let explicit = tokens[index].is_ident("reqwest")
             && tokens
@@ -1125,7 +1147,7 @@ fn parse_reqwest_calls(
             };
             ("reqwest", method_index)
         } else if let Some(receiver) = tokens[index].ident() {
-            if clients.contains(receiver)
+            if reqwest_receivers.contains(&index)
                 && tokens
                     .get(index + 1)
                     .is_some_and(|token| token.is_punct('.'))
@@ -1195,38 +1217,6 @@ fn parse_reqwest_calls(
         let _ = receiver;
         observations.push(observation);
     }
-}
-
-fn rust_reqwest_clients(tokens: &[Token]) -> BTreeSet<String> {
-    let mut clients = BTreeSet::new();
-    let client_imported = tokens.iter().enumerate().any(|(index, token)| {
-        token.is_ident("reqwest")
-            && (index + 1..tokens.len())
-                .take_while(|candidate| !tokens[*candidate].is_punct(';'))
-                .take(24)
-                .any(|candidate| tokens[candidate].is_ident("Client"))
-    });
-    for index in 0..tokens.len() {
-        if !tokens[index].is_ident("let") {
-            continue;
-        }
-        let Some(name) = tokens.get(index + 1).and_then(Token::ident) else {
-            continue;
-        };
-        let end = (index + 2..tokens.len())
-            .find(|candidate| tokens[*candidate].is_punct(';'))
-            .unwrap_or(tokens.len());
-        let uses_qualified_client = contains_ident(tokens, index + 2, end, "reqwest")
-            && contains_ident(tokens, index + 2, end, "Client");
-        let uses_imported_client = client_imported
-            && tokens
-                .get(index + 3)
-                .is_some_and(|token| token.is_ident("Client"));
-        if uses_qualified_client || uses_imported_client {
-            clients.insert(name.to_owned());
-        }
-    }
-    clients
 }
 
 fn rust_method_expression(tokens: &[Token], start: usize, end: usize) -> Option<String> {
@@ -1388,21 +1378,23 @@ fn http_from_literal(
     lines: SourceLineRange,
     route: bool,
 ) -> SourceObservation {
-    let path = literal.and_then(|value| {
+    let (path, authority) = literal.map_or((None, None), |value| {
         if route {
-            route_literal_path(value)
+            (route_literal_path(value), None)
         } else {
-            client_literal_path(value)
+            client_literal_identity(value)
         }
     });
-    let warning = if literal.is_none() {
+    let warning = if authority.is_some() {
+        Some(SourceWarning::UnmappedAuthority)
+    } else if literal.is_none() {
         Some(SourceWarning::DynamicPath)
     } else if path.is_none() {
         Some(SourceWarning::UnsupportedLiteralPath)
     } else {
         None
     };
-    let status = if path.is_some() && method.is_some() {
+    let status = if path.is_some() && method.is_some() && authority.is_none() {
         SourceEpistemicStatus::Confirmed
     } else {
         SourceEpistemicStatus::Ambiguous
@@ -1468,24 +1460,33 @@ fn route_literal_path(value: &str) -> Option<String> {
         .then(|| normalize_source_http_path(value))
 }
 
-fn client_literal_path(value: &str) -> Option<String> {
+fn client_literal_identity(value: &str) -> (Option<String>, Option<String>) {
     if value.starts_with('/') {
-        return Some(normalize_source_http_path(
-            value.split(['?', '#']).next().unwrap_or(value),
-        ));
+        return (
+            Some(normalize_source_http_path(
+                value.split(['?', '#']).next().unwrap_or(value),
+            )),
+            None,
+        );
     }
     let after_authority = value
         .strip_prefix("http://")
-        .or_else(|| value.strip_prefix("https://"))?;
+        .or_else(|| value.strip_prefix("https://"));
+    let Some(after_authority) = after_authority else {
+        return (None, None);
+    };
     if after_authority.is_empty() || after_authority.starts_with('/') {
-        return None;
+        return (None, None);
     }
-    let path = after_authority
-        .find('/')
-        .map_or("/", |separator| &after_authority[separator..]);
-    Some(normalize_source_http_path(
-        path.split(['?', '#']).next().unwrap_or(path),
-    ))
+    let separator = after_authority.find('/');
+    let authority = separator.map_or(after_authority, |index| &after_authority[..index]);
+    let path = separator.map_or("/", |index| &after_authority[index..]);
+    (
+        Some(normalize_source_http_path(
+            path.split(['?', '#']).next().unwrap_or(path),
+        )),
+        Some(authority.to_ascii_lowercase()),
+    )
 }
 
 #[derive(Debug, Default)]
@@ -1764,6 +1765,7 @@ fn python_functions(source: &str, tokens: &[Token]) -> Vec<FunctionSpan> {
         functions.push(FunctionSpan {
             name: name.to_owned(),
             start_token: index,
+            body_start_token: index,
             end_token,
         });
     }
@@ -2656,6 +2658,396 @@ async fn send() {
                 (Some("POST"), Some("/orders")),
                 (Some("DELETE"), Some("/orders/7")),
             ]
+        );
+    }
+
+    #[test]
+    fn reqwest_should_recognize_injected_client_parameters() {
+        let source = r#"
+use reqwest::Client;
+async fn synchronize(client: &Client, qualified: &reqwest::Client) {
+    client.post("https://orders.test/v1/orders").send().await;
+    qualified.get("https://payments.test/v1/payments").send().await;
+}
+"#;
+        let result = parse_rust_source(source);
+
+        assert_eq!(
+            result
+                .iter()
+                .map(|item| (item.method.as_deref(), item.path.as_deref()))
+                .collect::<Vec<_>>(),
+            vec![
+                (Some("POST"), Some("/v1/orders")),
+                (Some("GET"), Some("/v1/payments")),
+            ]
+        );
+    }
+
+    #[test]
+    fn reqwest_should_preserve_explicit_lifetimes_in_client_parameters() {
+        let source = r#"
+use reqwest::Client;
+async fn synchronize<'request>(client: &'request Client) {
+    client.post("https://orders.test/v1/orders").send().await;
+}
+"#;
+        let result = parse_rust_source(source);
+
+        assert!(result.iter().any(|item| {
+            item.framework == SourceFramework::Reqwest
+                && item.method.as_deref() == Some("POST")
+                && item.path.as_deref() == Some("/v1/orders")
+        }));
+    }
+
+    #[test]
+    fn absolute_consumer_url_should_require_an_explicit_authority_mapping() {
+        let source = r#"
+use reqwest::Client;
+async fn synchronize(client: &Client) {
+    client.get("https://third-party.example/health").send().await;
+    client.get("/internal-health").send().await;
+}
+"#;
+        let result = parse_rust_source(source);
+        let external = result
+            .iter()
+            .find(|item| item.path.as_deref() == Some("/health"))
+            .expect("absolute call");
+        let internal = result
+            .iter()
+            .find(|item| item.path.as_deref() == Some("/internal-health"))
+            .expect("relative call");
+
+        assert_eq!(external.status, SourceEpistemicStatus::Ambiguous);
+        assert_eq!(external.warnings, [SourceWarning::UnmappedAuthority]);
+        assert_eq!(internal.status, SourceEpistemicStatus::Confirmed);
+    }
+
+    #[test]
+    fn reqwest_should_recognize_builder_chains_and_typed_self_fields() {
+        let source = r#"
+use reqwest::Client;
+use std::time::Duration;
+
+struct Api {
+    client: Client,
+}
+
+impl Api {
+    fn new() -> Self {
+        let client = Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .expect("valid client configuration");
+        Self { client }
+    }
+
+    async fn synchronize(&self) {
+        self.client.get("https://inventory.test/v1/inventory").send().await;
+    }
+}
+"#;
+        let result = parse_rust_source(source);
+
+        assert!(matches!(
+            result.as_slice(),
+            [observation]
+                if observation.method.as_deref() == Some("GET")
+                    && observation.path.as_deref() == Some("/v1/inventory")
+        ));
+    }
+
+    #[test]
+    fn unrelated_grouped_import_should_not_promote_client_to_reqwest() {
+        let source = r#"
+use my_http::{reqwest, Client};
+async fn diagnostic() {
+    let client = Client::new();
+    client.get("https://inventory.test/v1/diagnostic");
+}
+"#;
+        let result = parse_rust_source(source);
+
+        assert_eq!(result.len(), 0);
+    }
+
+    #[test]
+    fn reqwest_should_not_reuse_receiver_names_across_functions() {
+        let source = r#"
+use reqwest::Client;
+struct FakeClient;
+impl FakeClient { fn get(&self, _path: &str) {} }
+fn local_only(client: &FakeClient) {
+    client.get("https://inventory.test/v1/diagnostic");
+}
+async fn remote() {
+    let client = Client::new();
+    client.get("https://inventory.test/v1/inventory").send().await;
+}
+"#;
+        let result = parse_rust_source(source);
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].path.as_deref(), Some("/v1/inventory"));
+    }
+
+    #[test]
+    fn reqwest_import_should_not_leak_across_inline_modules() {
+        let source = r#"
+mod real { use reqwest::Client; }
+mod fake {
+    struct Client;
+    impl Client { fn get(&self, _path: &str) {} }
+    fn probe(client: &Client) { client.get("/health"); }
+}
+"#;
+
+        assert_eq!(parse_rust_source(source), []);
+    }
+
+    #[test]
+    fn top_level_reqwest_import_should_survive_an_inline_test_module() {
+        let source = r#"
+use reqwest::Client;
+async fn probe() {
+    let client = Client::new();
+    client.get("/health").send().await;
+}
+#[cfg(test)] mod tests { fn smoke() {} }
+"#;
+
+        assert!(parse_rust_source(source).iter().any(|item| {
+            item.framework == SourceFramework::Reqwest && item.path.as_deref() == Some("/health")
+        }));
+    }
+
+    #[test]
+    fn reqwest_import_inside_inline_module_should_remain_visible_locally() {
+        let source = r#"
+mod api {
+    use reqwest::Client as HttpClient;
+    async fn probe() {
+        let client = HttpClient::new();
+        client.get("/health").send().await;
+    }
+}
+"#;
+
+        assert!(parse_rust_source(source).iter().any(|item| {
+            item.framework == SourceFramework::Reqwest && item.path.as_deref() == Some("/health")
+        }));
+    }
+
+    #[test]
+    fn reqwest_self_fields_should_not_leak_across_sibling_modules() {
+        let source = r#"
+mod real {
+    use reqwest::Client;
+    struct Api { client: Client }
+    impl Api {
+        async fn probe(&self) { self.client.get("/real").send().await; }
+    }
+}
+mod fake {
+    struct Client;
+    impl Client { fn get(&self, _path: &str) {} }
+    struct Api { client: Client }
+    impl Api {
+        fn probe(&self) { self.client.get("/fake"); }
+    }
+}
+"#;
+
+        let result = parse_rust_source(source);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].path.as_deref(), Some("/real"));
+    }
+
+    #[test]
+    fn reqwest_should_respect_lexical_shadowing() {
+        let source = r#"
+use reqwest::Client;
+struct FakeClient;
+impl FakeClient { fn get(&self, _path: &str) {} }
+async fn synchronize() {
+    let client = Client::new();
+    client.get("https://inventory.test/v1/inventory").send().await;
+    {
+        let client = FakeClient;
+        client.get("https://inventory.test/v1/diagnostic");
+    }
+    client.get("https://payments.test/v1/payments").send().await;
+}
+"#;
+        let result = parse_rust_source(source);
+
+        assert_eq!(
+            result
+                .iter()
+                .map(|item| item.path.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("/v1/inventory"), Some("/v1/payments")]
+        );
+    }
+
+    #[test]
+    fn reqwest_should_not_promote_wrappers_that_consume_a_client() {
+        let source = r#"
+use reqwest::Client;
+struct FakeClient;
+impl FakeClient {
+    fn new(_client: Client) -> Self { Self }
+    fn get(&self, _path: &str) {}
+}
+async fn diagnostic() {
+    let fake = FakeClient::new(Client::new());
+    fake.get("https://inventory.test/v1/diagnostic");
+}
+"#;
+        let result = parse_rust_source(source);
+
+        assert_eq!(result.len(), 0);
+    }
+
+    #[test]
+    fn reqwest_should_recognize_import_aliases_and_exact_type_annotations() {
+        let source = r#"
+use reqwest::Client as HttpClient;
+async fn synchronize(injected: &HttpClient) {
+    let constructed: HttpClient = factory();
+    injected.get("https://inventory.test/v1/inventory").send().await;
+    constructed.post("https://orders.test/v1/orders").send().await;
+}
+"#;
+        let result = parse_rust_source(source);
+
+        assert_eq!(
+            result
+                .iter()
+                .map(|item| (item.method.as_deref(), item.path.as_deref()))
+                .collect::<Vec<_>>(),
+            vec![
+                (Some("GET"), Some("/v1/inventory")),
+                (Some("POST"), Some("/v1/orders")),
+            ]
+        );
+    }
+
+    #[test]
+    fn reqwest_should_recognize_blocking_clients_and_generic_self_fields() {
+        let source = r#"
+use reqwest::blocking::Client as BlockingClient;
+use reqwest::blocking::{Client as GroupedClient, Response};
+struct Api<T> { client: BlockingClient, marker: T }
+impl<T> Api<T> {
+    fn synchronize(&self) {
+        self.client.get("https://inventory.test/v1/inventory").send();
+    }
+}
+fn qualified() {
+    let client = reqwest::blocking::Client::new();
+    client.post("https://orders.test/v1/orders").send();
+}
+fn grouped() {
+    let client = GroupedClient::new();
+    client.delete("https://orders.test/v1/obsolete").send();
+}
+"#;
+        let result = parse_rust_source(source);
+
+        assert_eq!(result.len(), 3);
+        assert!(
+            result
+                .iter()
+                .any(|item| item.path.as_deref() == Some("/v1/inventory"))
+        );
+        assert!(
+            result
+                .iter()
+                .any(|item| item.path.as_deref() == Some("/v1/orders"))
+        );
+        assert!(
+            result
+                .iter()
+                .any(|item| item.path.as_deref() == Some("/v1/obsolete"))
+        );
+    }
+
+    #[test]
+    fn reqwest_should_recognize_exact_local_type_aliases() {
+        let source = r#"
+use reqwest::Client as HttpClient;
+type ServiceClient = HttpClient;
+async fn synchronize(client: &ServiceClient) {
+    client.get("https://inventory.test/v1/inventory").send().await;
+}
+"#;
+        let result = parse_rust_source(source);
+
+        assert!(matches!(
+            result.as_slice(),
+            [observation]
+                if observation.method.as_deref() == Some("GET")
+                    && observation.path.as_deref() == Some("/v1/inventory")
+        ));
+    }
+
+    #[test]
+    fn reqwest_should_track_braced_typed_closure_parameters() {
+        let source = r#"
+use reqwest::Client;
+async fn synchronize() {
+    let operation = |client: &Client| {
+        client.get("https://inventory.test/v1/inventory");
+    };
+}
+"#;
+        let result = parse_rust_source(source);
+
+        assert!(matches!(
+            result.as_slice(),
+            [observation] if observation.path.as_deref() == Some("/v1/inventory")
+        ));
+    }
+
+    #[test]
+    fn reqwest_should_treat_destructuring_as_lexical_shadowing() {
+        let source = r#"
+use reqwest::Client;
+struct FakeClient;
+impl FakeClient { fn get(&self, _path: &str) {} }
+async fn synchronize(client: &Client, pair: (FakeClient, usize)) {
+    let (client, _value) = pair;
+    client.get("https://inventory.test/v1/diagnostic");
+}
+"#;
+        let result = parse_rust_source(source);
+
+        assert_eq!(result.len(), 0);
+    }
+
+    #[test]
+    fn reqwest_should_conservatively_handle_binding_reassignment() {
+        let source = r#"
+use reqwest::Client;
+async fn synchronize() {
+    let mut client = Client::new();
+    client = factory();
+    client.get("https://inventory.test/v1/unknown");
+    client = Client::new();
+    client.get("https://inventory.test/v1/inventory");
+}
+"#;
+        let result = parse_rust_source(source);
+
+        assert_eq!(
+            result
+                .iter()
+                .map(|item| item.path.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("/v1/inventory")]
         );
     }
 

@@ -206,7 +206,10 @@ source across both public query styles:
 
 Literal reads and writes become the same normalized database-table relationships as SQLx and
 literal SQL in Python, Java, Go, TypeScript, or JavaScript. Those table nodes are workspace-global,
-so exact identities can connect consumers across repositories. Dynamic statement variables remain
+so exact identities can connect consumers across repositories. Agent-facing MCP summaries
+attribute a table definition to a repository only when confirmed containment yields one owner and
+include both usage and definition evidence; competing definitions remain explicitly ambiguous and
+are not reported as a proven cross-repository boundary. Dynamic statement variables remain
 incomplete; preparing or constructing a literal statement is retained as direct evidence even when
 execution happens through a later statement handle.
 
@@ -223,6 +226,10 @@ execution happens through a later statement handle.
 
 An external dependency becomes a cross-repository dependency only when its exact package identity
 matches a package owned by another declared repository.
+
+Agent-facing MCP summaries resolve consuming and owning repositories through confirmed manifest
+containment. If the same package coordinate is owned by more than one repository, the summary
+reports ambiguous ownership instead of selecting a repository.
 
 Literal Cargo workspace members also connect the workspace manifest to each member
 `Cargo.toml`. Member manifests then contain their package coordinates, while local path

@@ -9,7 +9,7 @@ Map APIs, events, schemas, packages, databases, and ownership across repositorie
 breaks another service.
 
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-![Source version](https://img.shields.io/badge/source-v1.0.3-orange.svg)
+![Source version](https://img.shields.io/badge/source-v1.1.0-orange.svg)
 [![crates.io](https://img.shields.io/crates/v/code-system-graph.svg)](https://crates.io/crates/code-system-graph)
 ![Platforms](https://img.shields.io/badge/validated-Linux%20%7C%20macOS%20%7C%20Windows-1793d1.svg)
 ![Privacy](https://img.shields.io/badge/privacy-local%20%7C%20no%20telemetry-2ea44f.svg)
@@ -268,10 +268,17 @@ Code System Graph exposes a local MCP server. For Codex:
 ```bash
 codex mcp add code-system-graph -- \
   csgraph mcp \
+  --config /absolute/path/to/my-project/code-system-graph.yaml \
   --codegraph \
   --workspace my-project \
   --database /absolute/path/to/my-project/.code-system-graph/code-system-graph.db
 ```
+
+MCP tools return one bounded Markdown text block and resources use `text/markdown`. HTTP and CLI
+retain typed schema-v2 JSON. Explore is the only source-bearing response and combines ephemeral
+source, symbols, callers/callees, federated evidence handoffs, coverage, and grounded next actions.
+Final MCP tool, resource, and schema-catalog budgets must each be at least 256 bytes so status and
+truncation controls remain representable.
 
 For clients that support [Agent Plugins](https://agent-plugins.org/), generate one portable,
 workspace-bound package plus its ignored local binding instead of configuring MCP and routing
@@ -321,7 +328,7 @@ plugin root. Re-run with `--replace-generated` after local paths change; only a 
 Code System Graph's recognized ownership identity can be replaced. Until local binding creation
 runs, that MCP entry fails visibly while independent plugin skills and servers remain usable.
 
-The generated MCP is read-only and requires `csgraph 1.0.3` in `PATH`; it does not bundle binaries.
+The generated MCP is read-only and requires `csgraph 1.1.0` in `PATH`; it does not bundle binaries.
 Its plugin, server, and skill share a stable name derived from the declared workspace name, so
 clones produce the same versioned files. Install it project-locally for workspace-only activation;
 the generated skill also requires the nearest manifest and MCP `status` to report that workspace.
@@ -411,7 +418,7 @@ discovery rules without opening a database.
 Search for the contract, select its stable node ID, and inspect upstream impact:
 
 ```bash
-csgraph query "POST /orders" --workspace my-project --database .code-system-graph/code-system-graph.db
+csgraph query "POST /orders" --config code-system-graph.yaml --workspace my-project --database .code-system-graph/code-system-graph.db
 csgraph impact --target <node-id> --workspace my-project --database .code-system-graph/code-system-graph.db
 ```
 
@@ -437,6 +444,8 @@ For a complete first workspace, including multi-repository layout and expected o
 
 - Local workflows run without telemetry or required network access.
 - Source bodies and secret values are not persisted.
+- An MCP host may retain requests and responses, including ephemeral Explore source, in its own
+  conversation history; configure host retention separately.
 - SQLite snapshots are local and atomically replaced.
 - Remote pull-request access is disabled by default and requires explicit enablement and consent.
 - MCP is read-only by default; administrative tools require an explicit server flag.

@@ -326,7 +326,7 @@ pub(crate) fn sync_workspace_direct(
         codegraph.changed_count == 0,
     )?;
     Ok(SyncSummary {
-        schema_version: 1,
+        schema_version: 2,
         execution: code_system_graph_core::ExecutionSummary::default(),
         scan,
         codegraph,

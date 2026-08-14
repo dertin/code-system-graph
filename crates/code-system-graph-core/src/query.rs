@@ -127,6 +127,17 @@ pub struct SearchCoverage {
     pub gaps: Vec<String>,
 }
 
+/// Deterministic non-executing navigation suggested to an agent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AgentNextAction {
+    /// Public tool to call next.
+    pub tool: String,
+    /// Exact real identifiers or bounded query arguments for the tool.
+    pub arguments: BTreeMap<String, String>,
+    /// Short explanation of why the action is useful.
+    pub rationale: String,
+}
+
 /// Paginated ranked search result.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SearchReport {
@@ -142,6 +153,9 @@ pub struct SearchReport {
     pub truncated: bool,
     /// Search coverage and degradation details.
     pub coverage: SearchCoverage,
+    /// Navigation based only on observed repositories and entity identifiers.
+    #[serde(default)]
+    pub next_actions: Vec<AgentNextAction>,
 }
 
 /// Traversal strategy used to find confirmed paths.
@@ -437,6 +451,7 @@ pub fn search(nodes: &[Node], request: &SearchRequest) -> Result<SearchReport, Q
         limit: request.limit,
         truncated: page_end < total_matches,
         coverage,
+        next_actions: Vec::new(),
     })
 }
 

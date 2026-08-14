@@ -30,7 +30,9 @@ fn repository_id(config: &Path, alias: &str) -> Result<String, Box<dyn std::erro
 
 fn request(target: String) -> ImpactRequest {
     ImpactRequest {
-        target: ImpactTarget::NodeId(NodeId::new(target)),
+        target: ImpactTarget::NodeId {
+            node_id: NodeId::new(target),
+        },
         direction: ImpactDirection::Upstream,
         options: ImpactOptions {
             limit: 25,

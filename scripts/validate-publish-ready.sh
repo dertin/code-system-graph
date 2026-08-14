@@ -16,7 +16,7 @@ RUSTDOCFLAGS="-D warnings" cargo +stable doc --workspace --exclude code-system-g
 cargo deny check
 cargo audit --deny warnings
 if command -v gitleaks >/dev/null 2>&1; then
-  gitleaks dir --no-banner --redact "$ROOT"
+  gitleaks dir --no-banner --redact .
 elif command -v docker >/dev/null 2>&1; then
   container="$(docker create zricethezav/gitleaks:latest dir /tmp --no-banner --redact)"
   trap 'docker rm -f "$container" >/dev/null 2>&1 || true' EXIT
@@ -39,7 +39,7 @@ fi
 "$ROOT/scripts/smoke-install.sh" "$PACKAGE_DIR"
 
 if rg -n -i \
-  'phase[ _-]?[0-9]+|fase[ _-]?[0-9]+|PLAN\.md|STATUS\.md|PROMPT-(GPT|RESUME)|schema v[2-9][0-9]*|3700fe3|93c0078|/opt/[[:alnum:]_.-]+' \
+  'phase[ _-]?[0-9]+|fase[ _-]?[0-9]+|PLAN\.md|STATUS\.md|PROMPT-(GPT|RESUME)|3700fe3|93c0078|/opt/[[:alnum:]_.-]+' \
   "$ROOT" \
   --glob '!target/**' \
   --glob '!dist/**' \

@@ -5,7 +5,7 @@ use code_system_graph_model::{
 };
 
 use crate::{
-    BoundaryRole, DeclaredImplementation, DeclaredTestCase, HttpBoundary, SourceFramework, SourceLanguage, SourceObservation, SourceRole
+    BoundaryRole, DeclaredImplementation, DeclaredTestCase, HttpBoundary, SourceFramework, SourceLanguage, SourceObservation, SourceRole, SourceSymbolIdentity
 };
 
 /// Graph-ready facts derived from one focused Rust or Python source file.
@@ -242,22 +242,29 @@ fn source_implementation(
     method: &str,
     path: &str,
 ) -> DeclaredImplementation {
-    let stable_key = format!(
-        "symbol:{}:{}:{source_path}:{symbol}",
-        repo_id.as_str(),
-        language_name(observation.language)
+    let identity = crate::SourceSymbolIdentity::new(
+        repo_id.clone(),
+        language_name(observation.language),
+        source_path,
+        symbol,
     );
+    let stable_key = identity.stable_key();
     DeclaredImplementation {
-        node: Node {
-            id: NodeId::new(stable_id("node", &stable_key)),
-            kind: NodeKind::SymbolRef,
-            repo_id: Some(repo_id.clone()),
-            stable_key: stable_key.clone(),
-            label: format!("{}::{symbol}", language_name(observation.language)),
-        },
+        node: identity.node(format!("{}::{symbol}", language_name(observation.language))),
         method: method.to_owned(),
         path: path.to_owned(),
-        evidence: source_evidence(repo_id, source_path, content_hash, observation, &stable_key),
+        evidence: source_evidence(
+            repo_id,
+            source_path,
+            content_hash,
+            observation,
+            &format!(
+                "{stable_key}:{}:{}:{}",
+                framework_name(observation.framework),
+                observation.lines.start,
+                observation.lines.end
+            ),
+        ),
     }
 }
 
@@ -327,29 +334,13 @@ fn source_factory_relation(
     factory_symbol: &str,
     model_symbol: &str,
 ) -> ([Node; 2], Edge, Evidence) {
-    let factory_key = format!(
-        "symbol:{}:python:{source_path}:{factory_symbol}",
-        repo_id.as_str()
-    );
+    let factory_identity =
+        SourceSymbolIdentity::new(repo_id.clone(), "python", source_path, factory_symbol);
     let model_path = observation.related_path.as_deref().unwrap_or(source_path);
-    let model_key = format!(
-        "symbol:{}:python:{model_path}:{model_symbol}",
-        repo_id.as_str()
-    );
-    let factory_node = Node {
-        id: NodeId::new(stable_id("node", &factory_key)),
-        kind: NodeKind::SymbolRef,
-        repo_id: Some(repo_id.clone()),
-        stable_key: factory_key,
-        label: format!("python/factory-boy::{factory_symbol}"),
-    };
-    let model_node = Node {
-        id: NodeId::new(stable_id("node", &model_key)),
-        kind: NodeKind::SymbolRef,
-        repo_id: Some(repo_id.clone()),
-        stable_key: model_key,
-        label: format!("python::{model_symbol}"),
-    };
+    let model_identity =
+        SourceSymbolIdentity::new(repo_id.clone(), "python", model_path, model_symbol);
+    let factory_node = factory_identity.node(format!("python/factory-boy::{factory_symbol}"));
+    let model_node = model_identity.node(format!("python::{model_symbol}"));
     let relation_key = format!(
         "factory-model:{}:{}",
         factory_node.id.as_str(),

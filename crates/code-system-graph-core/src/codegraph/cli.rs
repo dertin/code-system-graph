@@ -234,6 +234,48 @@ impl CodeGraphCli {
         })
     }
 
+    pub(crate) async fn local_file_context(
+        &self,
+        input: &LocalContextRequest,
+        file_path: &str,
+    ) -> Result<LocalContextResult, ProviderError> {
+        let request = &input.request;
+        let line_limit = request
+            .budget
+            .max_output_bytes
+            .saturating_div(16)
+            .clamp(1, 4_096);
+        let output = self
+            .run(
+                [
+                    OsString::from("node"),
+                    OsString::from("--path"),
+                    request.project_path.as_os_str().to_owned(),
+                    OsString::from("--file"),
+                    OsString::from(file_path),
+                    OsString::from("--limit"),
+                    OsString::from(line_limit.to_string()),
+                ],
+                request,
+                request.budget.max_output_bytes,
+            )
+            .await?;
+        let content = if output.stdout_exceeded {
+            String::from_utf8_lossy(&output.stdout).into_owned()
+        } else {
+            bounded_utf8(output.stdout, "CodeGraph file context")?
+        };
+        Ok(LocalContextResult {
+            execution: ProviderExecution {
+                transport: ProviderTransport::Cli,
+                output_bytes: content.len(),
+                truncated: output.stdout_exceeded,
+                degradations: Vec::new(),
+            },
+            content,
+        })
+    }
+
     pub(crate) async fn affected_tests(
         &self,
         input: &AffectedTestsRequest,

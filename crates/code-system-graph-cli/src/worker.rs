@@ -20,7 +20,7 @@ use super::{
 };
 use crate::sync::{SyncSummary, sync_workspace_direct};
 
-const PROTOCOL_VERSION: u8 = 1;
+const PROTOCOL_VERSION: u8 = 2;
 const MAX_REQUEST_BYTES: u64 = 1_048_576;
 const MAX_PROTOCOL_LINE_BYTES: usize = 1_048_576;
 const PROTOCOL_QUEUE_CAPACITY: usize = 256;
@@ -1558,7 +1558,7 @@ mod tests {
         })
         .expect("policy protocol");
         let script = format!(
-            "printf '%s\\n' '{policy_message}'; while true; do printf '%s\\n' '{{\"type\":\"progress\",\"schema_version\":1,\"phase\":\"discovery\",\"completed_units\":1}}'; sleep 0.02; done"
+            "printf '%s\\n' '{policy_message}'; while true; do printf '%s\\n' '{{\"type\":\"progress\",\"schema_version\":2,\"phase\":\"discovery\",\"completed_units\":1}}'; sleep 0.02; done"
         );
         let error = supervise_script(&script, &policy);
         assert!(

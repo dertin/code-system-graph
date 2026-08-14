@@ -279,7 +279,7 @@ fn plugin_create_should_render_official_structure_and_be_idempotent() -> anyhow:
         "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json"
     );
     assert_eq!(plugin["name"], first.plugin_name);
-    assert_eq!(plugin["version"], "1.0.3");
+    assert_eq!(plugin["version"], "1.1.0");
     let mcp: serde_json::Value = serde_json::from_slice(&std::fs::read(output.join("mcp.json"))?)?;
     let mcp_schema: serde_json::Value = serde_json::from_str(MCP_SCHEMA)?;
     assert!(jsonschema::validator_for(&mcp_schema)?.is_valid(&mcp));
@@ -305,7 +305,7 @@ fn plugin_create_should_render_official_structure_and_be_idempotent() -> anyhow:
     assert!(!skill.contains("plugin create"));
     assert!(!skill.contains("local binding"));
     assert!(skill.contains("reports another workspace, stop using it"));
-    assert!(skill.contains("Call `status` before"));
+    assert!(skill.contains("Call `status` with `workspace: \"plugin-workspace\"` before"));
     assert!(skill.contains("Do not run `scan`, `sync`, `codegraph init`"));
     assert!(
         !output
@@ -837,7 +837,7 @@ fn plugin_uninstall_should_ignore_a_codex_manifest_added_after_installation() ->
 }
 
 #[test]
-fn plugin_uninstall_should_accept_a_legacy_integration_receipt() -> anyhow::Result<()> {
+fn plugin_uninstall_should_reject_an_incomplete_integration_receipt() -> anyhow::Result<()> {
     let temporary = tempfile::tempdir()?;
     let workspace = temporary.path().join("workspace");
     std::fs::create_dir(&workspace)?;
@@ -859,11 +859,7 @@ fn plugin_uninstall_should_accept_a_legacy_integration_receipt() -> anyhow::Resu
     std::fs::write(&receipt_path, serde_json::to_vec_pretty(&receipt)?)?;
 
     let removed = uninstall_existing_with_cli(&base)?;
-    assert!(
-        removed.status.success(),
-        "{}",
-        String::from_utf8_lossy(&removed.stderr)
-    );
+    assert!(!removed.status.success());
     let portable: serde_json::Value =
         serde_json::from_slice(&std::fs::read(base.join("mcp.json"))?)?;
     let codex: serde_json::Value =
@@ -871,22 +867,22 @@ fn plugin_uninstall_should_accept_a_legacy_integration_receipt() -> anyhow::Resu
     assert!(
         portable["mcpServers"]
             .get("hugint-code-system-graph")
-            .is_none()
+            .is_some()
     );
     assert!(
         codex["mcpServers"]
             .get("hugint-code-system-graph")
-            .is_none()
+            .is_some()
     );
     assert!(portable["mcpServers"].get("codegraph").is_some());
     assert!(codex["mcpServers"].get("codegraph").is_some());
-    assert!(!base.join("skills/hugint-system-graph").exists());
-    assert!(!base.join(".local/code-system-graph").exists());
+    assert!(base.join("skills/hugint-system-graph").exists());
+    assert!(base.join(".local/code-system-graph").exists());
     Ok(())
 }
 
 #[test]
-fn plugin_uninstall_should_reject_a_modified_legacy_binding() -> anyhow::Result<()> {
+fn plugin_uninstall_should_reject_a_v1_integration_receipt() -> anyhow::Result<()> {
     let temporary = tempfile::tempdir()?;
     let workspace = temporary.path().join("workspace");
     std::fs::create_dir(&workspace)?;
@@ -903,8 +899,7 @@ fn plugin_uninstall_should_reject_a_modified_legacy_binding() -> anyhow::Result<
     let receipt = receipt
         .as_object_mut()
         .ok_or_else(|| anyhow::anyhow!("integration receipt must be an object"))?;
-    receipt.remove("managedDocuments");
-    receipt.remove("managedLocalFiles");
+    receipt.insert("schemaVersion".to_owned(), serde_json::json!(1));
     std::fs::write(&receipt_path, serde_json::to_vec_pretty(&receipt)?)?;
 
     let binding_path = base.join(".local/code-system-graph/mcp-binding.json");
