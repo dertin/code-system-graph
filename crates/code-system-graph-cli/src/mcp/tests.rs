@@ -246,7 +246,11 @@ async fn contract_list_should_render_direct_repository_aliases_without_full_cont
     let result = server
         .contracts(Parameters(ContractsInput {
             workspace: None,
-            operation: ContractsOperation::List { limit: 10 },
+            // The fixture contains duplicate contract stable keys from several repositories. Their
+            // ID tie-breaker is intentionally opaque and may place `api` beyond a smaller first
+            // page on another platform. Request the complete bounded fixture inventory so this
+            // test exercises direct repository attribution rather than page composition.
+            operation: ContractsOperation::List { limit: 100 },
         }))
         .await;
     let markdown = call_text(&result);
