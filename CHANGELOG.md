@@ -49,6 +49,8 @@ Versioning.
   resource, including low-budget, UTF-8, fenced-source, error, and nested-collection cases.
 - Added direct deadline and cancellation tests for Explore snapshot loading and correlation, plus
   synchronized Markdown-only MCP instructions and CLI configuration examples.
+- Updated `rustls` to 0.23.45 (RUSTSEC-2026-0285) with `rustls-webpki` 0.103.15, and replaced the
+  yanked `chacha20` 0.10.1 with 0.10.2.
 
 ## [1.0.3] - 2026-08-09
 
