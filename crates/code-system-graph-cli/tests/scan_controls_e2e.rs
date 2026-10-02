@@ -6,7 +6,7 @@ use std::fmt::Write as _;
 use code_system_graph::{
     ApplicationError, ScanOverrides, WatcherState, application_exit_code, finish_watcher_lease, scan_workspace, scan_workspace_with_overrides, scan_workspace_with_worker_executable, start_watcher_lease, status_workspace
 };
-use code_system_graph_core::ExitCode;
+use code_system_graph_core::{ExitCode, encode_native_path};
 use code_system_graph_model::NodeKind;
 use code_system_graph_store_sqlite::SqliteStore;
 
@@ -428,11 +428,12 @@ fn fact_free_source_files_should_not_add_artifact_nodes() -> anyhow::Result<()> 
     scan_workspace(&manifest, &database)?;
     let store = SqliteStore::open_read_only(&database)?;
     let (nodes, _) = store.load_current_graph("fact-free")?;
+    let math_path = encode_native_path(&std::path::Path::new("src").join("math.ts"));
     let math_events = store
         .load_current_extractor_batches("fact-free")?
         .into_iter()
         .find(|batch| {
-            batch.source.path.display == "src/math.ts"
+            batch.source.path == math_path
                 && batch.source.extractor == "code-system-graph.events.source"
         })
         .ok_or_else(|| anyhow::anyhow!("math.ts event batch is missing"))?;
