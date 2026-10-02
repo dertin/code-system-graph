@@ -66,7 +66,7 @@ Code System Graph 1.1.0 includes:
 ## Local validation
 
 Run the main Rust validation from a clean checkout. This requires stable, nightly with the rustfmt
-and Clippy components, and Rust 1.97.1:
+and Clippy components, and Rust 1.96.0:
 
 ```text
 cargo +nightly fmt --all -- --check
@@ -74,7 +74,7 @@ cargo +nightly clippy --workspace --exclude code-system-graph-fuzz --all-targets
 cargo +stable check --workspace --exclude code-system-graph-fuzz --all-targets --all-features --locked
 cargo +stable test --workspace --exclude code-system-graph-fuzz --all-targets --all-features --locked
 RUSTDOCFLAGS="-D warnings" cargo +stable doc --workspace --exclude code-system-graph-fuzz --all-features --no-deps --locked
-cargo +1.97.1 check --workspace --exclude code-system-graph-fuzz --all-targets --all-features --locked
+cargo +1.96.0 check --workspace --exclude code-system-graph-fuzz --all-targets --all-features --locked
 ```
 
 Dependency and source-policy tools can then run against the locked workspace:
@@ -105,7 +105,7 @@ See `PERFORMANCE.md` for workload definitions, measurements, and interpretation.
 ## Package validation
 
 Creating the Linux x86_64 artifacts requires the latest stable Rust toolchain, the target, Syft,
-GNU tar, and SHA-256 tooling. The workspace MSRV remains 1.97.1 and is validated separately:
+GNU tar, and SHA-256 tooling. The workspace MSRV remains 1.96.0 and is validated separately:
 
 ```text
 SOURCE_DATE_EPOCH=0 scripts/package-release.sh x86_64-unknown-linux-gnu

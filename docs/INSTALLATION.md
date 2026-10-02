@@ -49,7 +49,7 @@ Do not substitute an unofficial download URL or third-party binary mirror.
 
 Requirements:
 
-- the latest stable Rust toolchain; the minimum supported Rust version (MSRV) is 1.97.1;
+- the latest stable Rust toolchain; the minimum supported Rust version (MSRV) is 1.96.0;
 - Cargo.
 
 ```bash
@@ -62,7 +62,7 @@ This builds and installs the same binaries as the binstall path. Verify with the
 
 Requirements:
 
-- the latest stable Rust toolchain; MSRV is 1.97.1;
+- the latest stable Rust toolchain; MSRV is 1.96.0;
 - Cargo and Git;
 - a trusted checkout of this repository.
 

@@ -19,7 +19,7 @@ continuous validation on `main`, while release artifacts remain gated behind exp
 ## Decision
 
 The workspace and release artifacts use version `1.0.0`. Release builds use the latest stable Rust
-toolchain and the committed lockfile. Every crate declares an MSRV of 1.97.1, which is checked
+toolchain and the committed lockfile. Every crate declares an MSRV of 1.96.0, which is checked
 separately. Formatting and strict Clippy checks use the latest nightly toolchain, while compilation,
 tests, documentation, and release gates use stable.
 

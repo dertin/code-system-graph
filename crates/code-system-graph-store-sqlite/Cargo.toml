@@ -12,20 +12,20 @@ keywords.workspace = true
 categories = ["database", "development-tools"]
 
 [dependencies]
-blake3 = "1.8.5"
-code-system-graph-model = { version = "1.1.0", path = "../code-system-graph-model" }
-rusqlite = { version = "0.40.1", features = ["backup", "bundled", "hooks"] }
+blake3 = "1.8.7"
+code-system-graph-model = { version = "1.2.0", path = "../code-system-graph-model" }
+rusqlite = { version = "0.40.2", features = ["backup", "bundled", "hooks"] }
 same-file = "1.0.6"
 serde_json = "1.0.151"
 sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
 tempfile = "3.27.0"
-thiserror = "2.0.19"
+thiserror = "2.0.21"
 
 [lints]
 workspace = true
 
 [target.'cfg(unix)'.dependencies]
-libc = "0.2"
+libc = "0.2.190"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = [

@@ -13,7 +13,7 @@ use code_system_graph_store_sqlite::{SqliteStore, StoreLock};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
-    CallToolResult, ContentBlock, Implementation, ListResourceTemplatesResult, ListResourcesResult, PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult, Resource, ResourceContents, ResourceTemplate, ServerCapabilities, ServerInfo
+    CallToolResult, ContentBlock, Implementation, ListResourceTemplatesResult, ListResourcesResult, PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult, Resource, ResourceContents, ResourceTemplate, ServerCapabilities, ServerConfig
 };
 use rmcp::service::{RequestContext, RoleServer};
 use rmcp::{ErrorData as McpError, ServerHandler, tool, tool_handler, tool_router};
@@ -895,7 +895,7 @@ fn codegraph_disabled_error() -> McpError {
 )]
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for CodeSystemGraphServer {
-    fn get_info(&self) -> ServerInfo {
+    fn get_info(&self) -> ServerConfig {
         let capabilities = if self.codegraph.enabled {
             "Use query for persisted entity discovery, explore for ephemeral \
              repository source, source_context for source-free evidence, impact for known targets, \
@@ -913,7 +913,7 @@ impl ServerHandler for CodeSystemGraphServer {
              only the schema catalog embeds fenced JSON. {} Administrative tools mutate state only when enabled and still require the exact workspace.",
             self.workspace, capabilities
         );
-        ServerInfo::new(
+        ServerConfig::new(
             ServerCapabilities::builder()
                 .enable_tools()
                 .enable_resources()

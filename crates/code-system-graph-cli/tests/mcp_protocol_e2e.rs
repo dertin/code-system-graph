@@ -8,7 +8,7 @@ use code_system_graph::scan_workspace;
 use code_system_graph_store_sqlite::SqliteStore;
 use rmcp::ServiceExt;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResult, ClientCapabilities, ClientInfo, ContentBlock, Implementation, ReadResourceRequestParams, ResourceContents
+    CallToolRequestParams, CallToolResult, ClientCapabilities, ClientConfig, ContentBlock, Implementation, ReadResourceRequestParams, ResourceContents
 };
 
 fn tool_text(result: &CallToolResult) -> &str {
@@ -90,7 +90,7 @@ async fn stdio_should_initialize_without_noise_and_hide_admin_tools() -> anyhow:
         .stdout
         .take()
         .ok_or_else(|| anyhow::anyhow!("stdout"))?;
-    let client = ClientInfo::new(
+    let client = ClientConfig::new(
         ClientCapabilities::default(),
         Implementation::new("code-system-graph-e2e", env!("CARGO_PKG_VERSION")),
     );
@@ -301,7 +301,7 @@ async fn stdio_explore_should_proxy_bounded_ephemeral_codegraph_context() -> any
         .stdout
         .take()
         .ok_or_else(|| anyhow::anyhow!("stdout"))?;
-    let client = ClientInfo::new(
+    let client = ClientConfig::new(
         ClientCapabilities::default(),
         Implementation::new("code-system-graph-explore-e2e", env!("CARGO_PKG_VERSION")),
     );
@@ -422,7 +422,7 @@ async fn explicit_admin_stdio_should_apply_bounded_audited_mutations() -> anyhow
         .stdout
         .take()
         .ok_or_else(|| anyhow::anyhow!("stdout"))?;
-    let client = ClientInfo::new(
+    let client = ClientConfig::new(
         ClientCapabilities::default(),
         Implementation::new("code-system-graph-admin-e2e", env!("CARGO_PKG_VERSION")),
     );

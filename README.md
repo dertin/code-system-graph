@@ -141,7 +141,7 @@ installed to Cargo's binary directory, normally `$HOME/.cargo/bin`.
 The crates.io package is `code-system-graph`; the user-facing CLI command is `csgraph` (not
 `code-system-graph`). The hooks runtime installs as `code-system-graph-hooks`.
 
-**From crates.io** (builds locally; requires Rust 1.97.1 or newer):
+**From crates.io** (builds locally; requires Rust 1.96.0 or newer):
 
 ```bash
 cargo install code-system-graph code-system-graph-hooks

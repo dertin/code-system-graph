@@ -21,14 +21,14 @@ disabled-strategies = ["quick-install", "compile"]
 pkg-fmt = "zip"
 
 [dependencies]
-atomic-write-file = "0.3.0"
-blake3 = "1.8.5"
-libc = "0.2"
+atomic-write-file = "0.3.1"
+blake3 = "1.8.7"
+libc = "0.2.190"
 nix = { version = "0.31.3", features = ["fs"] }
 schemars = "1.2.2"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
-thiserror = "2.0.19"
+thiserror = "2.0.21"
 
 [lints]
 workspace = true

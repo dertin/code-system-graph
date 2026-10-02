@@ -3,6 +3,15 @@
 All notable public changes to Code System Graph are documented in this file. Code System Graph follows Semantic
 Versioning.
 
+## [1.2.0] - Unreleased
+
+### Release engineering
+
+- Lowered the workspace MSRV from 1.97.1 to 1.96.0, the lowest toolchain that builds every locked
+  dependency at its latest release.
+- Updated all dependencies to their latest releases, including `jsonschema` 0.58, `sqlparser`
+  0.63, `tree-sitter` 0.27, `rmcp` 3.5, and `serde-saphyr` 1.3.
+
 ## [1.1.0] - 2026-10-02
 
 ### Breaking changes
