@@ -5,9 +5,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::execution_policy::{
-    CodeGraphCorroborationAnchorLimit, ExecutionPolicy, ExecutionPolicyOverrides, InvalidExecutionPolicy
-};
+use crate::execution_policy::{ExecutionPolicy, ExecutionPolicyOverrides, InvalidExecutionPolicy};
 use crate::extraction_budget::{
     ExtractionBudgetOverrides, ExtractionBudgets, InvalidExtractionBudget
 };
@@ -66,7 +64,6 @@ pub struct RepositoryConfig {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct ManifestExtensions {
     repository_use_gitignore: BTreeMap<String, bool>,
-    max_codegraph_corroboration_anchors_per_repo: Option<i64>,
 }
 
 impl ManifestExtensions {
@@ -74,12 +71,6 @@ impl ManifestExtensions {
     #[must_use]
     pub fn repository_use_gitignore(&self, alias: &str) -> Option<bool> {
         self.repository_use_gitignore.get(alias).copied()
-    }
-
-    /// Returns the configured `CodeGraph` corroboration bound, including `-1` for unlimited.
-    #[must_use]
-    pub const fn max_codegraph_corroboration_anchors_per_repo(&self) -> Option<i64> {
-        self.max_codegraph_corroboration_anchors_per_repo
     }
 }
 
@@ -96,7 +87,7 @@ struct WorkspaceManifestWire {
     #[serde(rename = "extractionBudgets", default)]
     extraction_budgets: Option<ExtractionBudgetOverrides>,
     #[serde(rename = "executionPolicy", default)]
-    execution_policy: Option<ExecutionPolicyOverridesWire>,
+    execution_policy: Option<ExecutionPolicyOverrides>,
 }
 
 #[derive(Deserialize)]
@@ -110,23 +101,6 @@ struct RepositoryConfigWire {
     excludes: Option<Vec<String>>,
     include_defaults: Option<Vec<String>>,
     use_gitignore: Option<bool>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct ExecutionPolicyOverridesWire {
-    max_scan_wall_time_ms: Option<u64>,
-    max_no_progress_time_ms: Option<u64>,
-    #[serde(rename = "maxCodeGraphSyncWallTimeMsPerRepo")]
-    max_codegraph_sync_wall_time_ms_per_repo: Option<u64>,
-    #[serde(rename = "maxCodeGraphCorroborationAnchorsPerRepo")]
-    max_codegraph_corroboration_anchors_per_repo: Option<i64>,
-    max_worker_memory_bytes: Option<u64>,
-    graceful_termination_ms: Option<u64>,
-    watch_idle_timeout_ms: Option<u64>,
-    max_watch_session_wall_time_ms: Option<u64>,
-    min_watch_rescan_interval_ms: Option<u64>,
-    max_checkpoint_cache_bytes: Option<u64>,
 }
 
 /// Exact manual relationship or automatic-link suppression.
@@ -323,13 +297,6 @@ pub fn parse_manifest_with_extensions(
             )
         })
         .collect();
-    let (execution_policy, max_codegraph_corroboration_anchors_per_repo) = wire
-        .execution_policy
-        .map(ExecutionPolicyOverridesWire::into_parts)
-        .map_or((None, None), |(policy, limit)| (Some(policy), limit));
-    if let Some(value) = max_codegraph_corroboration_anchors_per_repo {
-        CodeGraphCorroborationAnchorLimit::try_from(value)?;
-    }
     let manifest = WorkspaceManifest {
         version: wire.version,
         name: wire.name,
@@ -337,37 +304,16 @@ pub fn parse_manifest_with_extensions(
         repos,
         manual_links: wire.manual_links,
         extraction_budgets: wire.extraction_budgets,
-        execution_policy,
+        execution_policy: wire.execution_policy,
     };
     validate_manifest(manifest).map(|manifest| {
         (
             manifest,
             ManifestExtensions {
                 repository_use_gitignore,
-                max_codegraph_corroboration_anchors_per_repo,
             },
         )
     })
-}
-
-impl ExecutionPolicyOverridesWire {
-    fn into_parts(self) -> (ExecutionPolicyOverrides, Option<i64>) {
-        (
-            ExecutionPolicyOverrides {
-                max_scan_wall_time_ms: self.max_scan_wall_time_ms,
-                max_no_progress_time_ms: self.max_no_progress_time_ms,
-                max_codegraph_sync_wall_time_ms_per_repo: self
-                    .max_codegraph_sync_wall_time_ms_per_repo,
-                max_worker_memory_bytes: self.max_worker_memory_bytes,
-                graceful_termination_ms: self.graceful_termination_ms,
-                watch_idle_timeout_ms: self.watch_idle_timeout_ms,
-                max_watch_session_wall_time_ms: self.max_watch_session_wall_time_ms,
-                min_watch_rescan_interval_ms: self.min_watch_rescan_interval_ms,
-                max_checkpoint_cache_bytes: self.max_checkpoint_cache_bytes,
-            },
-            self.max_codegraph_corroboration_anchors_per_repo,
-        )
-    }
 }
 
 fn validate_manifest(manifest: WorkspaceManifest) -> Result<WorkspaceManifest, ManifestError> {
@@ -740,7 +686,7 @@ repos:
     }
 
     #[test]
-    fn parse_manifest_should_keep_additive_settings_out_of_public_structs() {
+    fn parse_manifest_should_normalize_execution_policy_settings() {
         let input = VALID.replace(
             "name: commerce",
             "name: commerce\nexecutionPolicy:\n  maxCodeGraphCorroborationAnchorsPerRepo: 12",
@@ -755,8 +701,13 @@ repos:
 
         assert!(manifest.execution_policy.is_some());
         assert_eq!(extensions.repository_use_gitignore("web"), Some(true));
+        let policy =
+            ExecutionPolicy::resolve(manifest.execution_policy.as_ref()).expect("effective policy");
         assert_eq!(
-            extensions.max_codegraph_corroboration_anchors_per_repo(),
+            policy
+                .max_codegraph_corroboration_anchors_per_repo
+                .bounded()
+                .map(std::num::NonZeroUsize::get),
             Some(12)
         );
     }

@@ -192,7 +192,7 @@ fn one_shot_sync_should_report_optional_codegraph_and_reuse_snapshot() -> anyhow
     let (manifest, database) = write_workspace(temporary.path())?;
 
     let first = run_sync(&manifest, &database)?;
-    assert_eq!(first.schema_version, 1);
+    assert_eq!(first.schema_version, 2);
     assert!(first.codegraph.enabled);
     assert_eq!(first.codegraph.repository_count, 1);
     assert_eq!(first.codegraph.skipped_count, 1);

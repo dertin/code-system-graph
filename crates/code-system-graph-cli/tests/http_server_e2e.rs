@@ -117,6 +117,27 @@ impl RunningServer {
         })
     }
 
+    async fn start_for_query(codegraph_enabled: bool) -> anyhow::Result<Self> {
+        let fixture = Fixture::create()?;
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+        let address = listener.local_addr()?;
+        let config = fixture
+            .server_config()
+            .with_bind(address)
+            .with_codegraph(codegraph_enabled, None);
+        let cancellation = CancellationToken::new();
+        let task_cancellation = cancellation.clone();
+        let task = tokio::spawn(async move {
+            serve_http_on_listener(listener, config, task_cancellation).await
+        });
+        Ok(Self {
+            address,
+            cancellation,
+            task,
+            fixture,
+        })
+    }
+
     #[cfg(unix)]
     async fn start_with_codegraph() -> anyhow::Result<Self> {
         let fixture = Fixture::create()?;
@@ -233,6 +254,11 @@ async fn loopback_should_serve_anonymous_health_and_status() -> anyhow::Result<(
         .get("x-code-system-graph-version")
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned);
+    let schema_header = health
+        .headers()
+        .get("x-code-system-graph-schema-version")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
     let content_type_policy = health
         .headers()
         .get("x-content-type-options")
@@ -249,6 +275,7 @@ async fn loopback_should_serve_anonymous_health_and_status() -> anyhow::Result<(
             health_body["status"].as_str(),
             version_header.as_deref(),
             content_type_policy.as_deref(),
+            schema_header.as_deref(),
             cors_header_present,
             status_status,
             status_body["data"]["workspace"].as_str(),
@@ -258,6 +285,7 @@ async fn loopback_should_serve_anonymous_health_and_status() -> anyhow::Result<(
             Some("ok"),
             Some(env!("CARGO_PKG_VERSION")),
             Some("nosniff"),
+            Some("2"),
             false,
             StatusCode::OK,
             Some(server.fixture.workspace_name.as_str()),
@@ -340,6 +368,94 @@ async fn configured_auth_should_accept_valid_bearer_token() -> anyhow::Result<()
     server.stop().await
 }
 
+#[tokio::test]
+async fn query_should_only_advertise_http_available_actions() -> anyhow::Result<()> {
+    let disabled = RunningServer::start_for_query(false).await?;
+    let client = Client::new();
+    let hit = client
+        .post(disabled.url("/v1/tools/query"))
+        .json(&json!({
+            "query": "orders",
+            "node_kinds": [],
+            "repo_ids": [],
+            "service_ids": [],
+            "community_ids": [],
+            "offset": 0,
+            "limit": 5
+        }))
+        .send()
+        .await?;
+    let (hit_status, hit_body) = response_json(hit).await?;
+    let hit_actions = hit_body["data"]["next_actions"]
+        .as_array()
+        .context("query hit actions")?;
+    assert_eq!(hit_status, StatusCode::OK);
+    assert!(
+        !hit_body["data"]["hits"]
+            .as_array()
+            .is_none_or(Vec::is_empty)
+    );
+    assert!(
+        hit_actions
+            .iter()
+            .all(|action| action["tool"] != "source_context")
+    );
+
+    let missing = client
+        .post(disabled.url("/v1/tools/query"))
+        .json(&json!({
+            "query": "api source_literal_that_does_not_exist",
+            "node_kinds": [],
+            "repo_ids": [],
+            "service_ids": [],
+            "community_ids": [],
+            "offset": 0,
+            "limit": 5
+        }))
+        .send()
+        .await?;
+    let (_, missing_body) = response_json(missing).await?;
+    assert!(
+        missing_body["data"]["next_actions"]
+            .as_array()
+            .context("disabled query actions")?
+            .iter()
+            .all(|action| action["tool"] != "explore")
+    );
+    assert!(
+        missing_body["data"]["coverage"]["gaps"]
+            .as_array()
+            .context("disabled query gaps")?
+            .iter()
+            .all(|gap| !gap.as_str().is_some_and(|gap| gap.contains("use Explore")))
+    );
+    disabled.stop().await?;
+
+    let enabled = RunningServer::start_for_query(true).await?;
+    let response = client
+        .post(enabled.url("/v1/tools/query"))
+        .json(&json!({
+            "query": "api source_literal_that_does_not_exist",
+            "node_kinds": [],
+            "repo_ids": [],
+            "service_ids": [],
+            "community_ids": [],
+            "offset": 0,
+            "limit": 5
+        }))
+        .send()
+        .await?;
+    let (_, body) = response_json(response).await?;
+    assert!(
+        body["data"]["next_actions"]
+            .as_array()
+            .context("enabled query actions")?
+            .iter()
+            .any(|action| action["tool"] == "explore")
+    );
+    enabled.stop().await
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn explore_route_should_return_ephemeral_local_context() -> anyhow::Result<()> {
@@ -359,10 +475,10 @@ async fn explore_route_should_return_ephemeral_local_context() -> anyhow::Result
     assert_eq!(
         (
             status,
-            body["data"]["content"].as_str(),
+            body["data"]["source_markdown"].as_str(),
             body["schema_version"].as_u64()
         ),
-        (StatusCode::OK, Some("ephemeral local context"), Some(1))
+        (StatusCode::OK, Some("ephemeral local context"), Some(2))
     );
     let target = SqliteStore::open_read_only(&server.fixture.database)?
         .load_current_graph(&server.fixture.workspace_name)?
@@ -375,7 +491,7 @@ async fn explore_route_should_return_ephemeral_local_context() -> anyhow::Result
     let impact = Client::new()
         .post(server.url("/v1/tools/impact"))
         .json(&json!({
-            "target": {"kind": "node_id", "value": target},
+            "target": {"node_id": target},
             "direction": "upstream"
         }))
         .send()

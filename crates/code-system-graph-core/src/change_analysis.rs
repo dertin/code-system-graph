@@ -524,7 +524,9 @@ pub fn analyze_changes(
     let mut impacts = Vec::with_capacity(impact_target_ids.len());
     for target in &impact_target_ids {
         let request = ImpactRequest {
-            target: ImpactTarget::NodeId(target.clone()),
+            target: ImpactTarget::NodeId {
+                node_id: target.clone(),
+            },
             direction: options.direction,
             options: ImpactOptions {
                 max_depth: options.max_depth,

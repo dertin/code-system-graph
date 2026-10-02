@@ -181,7 +181,7 @@ fn changed_budgets_should_reextract_and_fail_atomically_without_leaking_literals
     assert!(
         changed_batches
             .iter()
-            .all(|batch| batch.extractor_version == "1.0.0")
+            .all(|batch| batch.extractor_version == "1.1.0")
     );
     drop(changed_store);
 

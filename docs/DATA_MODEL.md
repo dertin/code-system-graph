@@ -186,9 +186,9 @@ Unknown, unavailable, corrupt, or partial inputs never produce a fresh or safe c
 
 ## Schema, locking, and recovery
 
-The definitive 1.0.0 schema version and an opaque database instance identity are recorded in
-`schema_metadata`. The complete SQLite schema must match the initial 1.0.0 definition exactly.
-Any other development schema is rejected with an instruction to remove the disposable database
+The definitive 1.1.0 schema version (`2`) and an opaque database instance identity are recorded in
+`schema_metadata`. The complete SQLite schema must match the 1.1.0 definition exactly. Version 1
+databases from the 1.0.x line and any other development schema are rejected with an instruction to remove the disposable database
 and run a full scan. Operational checkpoints are bound to the instance identity, so a sidecar from
 another or rebuilt database is discarded rather than reused.
 

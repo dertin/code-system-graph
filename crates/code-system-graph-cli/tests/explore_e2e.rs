@@ -6,10 +6,18 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use code_system_graph::{ExploreInput, explore_repository, scan_workspace};
+use code_system_graph_core::ExecutionPolicy;
 use code_system_graph_model::ToolStatus;
 
 fn fake_codegraph(directory: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let binary = directory.join("codegraph-ok");
+    fake_codegraph_mode(directory, "ok")
+}
+
+fn fake_codegraph_mode(
+    directory: &Path,
+    mode: &str,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let binary = directory.join(format!("codegraph-{mode}"));
     std::fs::copy(
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../fixtures/codegraph/fake/codegraph.py"),
@@ -47,19 +55,21 @@ async fn explore_should_default_to_the_only_registered_repository()
         &database,
         "explore-test",
         &ExploreInput {
-            workspace: "explore-test".to_owned(),
+            workspace: Some("explore-test".to_owned()),
             repository: None,
             query: "create_order callers".to_owned(),
-            max_files: 4,
+            max_files: Some(4),
         },
         Some(binary.into_os_string()),
+        &ExecutionPolicy::default(),
     )
     .await;
 
-    assert_eq!(
-        envelope.data.map(|result| result.content),
-        Some("ephemeral local context".to_owned())
-    );
+    let report = envelope.data.ok_or("explore report")?;
+    assert_eq!(report.source_markdown, "ephemeral local context");
+    assert_eq!(report.resolved_symbols.len(), 1);
+    assert_eq!(report.local_relationships.len(), 2);
+    assert_eq!(report.execution.provider_operations, 4);
     Ok(())
 }
 
@@ -75,12 +85,13 @@ async fn explore_should_require_an_alias_for_multi_repository_workspaces()
         &database,
         "commerce-platform",
         &ExploreInput {
-            workspace: "commerce-platform".to_owned(),
+            workspace: Some("commerce-platform".to_owned()),
             repository: None,
             query: "create order".to_owned(),
-            max_files: 4,
+            max_files: Some(4),
         },
         None,
+        &ExecutionPolicy::default(),
     )
     .await;
 
@@ -107,15 +118,58 @@ async fn explore_should_select_an_explicit_alias_in_multi_repository_workspaces(
         &database,
         "commerce-platform",
         &ExploreInput {
-            workspace: "commerce-platform".to_owned(),
+            workspace: Some("commerce-platform".to_owned()),
             repository: Some("api".to_owned()),
             query: "create order".to_owned(),
-            max_files: 4,
+            max_files: Some(4),
         },
         Some(binary.into_os_string()),
+        &ExecutionPolicy::default(),
     )
     .await;
 
     assert!(envelope.data.is_some());
+    Ok(())
+}
+
+#[tokio::test]
+async fn explore_provider_timeout_should_preserve_partial_context_and_return_bounded()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temporary = tempfile::tempdir()?;
+    let (_manifest, database) = mono_repository_fixture(temporary.path())?;
+    let binary = fake_codegraph_mode(temporary.path(), "slow-cli")?;
+    let policy = ExecutionPolicy {
+        // Leave enough time for the source-context stage on slower CI hosts while the fake
+        // symbol query still deterministically exceeds the request-wide deadline.
+        max_explore_wall_time_ms: 500,
+        ..ExecutionPolicy::default()
+    };
+    let started = tokio::time::Instant::now();
+    let envelope = explore_repository(
+        &database,
+        "explore-test",
+        &ExploreInput {
+            workspace: Some("explore-test".to_owned()),
+            repository: None,
+            query: "create_order callers".to_owned(),
+            max_files: Some(4),
+        },
+        Some(binary.into_os_string()),
+        &policy,
+    )
+    .await;
+
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    assert_eq!(envelope.status, ToolStatus::Degraded);
+    let report = envelope.data.ok_or("partial explore report")?;
+    assert_eq!(report.source_markdown, "ephemeral local context");
+    assert!(!report.coverage.symbol_resolution);
+    assert!(
+        report
+            .coverage
+            .gaps
+            .iter()
+            .any(|gap| gap.contains("symbol resolution"))
+    );
     Ok(())
 }

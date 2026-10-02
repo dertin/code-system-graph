@@ -64,13 +64,54 @@ pub enum ImpactClassification {
 }
 
 /// Selector used to resolve exactly one graph target.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case", tag = "kind", content = "value")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case", untagged)]
 pub enum ImpactTarget {
     /// Resolve an exact graph node identifier.
-    NodeId(NodeId),
+    NodeId {
+        /// Exact persisted node identifier returned by query or source context.
+        node_id: NodeId,
+    },
     /// Resolve an exact versioned stable key.
-    StableKey(String),
+    StableKey {
+        /// Exact stable key returned by query or another structured result.
+        stable_key: String,
+    },
+}
+
+impl<'de> Deserialize<'de> for ImpactTarget {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct NodeIdTarget {
+            node_id: NodeId,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct StableKeyTarget {
+            stable_key: String,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum WireTarget {
+            NodeId(NodeIdTarget),
+            StableKey(StableKeyTarget),
+        }
+
+        match WireTarget::deserialize(deserializer)? {
+            WireTarget::NodeId(target) => Ok(Self::NodeId {
+                node_id: target.node_id,
+            }),
+            WireTarget::StableKey(target) => Ok(Self::StableKey {
+                stable_key: target.stable_key,
+            }),
+        }
+    }
 }
 
 /// Exact graph target selected for analysis.
@@ -407,7 +448,7 @@ const fn default_include_depth_buckets() -> bool {
 }
 
 /// Request for one deterministic impact analysis.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct ImpactRequest {
     /// Exact node identifier or stable key selector.
     pub target: ImpactTarget,
@@ -416,6 +457,52 @@ pub struct ImpactRequest {
     /// Traversal and presentation controls.
     #[serde(default)]
     pub options: ImpactOptions,
+}
+
+impl<'de> Deserialize<'de> for ImpactRequest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct WireImpactRequest {
+            #[serde(default)]
+            target: Option<ImpactTarget>,
+            #[serde(default)]
+            node_id: Option<NodeId>,
+            #[serde(default, alias = "key")]
+            stable_key: Option<String>,
+            #[serde(default)]
+            direction: Option<ImpactDirection>,
+            #[serde(default)]
+            options: ImpactOptions,
+        }
+
+        let wire = WireImpactRequest::deserialize(deserializer)?;
+        let selector_count = usize::from(wire.target.is_some())
+            + usize::from(wire.node_id.is_some())
+            + usize::from(wire.stable_key.is_some());
+        if selector_count != 1 {
+            return Err(serde::de::Error::custom(
+                "exactly one of target, node_id, stable_key, or key is required",
+            ));
+        }
+        let target = wire
+            .target
+            .or_else(|| wire.node_id.map(|node_id| ImpactTarget::NodeId { node_id }))
+            .or_else(|| {
+                wire.stable_key
+                    .map(|stable_key| ImpactTarget::StableKey { stable_key })
+            })
+            .ok_or_else(|| {
+                serde::de::Error::missing_field("target, node_id, stable_key, or key")
+            })?;
+        Ok(Self {
+            target,
+            direction: wire.direction.unwrap_or(ImpactDirection::Both),
+            options: wire.options,
+        })
+    }
 }
 
 /// Compatibility classification supplied to the impact engine.
@@ -848,14 +935,14 @@ fn resolve_target(
     nodes: &BTreeMap<NodeId, &Node>,
 ) -> Result<ResolvedTarget, ImpactError> {
     match selector {
-        ImpactTarget::NodeId(node_id) => nodes
+        ImpactTarget::NodeId { node_id } => nodes
             .get(node_id)
             .map(|node| ResolvedTarget {
                 node: (*node).clone(),
                 resolved_by: "node_id".to_owned(),
             })
             .ok_or(ImpactError::UnknownTarget),
-        ImpactTarget::StableKey(stable_key) => {
+        ImpactTarget::StableKey { stable_key } => {
             let mut matches = nodes.values().filter(|node| node.stable_key == *stable_key);
             let Some(node) = matches.next() else {
                 return Err(ImpactError::UnknownTarget);
@@ -902,6 +989,7 @@ fn traverse(
         if depth == request.options.max_depth {
             if neighbors.iter().any(|entry| {
                 is_propagating(entry.edge.kind)
+                    && !is_structural_direction_pivot(&state.path, entry)
                     && !state.path.iter().any(|step| step.from == entry.neighbor)
             }) {
                 truncation.get_or_insert_with(|| TruncationInfo {
@@ -915,7 +1003,8 @@ fn traverse(
             continue;
         }
         for entry in neighbors {
-            if !is_propagating(entry.edge.kind) {
+            if !is_propagating(entry.edge.kind) || is_structural_direction_pivot(&state.path, entry)
+            {
                 continue;
             }
             examined_edges = examined_edges.saturating_add(1);
@@ -1009,6 +1098,14 @@ fn traverse(
         possible_edges,
         unknown_edges,
     ))
+}
+
+fn is_structural_direction_pivot(path: &[ImpactPathStep], next: &Adjacency<'_>) -> bool {
+    path.last().is_some_and(|previous| {
+        previous.kind == EdgeKind::Contains
+            && next.edge.kind == EdgeKind::Contains
+            && previous.reversed != next.reversed
+    })
 }
 
 fn build_adjacency(
@@ -1998,7 +2095,9 @@ mod tests {
 
     fn request(target: &str, direction: ImpactDirection) -> ImpactRequest {
         ImpactRequest {
-            target: ImpactTarget::NodeId(NodeId::new(target)),
+            target: ImpactTarget::NodeId {
+                node_id: NodeId::new(target),
+            },
             direction,
             options: ImpactOptions::default(),
         }
@@ -2141,6 +2240,35 @@ mod tests {
         let report = analyze(&context, ImpactDirection::Both);
 
         assert_eq!(report.coverage.total_items, 2);
+    }
+
+    #[test]
+    fn both_direction_should_not_treat_structural_siblings_as_impacted() {
+        let mut contains_target = edge("contains-target", "artifact", "target");
+        contains_target.kind = EdgeKind::Contains;
+        let mut contains_sibling = edge("contains-sibling", "artifact", "sibling");
+        contains_sibling.kind = EdgeKind::Contains;
+        let mut reads_sibling = edge("reads-sibling", "reader", "sibling");
+        reads_sibling.kind = EdgeKind::ReadsTable;
+        let context = context(
+            vec![
+                node("target", NodeKind::DatabaseTable, "schema"),
+                node("artifact", NodeKind::Artifact, "schema"),
+                node("sibling", NodeKind::DatabaseTable, "schema"),
+                node("reader", NodeKind::SymbolRef, "consumer"),
+            ],
+            vec![contains_target, contains_sibling, reads_sibling],
+        );
+
+        let report = analyze(&context, ImpactDirection::Both);
+        let impacted = report
+            .direct_consumers
+            .iter()
+            .chain(&report.transitive_consumers)
+            .map(|item| item.node.id.as_str())
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(impacted, BTreeSet::from(["artifact"]));
     }
 
     #[test]

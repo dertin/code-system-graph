@@ -19,7 +19,7 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use code_system_graph_core::{
-    ChangeAnalysisOptions, ImpactReport, ImpactRequest, LocalContextResult, SearchReport
+    ChangeAnalysisOptions, ExecutionPolicy, ImpactReport, ImpactRequest, SearchReport
 };
 use code_system_graph_model::{
     FreshnessSummary, NodeKind, OverallFreshness, RepoId, ToolEnvelope, ToolStatus
@@ -34,7 +34,7 @@ use tokio_util::sync::CancellationToken;
 use tower_http::sensitive_headers::SetSensitiveRequestHeadersLayer;
 
 use crate::{
-    ApplicationError, CODEGRAPH_DISABLED_CODE, CODEGRAPH_DISABLED_MESSAGE, ChangesInput, CommunityInput, CommunityReport, ExploreInput, SearchInput, TraceInput, analyze_workspace_changes, communities_workspace, explore_repository, impact_workspace, impact_workspace_with_codegraph, search_workspace, status_workspace, trace_workspace
+    ApplicationError, CODEGRAPH_DISABLED_CODE, CODEGRAPH_DISABLED_MESSAGE, ChangesInput, CommunityInput, CommunityReport, ExploreInput, ExploreReport, QueryActionCapabilities, SearchInput, TraceInput, analyze_workspace_changes, communities_workspace, explore_repository, impact_workspace, impact_workspace_with_codegraph, search_workspace_for_delivery, status_workspace, trace_workspace
 };
 
 /// Default loopback address used by optional HTTP delivery.
@@ -48,7 +48,7 @@ const RATE_LIMIT_REQUESTS: u32 = 60;
 const RATE_LIMIT_WINDOW: Duration = Duration::from_mins(1);
 const MAX_RATE_LIMIT_CLIENTS: usize = 4096;
 const MAX_TOKEN_BYTES: usize = 4096;
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 
 const VERSION_HEADER: HeaderName = HeaderName::from_static("x-code-system-graph-version");
 const SCHEMA_HEADER: HeaderName = HeaderName::from_static("x-code-system-graph-schema-version");
@@ -143,6 +143,8 @@ pub struct HttpServerConfig {
     pub codegraph_enabled: bool,
     /// Optional explicit `CodeGraph` executable used by local exploration and impact enrichment.
     pub codegraph_binary: Option<OsString>,
+    /// Immutable effective workspace policy shared by all handlers.
+    pub execution_policy: ExecutionPolicy,
 }
 
 impl HttpServerConfig {
@@ -161,6 +163,7 @@ impl HttpServerConfig {
             bearer_token: None,
             codegraph_enabled: false,
             codegraph_binary: None,
+            execution_policy: ExecutionPolicy::default(),
         }
     }
 
@@ -183,6 +186,13 @@ impl HttpServerConfig {
     pub fn with_codegraph(mut self, enabled: bool, binary: Option<OsString>) -> Self {
         self.codegraph_enabled = enabled;
         self.codegraph_binary = binary;
+        self
+    }
+
+    /// Applies the validated immutable workspace execution policy.
+    #[must_use]
+    pub fn with_execution_policy(mut self, policy: ExecutionPolicy) -> Self {
+        self.execution_policy = policy;
         self
     }
 
@@ -469,7 +479,7 @@ fn secure_response(mut response: Response) -> Response {
         VERSION_HEADER,
         HeaderValue::from_static(env!("CARGO_PKG_VERSION")),
     );
-    headers.insert(SCHEMA_HEADER, HeaderValue::from_static("1"));
+    headers.insert(SCHEMA_HEADER, HeaderValue::from_static("2"));
     headers.insert(X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
     headers.insert(X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
     headers.insert(REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
@@ -547,8 +557,19 @@ async fn query(
     };
     let config = Arc::clone(&state.config);
     tool_service_response(
-        run_blocking(move || search_workspace(&config.database_path, &config.workspace, &input))
-            .await,
+        run_blocking(move || {
+            search_workspace_for_delivery(
+                &config.database_path,
+                &config.workspace,
+                &input,
+                &config.execution_policy,
+                QueryActionCapabilities {
+                    source_context: false,
+                    explore: config.codegraph_enabled,
+                },
+            )
+        })
+        .await,
     )
 }
 
@@ -582,11 +603,12 @@ async fn explore(
         Ok(input) => input,
         Err(rejection) => return json_rejection_response(&rejection),
     };
-    let envelope: ToolEnvelope<LocalContextResult> = explore_repository(
+    let envelope: ToolEnvelope<ExploreReport> = explore_repository(
         &state.config.database_path,
         &state.config.workspace,
         &input,
         state.config.codegraph_binary.clone(),
+        &state.config.execution_policy,
     )
     .await;
     success_response(envelope)
@@ -662,9 +684,19 @@ async fn contracts(
         limit: input.limit,
     };
     let config = Arc::clone(&state.config);
-    let result: Result<ToolEnvelope<SearchReport>, ToolFailure> =
-        run_blocking(move || search_workspace(&config.database_path, &config.workspace, &search))
-            .await;
+    let result: Result<ToolEnvelope<SearchReport>, ToolFailure> = run_blocking(move || {
+        search_workspace_for_delivery(
+            &config.database_path,
+            &config.workspace,
+            &search,
+            &config.execution_policy,
+            QueryActionCapabilities {
+                source_context: false,
+                explore: config.codegraph_enabled,
+            },
+        )
+    })
+    .await;
     tool_service_response(result)
 }
 

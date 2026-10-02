@@ -343,7 +343,7 @@ pub fn create_agent_plugin(
             ),
         };
     let binding = AgentPluginMcpBinding {
-        schema_version: 1,
+        schema_version: 2,
         generator: BINDING_GENERATOR.to_owned(),
         generator_build: Some(generator_build_metadata()?),
         base_plugin_name: plugin_name.clone(),
@@ -377,7 +377,7 @@ pub fn create_agent_plugin(
     };
 
     Ok(AgentPluginCreateReport {
-        schema_version: 1,
+        schema_version: 2,
         mode,
         workspace: status.workspace,
         plugin_name,
@@ -449,7 +449,7 @@ pub fn load_agent_plugin_mcp_binding(
         file: "mcp-binding.json",
         source,
     })?;
-    if binding.schema_version != 1 || !recognized_binding_generator(&binding.generator) {
+    if binding.schema_version != 2 || !recognized_binding_generator(&binding.generator) {
         return Err(conflict(
             &path,
             "binding ownership identity is not recognized",

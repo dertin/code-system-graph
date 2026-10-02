@@ -44,7 +44,7 @@ csgraph plugin create \
 Omit `--codegraph` to keep `explore` unavailable, or add
 `--codegraph-binary /absolute/path/to/codegraph` with the opt-in flag. Generation requires a valid
 manifest and an existing matching snapshot. Stale snapshots are allowed and reported. `csgraph
-1.0.3` must be in the client's `PATH`, and no platform binary is bundled. Repeating the command is a
+1.1.0` must be in the client's `PATH`, and no platform binary is bundled. Repeating the command is a
 no-op only for an exactly identical directory; conflicts, additional files, and symlinks fail
 without partial writes.
 
@@ -208,6 +208,7 @@ Register a project-local stdio server:
 ```bash
 claude mcp add code-system-graph --scope local -- \
   csgraph mcp \
+  --config /absolute/path/to/workspace/code-system-graph.yaml \
   --codegraph \
   --workspace commerce \
   --database /absolute/path/to/workspace/.code-system-graph/code-system-graph.db
@@ -228,6 +229,7 @@ Register the server:
 ```bash
 codex mcp add code-system-graph -- \
   csgraph mcp \
+  --config /absolute/path/to/workspace/code-system-graph.yaml \
   --codegraph \
   --workspace commerce \
   --database /absolute/path/to/workspace/.code-system-graph/code-system-graph.db
@@ -249,6 +251,7 @@ For a project-scoped setup, Codex also accepts `.codex/config.toml` in a trusted
 command = "csgraph"
 args = [
   "mcp",
+  "--config", "/absolute/path/to/workspace/code-system-graph.yaml",
   "--codegraph",
   "--workspace", "commerce",
   "--database", "/absolute/path/to/workspace/.code-system-graph/code-system-graph.db",
@@ -262,6 +265,7 @@ Register a project-scoped server:
 ```bash
 gemini mcp add --scope project code-system-graph \
   csgraph mcp \
+  --config /absolute/path/to/workspace/code-system-graph.yaml \
   --codegraph \
   --workspace commerce \
   --database /absolute/path/to/workspace/.code-system-graph/code-system-graph.db
@@ -286,6 +290,8 @@ Create or merge `.agents/mcp_config.json` in the workspace:
       "command": "csgraph",
       "args": [
         "mcp",
+        "--config",
+        "/absolute/path/to/workspace/code-system-graph.yaml",
         "--codegraph",
         "--workspace",
         "commerce",
@@ -314,6 +320,8 @@ workspace. An absolute database path identifies the snapshot but does not make t
       "command": "/absolute/path/to/bin/csgraph",
       "args": [
         "mcp",
+        "--config",
+        "/absolute/path/to/workspace/code-system-graph.yaml",
         "--codegraph",
         "--workspace",
         "commerce",
@@ -421,7 +429,7 @@ See [MCP reference](MCP.md) for every tool, resource, limit, and administrative 
 
 If the server is absent or disconnected:
 
-1. run `csgraph mcp --workspace ... --database ...` directly and check stderr;
+1. run `csgraph mcp --config ... --workspace ... --database ...` directly and check stderr;
 2. verify that the agent can resolve `csgraph` on its `PATH`;
 3. replace relative database paths with absolute paths;
 4. confirm the workspace name matches the scanned snapshot;

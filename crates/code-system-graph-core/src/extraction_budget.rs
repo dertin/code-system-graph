@@ -7,8 +7,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-/// Definitive initial extraction payload contract.
-pub const EXTRACTION_CONTRACT_VERSION: &str = "1.0.0";
+/// Extraction payload/cache contract for the 1.1 source and relationship semantics.
+pub const EXTRACTION_CONTRACT_VERSION: &str = "1.1.0";
 
 /// Default maximum input bytes accepted for one artifact-extractor invocation.
 pub const DEFAULT_MAX_INPUT_BYTES_PER_ARTIFACT: u64 = 8_388_608;

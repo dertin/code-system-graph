@@ -4,7 +4,7 @@ default-members = ["crates/*"]
 resolver = "3"
 
 [workspace.package]
-version = "1.0.3"
+version = "1.1.0"
 edition = "2024"
 rust-version = "1.97.1"
 description = "Local cross-repository code intelligence and dependency graph for impact analysis and AI coding agents."

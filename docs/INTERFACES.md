@@ -20,7 +20,8 @@ pull-request listing and overlap, contracts, bounded graph export, doctor diagno
 workspace cleanup, hooks, HTTP serving, and shell completions. Scan supports normal changed-input
 reuse, one-repository selection that preserves other persisted batches, and explicit forced
 recomputation.
-Structured commands emit one JSON document on stdout; diagnostics use stderr. Graph export emits
+Structured commands emit one schema-v2 JSON document on stdout; diagnostics use stderr. `explore`
+returns `ToolEnvelope<ExploreReport>` like the other typed HTTP/CLI tools. Graph export emits
 the selected complete JSON, GraphML, or Markdown document. Interface failures use stable exit-code
 classes for invalid input, not found, conflicts, partial results, unavailable capabilities,
 timeouts, internal errors, and cancellation.
@@ -29,7 +30,9 @@ timeouts, internal errors, and cancellation.
 
 The read-only catalog covers status, query, trace, impact, changes, contracts, communities,
 source-context handoff, and explicitly consented pull-request inspection. Inputs have generated
-JSON schemas and non-overridable server bounds.
+JSON input schemas and non-overridable server bounds. Each call result contains one human-oriented
+Markdown text block plus typed `structuredContent` as its complete machine-readable mirror; no
+result `outputSchema` is advertised.
 
 Stable resources:
 
@@ -42,10 +45,14 @@ Stable resources:
 - `code-system-graph://workspace/{name}/communities`
 - `code-system-graph://workspace/{name}/schema`
 - `code-system-graph://workspace/{name}/coverage`
+
+Resource template, advertised through `resources/templates/list`:
+
 - `code-system-graph://evidence/{id}`
 
 The server rejects resource access outside its configured workspace. Lists and resource payloads
-are bounded and source-free. Evidence resources contain identity, provenance, confidence,
+are bounded `text/markdown` and source-free. The schema catalog uses fenced JSON inside Markdown.
+Evidence resources contain identity, provenance, confidence,
 locators, extractor version, and observed commit only.
 
 Administrative tools are omitted from discovery unless the server starts in the explicit admin
@@ -81,8 +88,9 @@ alias and exact staged state; advisory mode fails open.
 
 ## Deliberate limits
 
-- No delivery adapter returns source bodies, secrets, provider patches, or raw provider responses.
+- No delivery adapter returns source bodies except the explicitly ephemeral `explore` contract;
+  secrets, provider patches, and raw provider responses are never returned.
 - GraphML and Markdown exports are deterministic views, not import or round-trip formats.
 - Doctor reports unknown when an observation is absent; absence never becomes healthy.
-- HTTP does not expose administrative, pull-request, or source-context routes in 1.0.0.
+- HTTP does not expose administrative, pull-request, or source-context routes in 1.1.0.
 - Hook guidance cannot guarantee that a host follows the suggested provider routing.

@@ -261,12 +261,12 @@ fn spawn_watch_event_reader(
                 return;
             };
             match message {
-                WatchEventMessage::Ready { schema_version: 1 } => {
+                WatchEventMessage::Ready { schema_version: 2 } => {
                     current.initial_ready = true;
                     current.refresh_started = None;
                 }
                 WatchEventMessage::Dirty {
-                    schema_version: 1,
+                    schema_version: 2,
                     refresh_scope,
                 } => {
                     current.refresh_started.get_or_insert_with(Instant::now);
@@ -634,10 +634,10 @@ pub(crate) async fn run_watch_event_worker(
         requested_poll,
         &policy,
     )?;
-    emit_watch_event(&WatchEventMessage::Ready { schema_version: 1 })?;
+    emit_watch_event(&WatchEventMessage::Ready { schema_version: 2 })?;
     while let Some(signal) = receiver.recv().await {
         emit_watch_event(&WatchEventMessage::Dirty {
-            schema_version: 1,
+            schema_version: 2,
             refresh_scope: scope_refresh_required.swap(false, Ordering::AcqRel),
         })?;
         let refresh = refresh_required.swap(false, Ordering::AcqRel)
@@ -658,7 +658,7 @@ pub(crate) async fn run_watch_event_worker(
                 }
             }
         }
-        emit_watch_event(&WatchEventMessage::Ready { schema_version: 1 })?;
+        emit_watch_event(&WatchEventMessage::Ready { schema_version: 2 })?;
     }
     anyhow::bail!("filesystem event channel stopped")
 }
@@ -947,7 +947,7 @@ fn emit_sync(
     println!(
         "{}",
         serde_json::to_string(&WatchOutput::SyncResult {
-            schema_version: 1,
+            schema_version: 2,
             summary: &summary,
         })?
     );
@@ -1130,7 +1130,7 @@ fn finish_and_emit(
     println!(
         "{}",
         serde_json::to_string(&WatchOutput::Termination {
-            schema_version: 1,
+            schema_version: 2,
             state,
             detail: &bounded_detail,
         })?
@@ -1482,8 +1482,8 @@ mod tests {
             failed: false,
         }));
         let input = concat!(
-            "{\"type\":\"dirty\",\"schema_version\":1}\n",
-            "{\"type\":\"ready\",\"schema_version\":1}\n"
+            "{\"type\":\"dirty\",\"schema_version\":2}\n",
+            "{\"type\":\"ready\",\"schema_version\":2}\n"
         );
         spawn_watch_event_reader(
             std::io::Cursor::new(input.as_bytes().to_vec()),
@@ -1519,8 +1519,8 @@ mod tests {
             failed: false,
         }));
         let input = concat!(
-            "{\"type\":\"dirty\",\"schema_version\":1}\n",
-            "{\"type\":\"dirty\",\"schema_version\":1}\n"
+            "{\"type\":\"dirty\",\"schema_version\":2}\n",
+            "{\"type\":\"dirty\",\"schema_version\":2}\n"
         );
         spawn_watch_event_reader(
             std::io::Cursor::new(input.as_bytes().to_vec()),

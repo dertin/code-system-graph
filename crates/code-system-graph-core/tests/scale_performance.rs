@@ -56,7 +56,9 @@ fn scale_workload_should_meet_release_candidate_latency_targets() {
         timed(|| {
             let report = analyze_impact(
                 &ImpactRequest {
-                    target: ImpactTarget::NodeId(NodeId::new("node:0")),
+                    target: ImpactTarget::NodeId {
+                        node_id: NodeId::new("node:0"),
+                    },
                     direction: ImpactDirection::Downstream,
                     options: ImpactOptions {
                         max_depth: 1,

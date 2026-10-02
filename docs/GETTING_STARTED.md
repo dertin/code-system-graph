@@ -151,6 +151,7 @@ Search is the usual entry point:
 
 ```bash
 csgraph query "orders" \
+  --config code-system-graph.yaml \
   --workspace my-project \
   --database .code-system-graph/code-system-graph.db
 ```
@@ -179,6 +180,7 @@ The MCP server runs over stdio and is started by the agent when needed:
 
 ```bash
 csgraph mcp \
+  --config code-system-graph.yaml \
   --codegraph \
   --workspace my-project \
   --database .code-system-graph/code-system-graph.db
@@ -190,6 +192,7 @@ example, Codex can write its configuration with:
 ```bash
 codex mcp add code-system-graph -- \
   csgraph mcp \
+  --config /absolute/path/to/my-project/code-system-graph.yaml \
   --codegraph \
   --workspace my-project \
   --database /absolute/path/to/my-project/.code-system-graph/code-system-graph.db

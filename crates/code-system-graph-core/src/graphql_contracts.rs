@@ -2747,7 +2747,7 @@ fn extract_java_resolvers(
         };
         let field = field_override.unwrap_or_else(|| method.clone());
         let symbol = if class_name.is_empty() {
-            method.clone()
+            method
         } else {
             format!("{class_name}.{method}")
         };

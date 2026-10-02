@@ -1,8 +1,22 @@
+use std::collections::{BTreeMap, BTreeSet};
+
 use code_system_graph_model::{
     Edge, EdgeId, EdgeKind, EpistemicStatus, Evidence, EvidenceId, Node, NodeId, NodeKind, Provenance, RepoId, stable_id
 };
 
 use crate::{EventBroker, EventDocument, EventObservation, EventRole};
+
+const EVENT_DELIVERY_EVIDENCE_LIMIT: usize = 16;
+
+#[derive(Clone)]
+struct EventObservationAggregate {
+    status: EpistemicStatus,
+    confidence: f32,
+    evidence: BTreeSet<EvidenceId>,
+    evidence_truncated: bool,
+}
+
+type EventObservationsByChannel = BTreeMap<NodeId, BTreeMap<RepoId, EventObservationAggregate>>;
 
 /// Graph facts assembled from workspace-wide event declarations and source observations.
 #[derive(Debug, Clone, Default)]
@@ -13,6 +27,243 @@ pub struct EventGraphFacts {
     pub edges: Vec<Edge>,
     /// Direct contract and source-call evidence.
     pub evidence: Vec<Evidence>,
+}
+
+/// Canonical repository-to-repository delivery inferred from observed publisher and subscriber
+/// edges that share one exact event-channel identity.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EventDeliveryProjection {
+    /// Shared event channel.
+    pub channel_id: NodeId,
+    /// Human-readable channel label.
+    pub channel_label: String,
+    /// Whether broker namespace/cluster identity was observed for the channel.
+    pub namespace_known: bool,
+    /// Unambiguous repository that publishes the event.
+    pub publisher_repository: RepoId,
+    /// Unambiguous repository that subscribes to the event.
+    pub subscriber_repository: RepoId,
+    /// Most conservative epistemic status among the contributing observations.
+    pub status: EpistemicStatus,
+    /// Lowest confidence among the contributing observations.
+    pub confidence: f32,
+    /// Union of evidence supporting the contributing observations.
+    pub evidence: Vec<EvidenceId>,
+    /// Whether additional supporting evidence was omitted by the projection bound.
+    pub evidence_truncated: bool,
+}
+
+/// Bounded result of projecting repository-to-repository event deliveries.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EventDeliveryProjectionReport {
+    /// Canonical deliveries retained within the caller's limit.
+    pub deliveries: Vec<EventDeliveryProjection>,
+    /// Exact number of repository/channel pairs available before the limit.
+    pub total: usize,
+    /// Whether complete deliveries were omitted by the caller's limit.
+    pub truncated: bool,
+    /// Whether cooperative cancellation stopped projection early.
+    pub cancelled: bool,
+}
+
+/// Projects canonical event deliveries from exact publish/subscribe channel joins.
+///
+/// Nodes without a unique repository owner are intentionally excluded. Multiple observations for
+/// the same repository pair and channel are merged, retaining conservative status and all evidence.
+#[must_use]
+pub fn project_event_deliveries<'a>(
+    nodes: impl IntoIterator<Item = &'a Node>,
+    edges: &[Edge],
+    owners: &BTreeMap<NodeId, RepoId>,
+) -> Vec<EventDeliveryProjection> {
+    project_event_deliveries_bounded(nodes, edges, owners, usize::MAX, || false).deliveries
+}
+
+/// Projects event deliveries after first collapsing duplicate observations per repository.
+///
+/// Aggregating before joining changes the adversarial work from observation-level `P × S` to
+/// repository-level pairs. `limit` bounds retained pairs and `cancelled` permits callers with a
+/// request deadline to stop long scans without returning unmarked partial data.
+#[must_use]
+pub fn project_event_deliveries_bounded<'a>(
+    nodes: impl IntoIterator<Item = &'a Node>,
+    edges: &[Edge],
+    owners: &BTreeMap<NodeId, RepoId>,
+    limit: usize,
+    mut cancelled: impl FnMut() -> bool,
+) -> EventDeliveryProjectionReport {
+    let channels = nodes
+        .into_iter()
+        .filter(|node| node.kind == NodeKind::EventChannel)
+        .map(|node| {
+            (
+                node.id.clone(),
+                (node.label.clone(), event_channel_has_namespace(node)),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let Some((publishers, subscribers)) =
+        aggregate_event_observations(edges, owners, &channels, &mut cancelled)
+    else {
+        return EventDeliveryProjectionReport {
+            deliveries: Vec::new(),
+            total: 0,
+            truncated: false,
+            cancelled: true,
+        };
+    };
+    join_event_observations(publishers, &subscribers, &channels, limit, &mut cancelled)
+}
+
+fn aggregate_event_observations(
+    edges: &[Edge],
+    owners: &BTreeMap<NodeId, RepoId>,
+    channels: &BTreeMap<NodeId, (String, bool)>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Option<(EventObservationsByChannel, EventObservationsByChannel)> {
+    let mut publishers = EventObservationsByChannel::new();
+    let mut subscribers = EventObservationsByChannel::new();
+    for edge in edges {
+        if cancelled() {
+            return None;
+        }
+        let Some(repository) = owners.get(&edge.source) else {
+            continue;
+        };
+        let observations = match edge.kind {
+            EdgeKind::Publishes if channels.contains_key(&edge.target) => &mut publishers,
+            EdgeKind::Subscribes if channels.contains_key(&edge.target) => &mut subscribers,
+            _ => continue,
+        };
+        let aggregate = observations
+            .entry(edge.target.clone())
+            .or_default()
+            .entry(repository.clone())
+            .or_insert_with(|| EventObservationAggregate {
+                status: edge.status,
+                confidence: edge.confidence,
+                evidence: BTreeSet::new(),
+                evidence_truncated: false,
+            });
+        aggregate.status = conservative_status(aggregate.status, edge.status);
+        aggregate.confidence = aggregate.confidence.min(edge.confidence);
+        for evidence in &edge.evidence {
+            aggregate.evidence.insert(evidence.clone());
+            if aggregate.evidence.len() > EVENT_DELIVERY_EVIDENCE_LIMIT {
+                aggregate.evidence_truncated = true;
+                let _ = aggregate.evidence.pop_last();
+            }
+        }
+    }
+    Some((publishers, subscribers))
+}
+
+fn join_event_observations(
+    publishers: EventObservationsByChannel,
+    subscribers: &EventObservationsByChannel,
+    channels: &BTreeMap<NodeId, (String, bool)>,
+    limit: usize,
+    cancelled: &mut impl FnMut() -> bool,
+) -> EventDeliveryProjectionReport {
+    let total = publishers
+        .iter()
+        .filter_map(|(channel_id, publisher_repositories)| {
+            subscribers.get(channel_id).map(|subscriber_repositories| {
+                publisher_repositories
+                    .len()
+                    .saturating_mul(subscriber_repositories.len())
+            })
+        })
+        .fold(0_usize, usize::saturating_add);
+    let mut deliveries = Vec::with_capacity(total.min(limit));
+    for (channel_id, publisher_repositories) in publishers {
+        let Some(subscriber_repositories) = subscribers.get(&channel_id) else {
+            continue;
+        };
+        for (publisher_repository, publisher) in publisher_repositories {
+            for (subscriber_repository, subscriber) in subscriber_repositories {
+                if cancelled() {
+                    return EventDeliveryProjectionReport {
+                        deliveries,
+                        total,
+                        truncated: true,
+                        cancelled: true,
+                    };
+                }
+                if deliveries.len() == limit {
+                    return EventDeliveryProjectionReport {
+                        deliveries,
+                        total,
+                        truncated: true,
+                        cancelled: false,
+                    };
+                }
+                let (channel_label, has_namespace) =
+                    channels.get(&channel_id).cloned().unwrap_or_default();
+                let mut evidence = publisher
+                    .evidence
+                    .union(&subscriber.evidence)
+                    .take(EVENT_DELIVERY_EVIDENCE_LIMIT + 1)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let evidence_truncated = publisher.evidence_truncated
+                    || subscriber.evidence_truncated
+                    || evidence.len() > EVENT_DELIVERY_EVIDENCE_LIMIT;
+                evidence.truncate(EVENT_DELIVERY_EVIDENCE_LIMIT);
+                let observed_status = conservative_status(publisher.status, subscriber.status);
+                deliveries.push(EventDeliveryProjection {
+                    channel_label,
+                    channel_id: channel_id.clone(),
+                    namespace_known: has_namespace,
+                    publisher_repository: publisher_repository.clone(),
+                    subscriber_repository: subscriber_repository.clone(),
+                    status: if has_namespace {
+                        observed_status
+                    } else {
+                        conservative_status(observed_status, EpistemicStatus::Ambiguous)
+                    },
+                    confidence: if has_namespace {
+                        publisher.confidence.min(subscriber.confidence)
+                    } else {
+                        publisher.confidence.min(subscriber.confidence).min(0.5)
+                    },
+                    evidence,
+                    evidence_truncated,
+                });
+            }
+        }
+    }
+    EventDeliveryProjectionReport {
+        truncated: deliveries.len() < total,
+        deliveries,
+        total,
+        cancelled: false,
+    }
+}
+
+fn event_channel_has_namespace(node: &Node) -> bool {
+    node.stable_key
+        .strip_prefix("event:")
+        .and_then(|identity| identity.split_once(':'))
+        .and_then(|(_, identity)| identity.split_once(':'))
+        .is_some_and(|(namespace, _)| !namespace.is_empty())
+}
+
+fn conservative_status(left: EpistemicStatus, right: EpistemicStatus) -> EpistemicStatus {
+    const fn severity(status: EpistemicStatus) -> u8 {
+        match status {
+            EpistemicStatus::Confirmed => 0,
+            EpistemicStatus::Inferred => 1,
+            EpistemicStatus::Ambiguous => 2,
+            EpistemicStatus::Stale => 3,
+            EpistemicStatus::Incomplete => 4,
+        }
+    }
+    if severity(left) >= severity(right) {
+        left
+    } else {
+        right
+    }
 }
 
 struct EventEndpoint {
@@ -325,9 +576,15 @@ fn finish(result: &mut EventGraphFacts) {
 
 #[cfg(test)]
 mod tests {
-    use code_system_graph_model::{EdgeKind, RepoId};
+    use std::collections::BTreeMap;
 
-    use super::event_documents_to_graph;
+    use code_system_graph_model::{
+        Edge, EdgeId, EdgeKind, EpistemicStatus, EvidenceId, Node, NodeId, NodeKind, RepoId
+    };
+
+    use super::{
+        event_documents_to_graph, project_event_deliveries, project_event_deliveries_bounded
+    };
     use crate::{SourceLanguage, extract_asyncapi, parse_event_source};
 
     #[test]
@@ -369,5 +626,162 @@ channels:
                     .into_iter()
                     .all(|kind| facts.edges.iter().any(|edge| edge.kind == kind))
         ));
+    }
+
+    #[test]
+    fn event_delivery_projection_merges_duplicate_observations_conservatively() {
+        let channel = Node {
+            id: NodeId::new("channel"),
+            kind: NodeKind::EventChannel,
+            repo_id: None,
+            stable_key: "event:Kafka:cluster-a:orders".to_owned(),
+            label: "orders.created".to_owned(),
+        };
+        let owners = BTreeMap::from([
+            (NodeId::new("publisher"), RepoId::new("repo:api")),
+            (NodeId::new("subscriber"), RepoId::new("repo:worker")),
+        ]);
+        let event_edge = |id: &str,
+                          source: &str,
+                          kind: EdgeKind,
+                          status: EpistemicStatus,
+                          confidence: f32,
+                          evidence: &str| Edge {
+            id: EdgeId::new(id),
+            source: NodeId::new(source),
+            target: NodeId::new("channel"),
+            kind,
+            confidence,
+            status,
+            evidence: vec![EvidenceId::new(evidence)],
+        };
+        let edges = vec![
+            event_edge(
+                "publish-a",
+                "publisher",
+                EdgeKind::Publishes,
+                EpistemicStatus::Confirmed,
+                0.9,
+                "evidence:a",
+            ),
+            event_edge(
+                "publish-b",
+                "publisher",
+                EdgeKind::Publishes,
+                EpistemicStatus::Inferred,
+                0.7,
+                "evidence:b",
+            ),
+            event_edge(
+                "subscribe",
+                "subscriber",
+                EdgeKind::Subscribes,
+                EpistemicStatus::Confirmed,
+                0.8,
+                "evidence:c",
+            ),
+        ];
+
+        let projections = project_event_deliveries(&[channel], &edges, &owners);
+
+        assert_eq!(projections.len(), 1);
+        assert_eq!(projections[0].status, EpistemicStatus::Inferred);
+        assert!((projections[0].confidence - 0.7).abs() < f32::EPSILON);
+        assert_eq!(projections[0].evidence.len(), 3);
+    }
+
+    #[test]
+    fn event_delivery_projection_aggregates_before_a_bounded_repository_join() {
+        let channel = Node {
+            id: NodeId::new("channel"),
+            kind: NodeKind::EventChannel,
+            repo_id: None,
+            stable_key: "event:Kafka:cluster-a:shared".to_owned(),
+            label: "shared.event".to_owned(),
+        };
+        let mut owners = BTreeMap::new();
+        let mut edges = Vec::new();
+        for index in 0..100 {
+            for (role, kind) in [
+                ("publisher", EdgeKind::Publishes),
+                ("subscriber", EdgeKind::Subscribes),
+            ] {
+                let source = format!("{role}:{index}");
+                owners.insert(
+                    NodeId::new(&source),
+                    RepoId::new(format!("repo:{role}:{index}")),
+                );
+                edges.push(Edge {
+                    id: EdgeId::new(format!("edge:{role}:{index}")),
+                    source: NodeId::new(source),
+                    target: NodeId::new("channel"),
+                    kind,
+                    confidence: 1.0,
+                    status: EpistemicStatus::Confirmed,
+                    evidence: Vec::new(),
+                });
+            }
+        }
+
+        let mut cancellation_checks = 0_usize;
+        let report = project_event_deliveries_bounded(&[channel], &edges, &owners, 32, || {
+            cancellation_checks += 1;
+            false
+        });
+
+        assert_eq!(report.total, 10_000);
+        assert_eq!(report.deliveries.len(), 32);
+        assert!(report.truncated);
+        assert!(!report.cancelled);
+        assert!(cancellation_checks <= edges.len() + report.deliveries.len() + 1);
+    }
+
+    #[test]
+    fn event_delivery_without_namespace_is_ambiguous_and_evidence_is_bounded() {
+        let channel = Node {
+            id: NodeId::new("channel"),
+            kind: NodeKind::EventChannel,
+            repo_id: None,
+            stable_key: "event:Kafka::orders".to_owned(),
+            label: "orders".to_owned(),
+        };
+        let owners = BTreeMap::from([
+            (NodeId::new("publisher"), RepoId::new("repo:api")),
+            (NodeId::new("subscriber"), RepoId::new("repo:worker")),
+        ]);
+        let evidence = (0..100)
+            .map(|index| EvidenceId::new(format!("evidence:{index:03}")))
+            .collect::<Vec<_>>();
+        let edges = vec![
+            Edge {
+                id: EdgeId::new("publish"),
+                source: NodeId::new("publisher"),
+                target: NodeId::new("channel"),
+                kind: EdgeKind::Publishes,
+                confidence: 1.0,
+                status: EpistemicStatus::Confirmed,
+                evidence: evidence.clone(),
+            },
+            Edge {
+                id: EdgeId::new("subscribe"),
+                source: NodeId::new("subscriber"),
+                target: NodeId::new("channel"),
+                kind: EdgeKind::Subscribes,
+                confidence: 1.0,
+                status: EpistemicStatus::Confirmed,
+                evidence,
+            },
+        ];
+
+        let deliveries = project_event_deliveries(&[channel], &edges, &owners);
+
+        assert_eq!(deliveries.len(), 1);
+        assert_eq!(deliveries[0].status, EpistemicStatus::Ambiguous);
+        assert!((deliveries[0].confidence - 0.5).abs() < f32::EPSILON);
+        assert_eq!(
+            deliveries[0].evidence.len(),
+            super::EVENT_DELIVERY_EVIDENCE_LIMIT
+        );
+        assert!(deliveries[0].evidence_truncated);
     }
 }
