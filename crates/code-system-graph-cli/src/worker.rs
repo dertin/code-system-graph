@@ -13,7 +13,7 @@ use code_system_graph_core::{
     ExecutionLimitExceeded, ExecutionPolicy, ExecutionResource, ExecutionSummary, ExtractionLimitExceeded, GraphqlExtractionError, JobPhase, ScanJobTracker
 };
 use serde::{Deserialize, Serialize};
-use sysinfo::{Pid, ProcessesToUpdate, System};
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
 use super::{
     ApplicationError, ScanOverrides, ScanSummary, application_exit_code, load_execution_policy
@@ -26,12 +26,17 @@ const MAX_PROTOCOL_LINE_BYTES: usize = 1_048_576;
 const PROTOCOL_QUEUE_CAPACITY: usize = 256;
 const MAX_PROTOCOL_MESSAGES_PER_POLL: usize = 1_024;
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
+/// Progress messages carry the cumulative total, so units completed within this interval of the
+/// previous message are coalesced into the next one.
+const PROGRESS_WRITE_INTERVAL_MS: u64 = 50;
 
 static WORKER_PROTOCOL_ACTIVE: AtomicBool = AtomicBool::new(false);
 static WORKER_LIMIT_REPORTED: AtomicBool = AtomicBool::new(false);
 static COMPLETED_UNITS: AtomicU64 = AtomicU64::new(0);
 static RUN_COUNTER: AtomicU64 = AtomicU64::new(0);
 static WORKER_TRACKER: OnceLock<Mutex<ScanJobTracker>> = OnceLock::new();
+static PROGRESS_CLOCK: OnceLock<Instant> = OnceLock::new();
+static LAST_PROGRESS_WRITE_MS: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct WorkerEnvelope {
@@ -70,11 +75,11 @@ enum WorkerMessage {
     },
     ScanResult {
         schema_version: u8,
-        summary: ScanSummary,
+        summary: Box<ScanSummary>,
     },
     SyncResult {
         schema_version: u8,
-        summary: SyncSummary,
+        summary: Box<SyncSummary>,
     },
     Failure {
         schema_version: u8,
@@ -109,8 +114,8 @@ enum ExpectedResult {
 
 #[derive(Debug)]
 enum SupervisedResult {
-    Scan(ScanSummary),
-    Sync(SyncSummary),
+    Scan(Box<ScanSummary>),
+    Sync(Box<SyncSummary>),
 }
 
 struct ProtocolReader {
@@ -174,7 +179,7 @@ pub fn run_worker_from_stdio() -> Result<(), String> {
         } => match super::scan_workspace_direct(&config, &database, &overrides) {
             Ok(summary) => WorkerMessage::ScanResult {
                 schema_version: PROTOCOL_VERSION,
-                summary,
+                summary: Box::new(summary),
             },
             Err(error) => failure_message(error),
         },
@@ -186,11 +191,12 @@ pub fn run_worker_from_stdio() -> Result<(), String> {
         } => match sync_workspace_direct(&config, &database, &overrides, synchronize_codegraph) {
             Ok(summary) => WorkerMessage::SyncResult {
                 schema_version: PROTOCOL_VERSION,
-                summary,
+                summary: Box::new(summary),
             },
             Err(error) => failure_message(error),
         },
     };
+    flush_progress()?;
     write_message(&message)
 }
 
@@ -276,14 +282,6 @@ fn safe_application_diagnostic(error: &ApplicationError) -> String {
             source_path,
         }) => format!("unsupported persisted-operation manifest in `{source_path}`"),
         ApplicationError::HttpExtraction(error) => error.to_string(),
-        ApplicationError::Link(code_system_graph_core::LinkError::AmbiguousProvider {
-            method,
-            path,
-            candidates,
-        }) => format!(
-            "ambiguous HTTP provider for {method} {path}; stable candidates: {}",
-            candidates.join(", ")
-        ),
         ApplicationError::Config(error) => safe_config_diagnostic(error),
         ApplicationError::Manifest(_) => "workspace manifest is invalid".to_owned(),
         ApplicationError::ManualLink(error) => {
@@ -465,11 +463,35 @@ pub(crate) fn report_progress(phase: JobPhase, completed: u64) {
             current.checked_add(completed)
         })
         .map_or(u64::MAX, |previous| previous.saturating_add(completed));
-    let _ = write_message(&WorkerMessage::Progress {
+    if progress_write_due() {
+        let _ = write_message(&WorkerMessage::Progress {
+            schema_version: PROTOCOL_VERSION,
+            phase,
+            completed_units: total,
+        });
+    }
+}
+
+fn progress_write_due() -> bool {
+    let now = duration_millis(PROGRESS_CLOCK.get_or_init(Instant::now).elapsed());
+    let last = LAST_PROGRESS_WRITE_MS.load(Ordering::Acquire);
+    now.saturating_sub(last) >= PROGRESS_WRITE_INTERVAL_MS
+        && LAST_PROGRESS_WRITE_MS
+            .compare_exchange(last, now, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+}
+
+/// Reports the cumulative total that coalescing may still be holding back.
+fn flush_progress() -> Result<(), String> {
+    let phase = WORKER_TRACKER
+        .get()
+        .and_then(|tracker| tracker.lock().ok().map(|tracker| tracker.phase()))
+        .unwrap_or(JobPhase::Configuration);
+    write_message(&WorkerMessage::Progress {
         schema_version: PROTOCOL_VERSION,
         phase,
-        completed_units: total,
-    });
+        completed_units: COMPLETED_UNITS.load(Ordering::Acquire),
+    })
 }
 
 pub(crate) fn check_time(phase: JobPhase) {
@@ -522,7 +544,7 @@ pub(crate) fn supervise_scan(
         overrides: overrides.clone(),
     };
     match supervise(config, &request, ExpectedResult::Scan, None, None)? {
-        SupervisedResult::Scan(summary) => Ok(summary),
+        SupervisedResult::Scan(summary) => Ok(*summary),
         SupervisedResult::Sync(_) => unreachable!("worker result kind was validated"),
     }
 }
@@ -545,7 +567,7 @@ pub(crate) fn supervise_scan_with_executable(
         None,
         Some(executable),
     )? {
-        SupervisedResult::Scan(summary) => Ok(summary),
+        SupervisedResult::Scan(summary) => Ok(*summary),
         SupervisedResult::Sync(_) => unreachable!("worker result kind was validated"),
     }
 }
@@ -563,7 +585,7 @@ pub(crate) fn supervise_sync(
         synchronize_codegraph,
     };
     match supervise(config, &request, ExpectedResult::Sync, None, None)? {
-        SupervisedResult::Sync(summary) => Ok(summary),
+        SupervisedResult::Sync(summary) => Ok(*summary),
         SupervisedResult::Scan(_) => unreachable!("worker result kind was validated"),
     }
 }
@@ -588,7 +610,7 @@ pub(crate) fn supervise_sync_with_executable(
         None,
         Some(executable),
     )? {
-        SupervisedResult::Sync(summary) => Ok(summary),
+        SupervisedResult::Sync(summary) => Ok(*summary),
         SupervisedResult::Scan(_) => unreachable!("worker result kind was validated"),
     }
 }
@@ -613,7 +635,7 @@ pub(crate) fn supervise_sync_with_wall_time_cap(
         Some(wall_time_cap_ms),
         None,
     )? {
-        SupervisedResult::Sync(summary) => Ok(summary),
+        SupervisedResult::Sync(summary) => Ok(*summary),
         SupervisedResult::Scan(_) => unreachable!("worker result kind was validated"),
     }
 }
@@ -653,7 +675,7 @@ fn supervise(
         explicit_executable.map_or_else(worker_executable, validate_worker_executable)?;
     let mut command = Command::new(executable);
     command
-        .arg("__worker-v1")
+        .arg("__worker")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
@@ -853,7 +875,7 @@ fn monitor_worker(
             ));
         }
 
-        system.refresh_processes(ProcessesToUpdate::All, true);
+        system.refresh_processes_specifics(ProcessesToUpdate::All, true, memory_refresh());
         let memory = process_tree_memory(&system, root_pid);
         peak_memory = peak_memory.max(memory);
         if memory > policy.max_worker_memory_bytes {
@@ -939,6 +961,11 @@ fn copy_artifact_timings(source: &ExecutionSummary, target: &mut ExecutionSummar
     target.artifact_duration_p50_ms = source.artifact_duration_p50_ms;
     target.artifact_duration_p95_ms = source.artifact_duration_p95_ms;
     target.artifact_duration_p99_ms = source.artifact_duration_p99_ms;
+    target.stat_cache_hits = source.stat_cache_hits;
+    target.content_bytes_read = source.content_bytes_read;
+    target.published_rows = source.published_rows;
+    target.extraction_workers = source.extraction_workers;
+    target.phases.clone_from(&source.phases);
 }
 
 fn application_failure(failure: WorkerFailure) -> ApplicationError {
@@ -1139,10 +1166,19 @@ fn read_bounded_line(
     }
 }
 
+/// Threads are listed as processes that report the memory of their whole process, so only
+/// processes are summed.
+/// The sampler reads only memory and parent links, which every refresh includes; the default
+/// refresh also lists every thread of every process and reads CPU, disk usage, and executables.
+fn memory_refresh() -> ProcessRefreshKind {
+    ProcessRefreshKind::nothing().with_memory().without_tasks()
+}
+
 fn process_tree_memory(system: &System, root: Pid) -> u64 {
     system
         .processes()
         .iter()
+        .filter(|(_, process)| process.thread_kind().is_none())
         .filter(|(pid, _)| **pid == root || is_descendant(system, **pid, root))
         .map(|(_, process)| process.memory())
         .fold(0_u64, u64::saturating_add)
@@ -1171,7 +1207,11 @@ pub fn terminate_process_tree(root_process_id: u32) {
     let root = Pid::from_u32(root_process_id);
     let mut system = System::new();
     for _ in 0..3 {
-        system.refresh_processes(ProcessesToUpdate::All, true);
+        system.refresh_processes_specifics(
+            ProcessesToUpdate::All,
+            true,
+            ProcessRefreshKind::nothing().without_tasks(),
+        );
         let descendants = system
             .processes()
             .iter()
@@ -1638,7 +1678,7 @@ mod tests {
         .expect("policy message");
         let result_message = serde_json::to_string(&WorkerMessage::ScanResult {
             schema_version: PROTOCOL_VERSION,
-            summary: ScanSummary {
+            summary: Box::new(ScanSummary {
                 execution: ExecutionSummary::default(),
                 workspace: "test".to_owned(),
                 snapshot_id: "snapshot".to_owned(),
@@ -1654,7 +1694,7 @@ mod tests {
                 affected_test_count: 0,
                 degradation_count: 0,
                 degradations: Vec::new(),
-            },
+            }),
         })
         .expect("result message");
         let script = format!(

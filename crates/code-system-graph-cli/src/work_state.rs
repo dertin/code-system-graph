@@ -1,20 +1,15 @@
 //! Disposable operational state for resumable scans and finite watchers.
 
+use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 
-use code_system_graph_core::ExecutionSummary;
-use code_system_graph_model::{
-    ArtifactFingerprint, CommunitySnapshot, Edge, Evidence, ExtractorRun, LinkDecision, Node, NodeId, RepositoryCoverageGap, StoredExtractorBatch, stable_id_bytes
-};
-use code_system_graph_store_sqlite::{
-    ManualLinkDisposition, ManualLinkRecord, set_owner_only_file
-};
+use code_system_graph_model::{ArtifactFingerprint, StoredExtractorBatch, stable_id_bytes};
+use code_system_graph_store_sqlite::set_owner_only_file;
 use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension, TransactionBehavior, params};
-use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-const WORK_SCHEMA_VERSION: &str = "1.1.0";
+const WORK_SCHEMA_VERSION: &str = "1.2.0";
 const SQLITE_ARTIFACT_SUFFIXES: [&str; 4] = ["", "-wal", "-shm", "-journal"];
 
 enum WorkOpenError {
@@ -35,48 +30,33 @@ pub(crate) struct WatcherLease {
     pub(crate) detail: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct CandidateMetadata {
-    snapshot_id: String,
-    community_delta_count: usize,
-    corroborated_symbol_count: usize,
-    affected_test_count: usize,
-    execution: ExecutionSummary,
-    degradations: Vec<String>,
-    #[serde(default)]
-    coverage_gaps: Vec<RepositoryCoverageGap>,
+/// Identity of one file in the stat cache: checkout id and canonical relative path bytes.
+pub(crate) type FileStatKey = (String, Vec<u8>);
+
+/// Filesystem metadata that lets a scan reuse a content hash without reading the file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FileStat {
+    pub(crate) size_bytes: u64,
+    pub(crate) modified_unix_ns: i64,
+    pub(crate) file_identity: String,
+    pub(crate) content_hash: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct StagedManualLinkRecord {
-    id: String,
-    snapshot_id: String,
-    source_node_id: NodeId,
-    target_node_id: NodeId,
-    kind: String,
-    disposition: String,
-    reason: String,
-    decision: LinkDecision,
-    config_version: u32,
+/// Stat-cache rows to write and remove after one fingerprinting pass.
+#[derive(Debug, Default)]
+pub(crate) struct FileStatDelta {
+    pub(crate) upserts: Vec<(FileStatKey, FileStat)>,
+    pub(crate) removals: Vec<FileStatKey>,
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct StagedSnapshot {
-    pub(crate) snapshot_id: String,
-    pub(crate) nodes: Vec<Node>,
-    pub(crate) edges: Vec<Edge>,
-    pub(crate) evidence: Vec<Evidence>,
-    pub(crate) fingerprints: Vec<ArtifactFingerprint>,
-    pub(crate) extractor_batches: Vec<StoredExtractorBatch>,
-    pub(crate) extractor_runs: Vec<ExtractorRun>,
-    pub(crate) manual_links: Vec<ManualLinkRecord>,
-    pub(crate) community_snapshot: CommunitySnapshot,
-    pub(crate) community_delta_count: usize,
-    pub(crate) corroborated_symbol_count: usize,
-    pub(crate) affected_test_count: usize,
-    pub(crate) execution: ExecutionSummary,
-    pub(crate) degradations: Vec<String>,
-    pub(crate) coverage_gaps: Vec<RepositoryCoverageGap>,
+/// Batch metadata stored beside the raw payload BLOB.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CachedBatchHeader {
+    source: ArtifactFingerprint,
+    extractor_version: String,
+    budget_fingerprint: String,
+    source_was_lossy: bool,
+    output_count: u64,
 }
 
 impl WorkState {
@@ -118,26 +98,21 @@ impl WorkState {
                  );
                  CREATE TABLE IF NOT EXISTS batch_cache (
                      cache_key TEXT PRIMARY KEY,
-                     batch_json BLOB NOT NULL,
+                     header_json BLOB NOT NULL,
+                     payload BLOB NOT NULL,
                      size_bytes INTEGER NOT NULL CHECK(size_bytes > 0),
                      last_access_unix_ms INTEGER NOT NULL
                  );
                  CREATE INDEX IF NOT EXISTS idx_batch_cache_lru
                      ON batch_cache(last_access_unix_ms, cache_key);
-                 CREATE TABLE IF NOT EXISTS active_candidate (
-                     workspace TEXT PRIMARY KEY,
-                     compatibility_fingerprint TEXT NOT NULL,
-                     phase TEXT NOT NULL,
-                     started_at_unix_ms INTEGER NOT NULL,
-                     updated_at_unix_ms INTEGER NOT NULL
-                 );
-                 CREATE TABLE IF NOT EXISTS candidate_items (
-                     workspace TEXT NOT NULL,
-                     compatibility_fingerprint TEXT NOT NULL,
-                     item_kind TEXT NOT NULL,
-                     item_key TEXT NOT NULL,
-                     item_json BLOB NOT NULL,
-                     PRIMARY KEY(workspace, item_kind, item_key)
+                 CREATE TABLE IF NOT EXISTS file_stats (
+                     checkout_id TEXT NOT NULL,
+                     path BLOB NOT NULL,
+                     size_bytes INTEGER NOT NULL,
+                     modified_unix_ns INTEGER NOT NULL,
+                     file_identity TEXT NOT NULL,
+                     content_hash TEXT NOT NULL,
+                     PRIMARY KEY(checkout_id, path)
                  );
                  CREATE TABLE IF NOT EXISTS watcher_lease (
                      workspace TEXT PRIMARY KEY,
@@ -201,424 +176,217 @@ impl WorkState {
         Ok(Self { connection })
     }
 
-    pub(crate) fn begin_candidate(
-        &mut self,
-        workspace: &str,
-        compatibility_fingerprint: &str,
-        now_unix_ms: u64,
-    ) -> Result<bool, String> {
-        let now_unix_ms = sqlite_integer(now_unix_ms, "candidate timestamp")?;
-        let previous = self
-            .connection
-            .query_row(
-                "SELECT compatibility_fingerprint FROM active_candidate WHERE workspace = ?1",
-                [workspace],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()
-            .map_err(|error| error.to_string())?;
-        let resumed = previous.as_deref() == Some(compatibility_fingerprint);
-        if !resumed {
-            self.connection
-                .execute(
-                    "DELETE FROM candidate_items WHERE workspace = ?1",
-                    [workspace],
-                )
-                .map_err(|error| error.to_string())?;
-        }
-        self.connection
-            .execute(
-                "INSERT INTO active_candidate(
-                     workspace, compatibility_fingerprint, phase, started_at_unix_ms,
-                     updated_at_unix_ms
-                 ) VALUES (?1, ?2, 'fingerprinted', ?3, ?3)
-                 ON CONFLICT(workspace) DO UPDATE SET
-                     compatibility_fingerprint = excluded.compatibility_fingerprint,
-                     phase = excluded.phase,
-                     started_at_unix_ms = CASE
-                         WHEN active_candidate.compatibility_fingerprint = excluded.compatibility_fingerprint
-                         THEN active_candidate.started_at_unix_ms
-                         ELSE excluded.started_at_unix_ms
-                     END,
-                     updated_at_unix_ms = excluded.updated_at_unix_ms",
-                params![workspace, compatibility_fingerprint, now_unix_ms],
-            )
-            .map_err(|error| error.to_string())?;
-        Ok(resumed)
-    }
-
-    pub(crate) fn set_candidate_phase(
-        &self,
-        workspace: &str,
-        phase: &str,
-        now_unix_ms: u64,
-    ) -> Result<(), String> {
-        let now_unix_ms = sqlite_integer(now_unix_ms, "candidate timestamp")?;
-        self.connection
-            .execute(
-                "UPDATE active_candidate SET phase = ?2, updated_at_unix_ms = ?3
-                 WHERE workspace = ?1",
-                params![workspace, phase, now_unix_ms],
-            )
-            .map_err(|error| error.to_string())?;
-        Ok(())
-    }
-
-    pub(crate) fn complete_candidate(&self, workspace: &str) -> Result<(), String> {
-        self.connection
-            .execute(
-                "DELETE FROM candidate_items WHERE workspace = ?1",
-                [workspace],
-            )
-            .map_err(|error| error.to_string())?;
-        self.connection
-            .execute(
-                "DELETE FROM active_candidate WHERE workspace = ?1",
-                [workspace],
-            )
-            .map_err(|error| error.to_string())?;
-        Ok(())
-    }
-
-    #[expect(
-        clippy::too_many_lines,
-        reason = "the candidate boundary records every immutable snapshot collection explicitly"
-    )]
-    pub(crate) fn store_candidate_snapshot(
-        &mut self,
-        workspace: &str,
-        compatibility_fingerprint: &str,
-        snapshot: &StagedSnapshot,
-        now_unix_ms: u64,
-    ) -> Result<(), String> {
-        let current = self
-            .connection
-            .query_row(
-                "SELECT compatibility_fingerprint FROM active_candidate WHERE workspace = ?1",
-                [workspace],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()
-            .map_err(|error| error.to_string())?;
-        if current.as_deref() != Some(compatibility_fingerprint) {
-            return Err("active candidate fingerprint changed before staging".to_owned());
-        }
-        let transaction = self
-            .connection
-            .transaction()
-            .map_err(|error| error.to_string())?;
-        transaction
-            .execute(
-                "DELETE FROM candidate_items WHERE workspace = ?1",
-                [workspace],
-            )
-            .map_err(|error| error.to_string())?;
-        let metadata = CandidateMetadata {
-            snapshot_id: snapshot.snapshot_id.clone(),
-            community_delta_count: snapshot.community_delta_count,
-            corroborated_symbol_count: snapshot.corroborated_symbol_count,
-            affected_test_count: snapshot.affected_test_count,
-            execution: snapshot.execution.clone(),
-            degradations: snapshot.degradations.clone(),
-            coverage_gaps: snapshot.coverage_gaps.clone(),
-        };
-        insert_candidate_item(
-            &transaction,
-            workspace,
-            compatibility_fingerprint,
-            "metadata",
-            "snapshot-v1",
-            &metadata,
-        )?;
-        insert_candidate_values(
-            &transaction,
-            workspace,
-            compatibility_fingerprint,
-            "node",
-            &snapshot.nodes,
-            |node| node.id.as_str().to_owned(),
-        )?;
-        insert_candidate_values(
-            &transaction,
-            workspace,
-            compatibility_fingerprint,
-            "edge",
-            &snapshot.edges,
-            |edge| edge.id.as_str().to_owned(),
-        )?;
-        insert_candidate_values(
-            &transaction,
-            workspace,
-            compatibility_fingerprint,
-            "evidence",
-            &snapshot.evidence,
-            |evidence| evidence.id.as_str().to_owned(),
-        )?;
-        insert_candidate_values(
-            &transaction,
-            workspace,
-            compatibility_fingerprint,
-            "fingerprint",
-            &snapshot.fingerprints,
-            candidate_value_key,
-        )?;
-        insert_candidate_values(
-            &transaction,
-            workspace,
-            compatibility_fingerprint,
-            "extractor_batch",
-            &snapshot.extractor_batches,
-            candidate_value_key,
-        )?;
-        insert_candidate_values(
-            &transaction,
-            workspace,
-            compatibility_fingerprint,
-            "extractor_run",
-            &snapshot.extractor_runs,
-            |run| run.id.clone(),
-        )?;
-        for record in &snapshot.manual_links {
-            let staged = StagedManualLinkRecord::from(record);
-            insert_candidate_item(
-                &transaction,
-                workspace,
-                compatibility_fingerprint,
-                "manual_link",
-                &record.id,
-                &staged,
-            )?;
-        }
-        insert_candidate_item(
-            &transaction,
-            workspace,
-            compatibility_fingerprint,
-            "community",
-            "snapshot-v1",
-            &snapshot.community_snapshot,
-        )?;
-        let now = sqlite_integer(now_unix_ms, "candidate timestamp")?;
-        transaction
-            .execute(
-                "UPDATE active_candidate SET phase = 'ready', updated_at_unix_ms = ?2
-                 WHERE workspace = ?1 AND compatibility_fingerprint = ?3",
-                params![workspace, now, compatibility_fingerprint],
-            )
-            .map_err(|error| error.to_string())?;
-        transaction.commit().map_err(|error| error.to_string())
-    }
-
-    pub(crate) fn load_candidate_snapshot(
-        &self,
-        workspace: &str,
-        compatibility_fingerprint: &str,
-    ) -> Result<Option<StagedSnapshot>, String> {
-        let phase = self
-            .connection
-            .query_row(
-                "SELECT phase FROM active_candidate
-                 WHERE workspace = ?1 AND compatibility_fingerprint = ?2",
-                params![workspace, compatibility_fingerprint],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()
-            .map_err(|error| error.to_string())?;
-        if phase.as_deref() != Some("ready") {
-            return Ok(None);
-        }
-        let metadata = load_single_candidate_value::<CandidateMetadata>(
-            &self.connection,
-            workspace,
-            compatibility_fingerprint,
-            "metadata",
-        )?;
-        let Some(metadata) = metadata else {
-            return Ok(None);
-        };
-        let manual_links = load_candidate_values::<StagedManualLinkRecord>(
-            &self.connection,
-            workspace,
-            compatibility_fingerprint,
-            "manual_link",
-        )?
-        .into_iter()
-        .map(ManualLinkRecord::try_from)
-        .collect::<Result<Vec<_>, _>>()?;
-        let Some(community_snapshot) = load_single_candidate_value(
-            &self.connection,
-            workspace,
-            compatibility_fingerprint,
-            "community",
-        )?
-        else {
-            return Ok(None);
-        };
-        Ok(Some(StagedSnapshot {
-            snapshot_id: metadata.snapshot_id,
-            nodes: load_candidate_values(
-                &self.connection,
-                workspace,
-                compatibility_fingerprint,
-                "node",
-            )?,
-            edges: load_candidate_values(
-                &self.connection,
-                workspace,
-                compatibility_fingerprint,
-                "edge",
-            )?,
-            evidence: load_candidate_values(
-                &self.connection,
-                workspace,
-                compatibility_fingerprint,
-                "evidence",
-            )?,
-            fingerprints: load_candidate_values(
-                &self.connection,
-                workspace,
-                compatibility_fingerprint,
-                "fingerprint",
-            )?,
-            extractor_batches: load_candidate_values(
-                &self.connection,
-                workspace,
-                compatibility_fingerprint,
-                "extractor_batch",
-            )?,
-            extractor_runs: load_candidate_values(
-                &self.connection,
-                workspace,
-                compatibility_fingerprint,
-                "extractor_run",
-            )?,
-            manual_links,
-            community_snapshot,
-            community_delta_count: metadata.community_delta_count,
-            corroborated_symbol_count: metadata.corroborated_symbol_count,
-            affected_test_count: metadata.affected_test_count,
-            execution: metadata.execution,
-            degradations: metadata.degradations,
-            coverage_gaps: metadata.coverage_gaps,
-        }))
-    }
-
     pub(crate) fn load_batches(
         &mut self,
-        fingerprints: &[ArtifactFingerprint],
+        fingerprints: &[&ArtifactFingerprint],
         budget_fingerprint: &str,
         extractor_version: &str,
         maximum_payload_bytes: u64,
         now_unix_ms: u64,
     ) -> Result<Vec<StoredExtractorBatch>, String> {
         let now_unix_ms = sqlite_integer(now_unix_ms, "cache timestamp")?;
-        // `Vec<u8>` is represented as comma-separated JSON integers. Four encoded bytes per
-        // payload byte plus bounded metadata is a conservative ceiling that lets SQLite reject
-        // an oversized cache row before copying its BLOB into this process.
-        let maximum_encoded_bytes = maximum_payload_bytes
-            .saturating_mul(4)
-            .saturating_add(1_048_576)
-            .min(i64::MAX as u64);
-        let maximum_encoded_bytes = sqlite_integer(maximum_encoded_bytes, "cache batch maximum")?;
+        let maximum_payload_bytes = sqlite_integer(
+            maximum_payload_bytes.min(i64::MAX as u64),
+            "cache batch maximum",
+        )?;
         let transaction = self
             .connection
             .transaction()
             .map_err(|error| error.to_string())?;
         let mut batches = Vec::new();
-        for fingerprint in fingerprints {
-            let key = batch_cache_key(fingerprint, budget_fingerprint, extractor_version)?;
-            let encoded = transaction
-                .query_row(
-                    "SELECT CASE WHEN length(batch_json) <= ?2 THEN batch_json END
+        {
+            let mut select = transaction
+                .prepare_cached(
+                    "SELECT header_json,
+                            CASE WHEN length(payload) <= ?2 THEN payload END
                      FROM batch_cache WHERE cache_key = ?1",
-                    params![key, maximum_encoded_bytes],
-                    |row| row.get::<_, Option<Vec<u8>>>(0),
                 )
-                .optional()
                 .map_err(|error| error.to_string())?;
-            let Some(Some(encoded)) = encoded else {
-                if encoded.is_some() {
-                    transaction
-                        .execute("DELETE FROM batch_cache WHERE cache_key = ?1", [&key])
+            let mut touch = transaction
+                .prepare_cached(
+                    "UPDATE batch_cache SET last_access_unix_ms = ?2 WHERE cache_key = ?1",
+                )
+                .map_err(|error| error.to_string())?;
+            let mut remove = transaction
+                .prepare_cached("DELETE FROM batch_cache WHERE cache_key = ?1")
+                .map_err(|error| error.to_string())?;
+            for fingerprint in fingerprints {
+                let key = batch_cache_key(fingerprint, budget_fingerprint, extractor_version)?;
+                let row = select
+                    .query_row(params![key, maximum_payload_bytes], |row| {
+                        Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Option<Vec<u8>>>(1)?))
+                    })
+                    .optional()
+                    .map_err(|error| error.to_string())?;
+                let Some((header, payload)) = row else {
+                    continue;
+                };
+                let decoded = payload.and_then(|payload| {
+                    serde_json::from_slice::<CachedBatchHeader>(&header)
+                        .ok()
+                        .map(|header| (header, payload))
+                });
+                let Some((header, payload)) = decoded else {
+                    remove.execute([&key]).map_err(|error| error.to_string())?;
+                    continue;
+                };
+                if header.source == **fingerprint
+                    && header.budget_fingerprint == budget_fingerprint
+                    && header.extractor_version == extractor_version
+                {
+                    touch
+                        .execute(params![key, now_unix_ms])
                         .map_err(|error| error.to_string())?;
+                    batches.push(StoredExtractorBatch {
+                        source: header.source,
+                        extractor_version: header.extractor_version,
+                        budget_fingerprint: header.budget_fingerprint,
+                        source_was_lossy: header.source_was_lossy,
+                        output_count: header.output_count,
+                        payload,
+                    });
                 }
-                continue;
-            };
-            let batch: StoredExtractorBatch = if let Ok(batch) = serde_json::from_slice(&encoded) {
-                batch
-            } else {
-                transaction
-                    .execute("DELETE FROM batch_cache WHERE cache_key = ?1", [&key])
-                    .map_err(|error| error.to_string())?;
-                continue;
-            };
-            if batch.source == *fingerprint
-                && batch.budget_fingerprint == budget_fingerprint
-                && batch.extractor_version == extractor_version
-            {
-                transaction
-                    .execute(
-                        "UPDATE batch_cache SET last_access_unix_ms = ?2 WHERE cache_key = ?1",
-                        params![key, now_unix_ms],
-                    )
-                    .map_err(|error| error.to_string())?;
-                batches.push(batch);
             }
         }
         transaction.commit().map_err(|error| error.to_string())?;
         Ok(batches)
     }
 
-    pub(crate) fn put_batch(
+    /// Checkpoints completed batches in one transaction and returns how many were retained.
+    pub(crate) fn put_batches(
         &mut self,
-        batch: &StoredExtractorBatch,
+        batches: &[&StoredExtractorBatch],
         quota_bytes: u64,
         now_unix_ms: u64,
-    ) -> Result<bool, String> {
-        let encoded = serde_json::to_vec(batch).map_err(|error| error.to_string())?;
-        let size = u64::try_from(encoded.len()).unwrap_or(u64::MAX);
-        if size == 0 || size > quota_bytes || size > i64::MAX as u64 {
-            return Ok(false);
+    ) -> Result<u64, String> {
+        if batches.is_empty() {
+            return Ok(0);
         }
-        let size = sqlite_integer(size, "cache entry size")?;
         let now_unix_ms = sqlite_integer(now_unix_ms, "cache timestamp")?;
-        let key = batch_cache_key(
-            &batch.source,
-            &batch.budget_fingerprint,
-            &batch.extractor_version,
-        )?;
         let transaction = self
             .connection
             .transaction()
             .map_err(|error| error.to_string())?;
-        transaction
-            .execute(
-                "INSERT INTO batch_cache(cache_key, batch_json, size_bytes, last_access_unix_ms)
-                 VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT(cache_key) DO UPDATE SET
-                     batch_json = excluded.batch_json,
-                     size_bytes = excluded.size_bytes,
-                     last_access_unix_ms = excluded.last_access_unix_ms",
-                params![key, encoded, size, now_unix_ms],
-            )
-            .map_err(|error| error.to_string())?;
-        let mut total = cache_size(&transaction)?;
-        while total > quota_bytes {
-            let removed = transaction
-                .execute(
-                    "DELETE FROM batch_cache WHERE cache_key = (
-                         SELECT cache_key FROM batch_cache
-                         ORDER BY last_access_unix_ms, cache_key LIMIT 1
-                     )",
-                    [],
+        let mut written = 0_u64;
+        {
+            let mut insert = transaction
+                .prepare_cached(
+                    "INSERT INTO batch_cache(
+                         cache_key, header_json, payload, size_bytes, last_access_unix_ms
+                     ) VALUES (?1, ?2, ?3, ?4, ?5)
+                     ON CONFLICT(cache_key) DO UPDATE SET
+                         header_json = excluded.header_json,
+                         payload = excluded.payload,
+                         size_bytes = excluded.size_bytes,
+                         last_access_unix_ms = excluded.last_access_unix_ms",
                 )
                 .map_err(|error| error.to_string())?;
-            if removed == 0 {
-                break;
+            for batch in batches {
+                let header = serde_json::to_vec(&CachedBatchHeader {
+                    source: batch.source.clone(),
+                    extractor_version: batch.extractor_version.clone(),
+                    budget_fingerprint: batch.budget_fingerprint.clone(),
+                    source_was_lossy: batch.source_was_lossy,
+                    output_count: batch.output_count,
+                })
+                .map_err(|error| error.to_string())?;
+                let size = u64::try_from(header.len().saturating_add(batch.payload.len()))
+                    .unwrap_or(u64::MAX);
+                if size > quota_bytes || size > i64::MAX as u64 {
+                    continue;
+                }
+                let key = batch_cache_key(
+                    &batch.source,
+                    &batch.budget_fingerprint,
+                    &batch.extractor_version,
+                )?;
+                insert
+                    .execute(params![
+                        key,
+                        header,
+                        batch.payload,
+                        sqlite_integer(size, "cache entry size")?,
+                        now_unix_ms
+                    ])
+                    .map_err(|error| error.to_string())?;
+                written = written.saturating_add(1);
             }
-            total = cache_size(&transaction)?;
         }
+        evict_to_quota(&transaction, quota_bytes)?;
         transaction.commit().map_err(|error| error.to_string())?;
-        Ok(true)
+        Ok(written)
+    }
+
+    pub(crate) fn load_file_stats(&self) -> Result<HashMap<FileStatKey, FileStat>, String> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT checkout_id, path, size_bytes, modified_unix_ns, file_identity,
+                        content_hash
+                 FROM file_stats",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    (row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?),
+                    FileStat {
+                        size_bytes: u64::try_from(row.get::<_, i64>(2)?).unwrap_or(u64::MAX),
+                        modified_unix_ns: row.get(3)?,
+                        file_identity: row.get(4)?,
+                        content_hash: row.get(5)?,
+                    },
+                ))
+            })
+            .map_err(|error| error.to_string())?;
+        rows.collect::<Result<HashMap<_, _>, _>>()
+            .map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn apply_file_stat_delta(&mut self, delta: &FileStatDelta) -> Result<(), String> {
+        if delta.upserts.is_empty() && delta.removals.is_empty() {
+            return Ok(());
+        }
+        let transaction = self
+            .connection
+            .transaction()
+            .map_err(|error| error.to_string())?;
+        {
+            let mut remove = transaction
+                .prepare_cached("DELETE FROM file_stats WHERE checkout_id = ?1 AND path = ?2")
+                .map_err(|error| error.to_string())?;
+            for (checkout_id, path) in &delta.removals {
+                remove
+                    .execute(params![checkout_id, path])
+                    .map_err(|error| error.to_string())?;
+            }
+            let mut upsert = transaction
+                .prepare_cached(
+                    "INSERT INTO file_stats(
+                         checkout_id, path, size_bytes, modified_unix_ns, file_identity,
+                         content_hash
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                     ON CONFLICT(checkout_id, path) DO UPDATE SET
+                         size_bytes = excluded.size_bytes,
+                         modified_unix_ns = excluded.modified_unix_ns,
+                         file_identity = excluded.file_identity,
+                         content_hash = excluded.content_hash",
+                )
+                .map_err(|error| error.to_string())?;
+            for ((checkout_id, path), stat) in &delta.upserts {
+                upsert
+                    .execute(params![
+                        checkout_id,
+                        path,
+                        sqlite_integer(stat.size_bytes, "file size")?,
+                        stat.modified_unix_ns,
+                        stat.file_identity,
+                        stat.content_hash
+                    ])
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+        transaction.commit().map_err(|error| error.to_string())
     }
 
     pub(crate) fn start_watcher(
@@ -833,15 +601,42 @@ impl WorkState {
     }
 }
 
-fn cache_size(transaction: &rusqlite::Transaction<'_>) -> Result<u64, String> {
-    let size = transaction
+fn evict_to_quota(transaction: &rusqlite::Transaction<'_>, quota_bytes: u64) -> Result<(), String> {
+    let total = transaction
         .query_row(
             "SELECT COALESCE(SUM(size_bytes), 0) FROM batch_cache",
             [],
             |row| row.get::<_, i64>(0),
         )
         .map_err(|error| error.to_string())?;
-    u64::try_from(size).map_err(|_| "negative work cache size".to_owned())
+    let mut total = u64::try_from(total).map_err(|_| "negative work cache size".to_owned())?;
+    if total <= quota_bytes {
+        return Ok(());
+    }
+    let mut oldest = transaction
+        .prepare(
+            "SELECT cache_key, size_bytes FROM batch_cache ORDER BY last_access_unix_ms, cache_key",
+        )
+        .map_err(|error| error.to_string())?;
+    let mut victims = Vec::new();
+    let mut rows = oldest.query([]).map_err(|error| error.to_string())?;
+    while total > quota_bytes {
+        let Some(row) = rows.next().map_err(|error| error.to_string())? else {
+            break;
+        };
+        let key = row.get::<_, String>(0).map_err(|error| error.to_string())?;
+        let size = row.get::<_, i64>(1).map_err(|error| error.to_string())?;
+        total = total.saturating_sub(u64::try_from(size).unwrap_or(0));
+        victims.push(key);
+    }
+    drop(rows);
+    let mut remove = transaction
+        .prepare_cached("DELETE FROM batch_cache WHERE cache_key = ?1")
+        .map_err(|error| error.to_string())?;
+    for key in victims {
+        remove.execute([key]).map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }
 
 fn sqlite_integer(value: u64, field: &str) -> Result<i64, String> {
@@ -858,156 +653,9 @@ fn batch_cache_key(
     Ok(stable_id_bytes("work-batch-v1", &material))
 }
 
-fn candidate_value_key<T: Serialize>(value: &T) -> String {
-    serde_json::to_vec(value).map_or_else(
-        |_| "unencodable-candidate-value".to_owned(),
-        |encoded| stable_id_bytes("work-candidate-item-v1", &encoded),
-    )
-}
-
-fn insert_candidate_values<T, F>(
-    transaction: &rusqlite::Transaction<'_>,
-    workspace: &str,
-    compatibility_fingerprint: &str,
-    item_kind: &str,
-    values: &[T],
-    key: F,
-) -> Result<(), String>
-where
-    T: Serialize,
-    F: Fn(&T) -> String,
-{
-    for value in values {
-        insert_candidate_item(
-            transaction,
-            workspace,
-            compatibility_fingerprint,
-            item_kind,
-            &key(value),
-            value,
-        )?;
-    }
-    Ok(())
-}
-
-fn insert_candidate_item<T: Serialize>(
-    transaction: &rusqlite::Transaction<'_>,
-    workspace: &str,
-    compatibility_fingerprint: &str,
-    item_kind: &str,
-    item_key: &str,
-    value: &T,
-) -> Result<(), String> {
-    let encoded = serde_json::to_vec(value).map_err(|error| error.to_string())?;
-    transaction
-        .execute(
-            "INSERT INTO candidate_items(
-                 workspace, compatibility_fingerprint, item_kind, item_key, item_json
-             ) VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT(workspace, item_kind, item_key) DO UPDATE SET
-                 compatibility_fingerprint = excluded.compatibility_fingerprint,
-                 item_json = excluded.item_json",
-            params![
-                workspace,
-                compatibility_fingerprint,
-                item_kind,
-                item_key,
-                encoded
-            ],
-        )
-        .map_err(|error| error.to_string())?;
-    Ok(())
-}
-
-fn load_candidate_values<T: DeserializeOwned>(
-    connection: &Connection,
-    workspace: &str,
-    compatibility_fingerprint: &str,
-    item_kind: &str,
-) -> Result<Vec<T>, String> {
-    let mut statement = connection
-        .prepare(
-            "SELECT item_json FROM candidate_items
-             WHERE workspace = ?1 AND compatibility_fingerprint = ?2 AND item_kind = ?3
-             ORDER BY item_key",
-        )
-        .map_err(|error| error.to_string())?;
-    let encoded = statement
-        .query_map(
-            params![workspace, compatibility_fingerprint, item_kind],
-            |row| row.get::<_, Vec<u8>>(0),
-        )
-        .map_err(|error| error.to_string())?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| error.to_string())?;
-    encoded
-        .into_iter()
-        .map(|value| serde_json::from_slice(&value).map_err(|error| error.to_string()))
-        .collect()
-}
-
-fn load_single_candidate_value<T: DeserializeOwned>(
-    connection: &Connection,
-    workspace: &str,
-    compatibility_fingerprint: &str,
-    item_kind: &str,
-) -> Result<Option<T>, String> {
-    let mut values =
-        load_candidate_values(connection, workspace, compatibility_fingerprint, item_kind)?;
-    match values.len() {
-        0 => Ok(None),
-        1 => Ok(values.pop()),
-        _ => Err(format!(
-            "candidate has multiple `{item_kind}` singleton rows"
-        )),
-    }
-}
-
-impl From<&ManualLinkRecord> for StagedManualLinkRecord {
-    fn from(value: &ManualLinkRecord) -> Self {
-        Self {
-            id: value.id.clone(),
-            snapshot_id: value.snapshot_id.clone(),
-            source_node_id: value.source_node_id.clone(),
-            target_node_id: value.target_node_id.clone(),
-            kind: value.kind.clone(),
-            disposition: match value.disposition {
-                ManualLinkDisposition::Active => "active".to_owned(),
-                ManualLinkDisposition::Suppression => "suppression".to_owned(),
-            },
-            reason: value.reason.clone(),
-            decision: value.decision.clone(),
-            config_version: value.config_version,
-        }
-    }
-}
-
-impl TryFrom<StagedManualLinkRecord> for ManualLinkRecord {
-    type Error = String;
-
-    fn try_from(value: StagedManualLinkRecord) -> Result<Self, Self::Error> {
-        let disposition = match value.disposition.as_str() {
-            "active" => ManualLinkDisposition::Active,
-            "suppression" => ManualLinkDisposition::Suppression,
-            other => return Err(format!("invalid staged manual-link disposition `{other}`")),
-        };
-        Ok(Self {
-            id: value.id,
-            snapshot_id: value.snapshot_id,
-            source_node_id: value.source_node_id,
-            target_node_id: value.target_node_id,
-            kind: value.kind,
-            disposition,
-            reason: value.reason,
-            decision: value.decision,
-            config_version: value.config_version,
-        })
-    }
-}
-
 pub(crate) fn work_path(database: &Path) -> PathBuf {
     let mut value = database.as_os_str().to_os_string();
-    value.push(".work-v1.db");
+    value.push(".work.db");
     PathBuf::from(value)
 }
 
@@ -1015,6 +663,11 @@ fn canonicalize_parent(path: &Path) -> Result<PathBuf, String> {
     let parent = path
         .parent()
         .ok_or_else(|| format!("work sidecar path `{}` has no parent", path.display()))?;
+    let parent = if parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        parent
+    };
     let file_name = path
         .file_name()
         .ok_or_else(|| format!("work sidecar path `{}` has no file name", path.display()))?;
@@ -1044,7 +697,10 @@ fn classify_existing_sidecar_error(error: &rusqlite::Error) -> WorkOpenError {
 }
 
 fn ensure_private_file(path: &Path) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
     if path.exists() {
@@ -1116,9 +772,7 @@ fn sqlite_artifact_path(path: &Path, suffix: &str) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use code_system_graph_model::{
-        CheckoutId, CommunityAlgorithm, CommunityConfig, CommunityScope, NativePath, NativePathEncoding, RepoId
-    };
+    use code_system_graph_model::{CheckoutId, NativePath, NativePathEncoding, RepoId};
 
     use super::*;
 
@@ -1137,7 +791,7 @@ mod tests {
         let state = WorkState::open(&database, "database-instance").expect("work state");
         drop(state);
 
-        assert!(canonical_parent.join("graph.db.work-v1.db").is_file());
+        assert!(canonical_parent.join("graph.db.work.db").is_file());
     }
 
     fn fingerprint(hash: &str) -> ArtifactFingerprint {
@@ -1168,21 +822,43 @@ mod tests {
             output_count: 1,
             payload: b"[{}]".to_vec(),
         };
-        assert!(state.put_batch(&batch, 1_000_000, 1).expect("cache"));
+        assert_eq!(
+            state.put_batches(&[&batch], 1_000_000, 1).expect("cache"),
+            1
+        );
         assert_eq!(
             state
-                .load_batches(&[fingerprint("one")], "budget", "1.0.0", 1_000_000, 2)
+                .load_batches(&[&fingerprint("one")], "budget", "1.0.0", 1_000_000, 2)
                 .expect("load"),
             vec![batch.clone()]
         );
         assert_eq!(
             state
-                .load_batches(&[fingerprint("two")], "budget", "1.0.0", 1_000_000, 3)
+                .load_batches(&[&fingerprint("two")], "budget", "1.0.0", 1_000_000, 3)
                 .expect("load")
                 .as_slice(),
             &[]
         );
-        assert!(!state.put_batch(&batch, 1, 4).expect("oversized skip"));
+        assert_eq!(
+            state.put_batches(&[&batch], 1, 4).expect("oversized skip"),
+            0
+        );
+
+        let newer = StoredExtractorBatch {
+            source: fingerprint("two"),
+            ..batch.clone()
+        };
+        let quota = 2
+            * (serde_json::to_vec(&fingerprint("one"))
+                .expect("encode")
+                .len() as u64);
+        assert_eq!(state.put_batches(&[&newer], quota, 5).expect("evict"), 1);
+        assert_eq!(
+            state
+                .load_batches(&[&fingerprint("one")], "budget", "1.0.0", 1_000_000, 6)
+                .expect("evicted load"),
+            Vec::new()
+        );
     }
 
     #[test]
@@ -1204,7 +880,7 @@ mod tests {
     #[test]
     fn sidecar_cleanup_should_remove_every_sqlite_artifact() {
         let temporary = tempfile::tempdir().expect("temporary directory");
-        let sidecar = temporary.path().join("graph.db.work-v1.db");
+        let sidecar = temporary.path().join("graph.db.work.db");
         for suffix in SQLITE_ARTIFACT_SUFFIXES {
             fs::write(sqlite_artifact_path(&sidecar, suffix), b"stale")
                 .expect("create stale SQLite artifact");
@@ -1441,63 +1117,33 @@ mod tests {
     }
 
     #[test]
-    fn ready_candidate_should_round_trip_and_be_removed_after_publication() {
+    fn file_stat_delta_should_round_trip_and_remove_stale_rows() {
         let temporary = tempfile::tempdir().expect("temporary directory");
         let mut state = WorkState::open(&temporary.path().join("graph.db"), "database-instance")
             .expect("work state");
-        assert!(
-            !state
-                .begin_candidate("workspace", "compatible", 1)
-                .expect("begin")
-        );
-        let snapshot = StagedSnapshot {
-            snapshot_id: "snapshot:one".to_owned(),
-            nodes: Vec::new(),
-            edges: Vec::new(),
-            evidence: Vec::new(),
-            fingerprints: vec![fingerprint("one")],
-            extractor_batches: Vec::new(),
-            extractor_runs: Vec::new(),
-            manual_links: Vec::new(),
-            community_snapshot: CommunitySnapshot {
-                snapshot_id: "snapshot:one".to_owned(),
-                engine_version: "1.0.0".to_owned(),
-                config: CommunityConfig {
-                    algorithm: CommunityAlgorithm::Louvain,
-                    scope: CommunityScope::Workspace,
-                    seed: 0,
-                    resolution: 1.0,
-                    minimum_confidence: 0.0,
-                    edge_weights: Vec::new(),
-                    max_iterations: 1,
-                },
-                communities: Vec::new(),
-            },
-            community_delta_count: 0,
-            corroborated_symbol_count: 0,
-            affected_test_count: 0,
-            execution: ExecutionSummary {
-                checkpoints_written: 1,
-                ..ExecutionSummary::default()
-            },
-            degradations: Vec::new(),
-            coverage_gaps: Vec::new(),
+        let stat = FileStat {
+            size_bytes: 4,
+            modified_unix_ns: 1_000,
+            file_identity: "1:2".to_owned(),
+            content_hash: "hash".to_owned(),
         };
+        let key = ("checkout:api".to_owned(), b"src/main.rs".to_vec());
         state
-            .store_candidate_snapshot("workspace", "compatible", &snapshot, 2)
-            .expect("stage");
-        let loaded = state
-            .load_candidate_snapshot("workspace", "compatible")
-            .expect("load")
-            .expect("ready candidate");
-        assert_eq!(loaded.snapshot_id, snapshot.snapshot_id);
-        assert_eq!(loaded.fingerprints, snapshot.fingerprints);
-        state.complete_candidate("workspace").expect("complete");
-        assert!(
-            state
-                .load_candidate_snapshot("workspace", "compatible")
-                .expect("load after completion")
-                .is_none()
+            .apply_file_stat_delta(&FileStatDelta {
+                upserts: vec![(key.clone(), stat.clone())],
+                removals: Vec::new(),
+            })
+            .expect("insert");
+        assert_eq!(
+            state.load_file_stats().expect("load").get(&key),
+            Some(&stat)
         );
+        state
+            .apply_file_stat_delta(&FileStatDelta {
+                upserts: Vec::new(),
+                removals: vec![key],
+            })
+            .expect("remove");
+        assert!(state.load_file_stats().expect("reload").is_empty());
     }
 }

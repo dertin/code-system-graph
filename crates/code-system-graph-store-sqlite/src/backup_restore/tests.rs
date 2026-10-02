@@ -299,9 +299,13 @@ fn restore_should_preserve_replaced_database_as_safety_backup()
         (
             restored.snapshot_id,
             replaced.snapshot_id,
-            report.schema_version,
+            report.schema_id.as_str(),
         ),
-        ("snapshot:before".to_owned(), "snapshot:after".to_owned(), 2)
+        (
+            "snapshot:before".to_owned(),
+            "snapshot:after".to_owned(),
+            crate::schema_identity()
+        )
     );
     Ok(())
 }
@@ -712,10 +716,10 @@ fn restore_should_reject_backup_with_foreign_key_violations()
     connection.execute_batch(
         "PRAGMA foreign_keys = OFF;
          INSERT INTO edges(
-            snapshot_id, id, source_node_id, target_node_id, kind, confidence,
+            workspace_name, id, source_node_id, target_node_id, kind, confidence,
             epistemic_status
          ) VALUES (
-            'snapshot:0', 'edge:corrupt', 'missing:a', 'missing:b',
+            'commerce', 'edge:corrupt', 'missing:a', 'missing:b',
             '\"calls_remote\"', 1.0, '\"confirmed\"'
          );
          PRAGMA foreign_keys = ON;",
@@ -755,10 +759,10 @@ fn restore_should_copy_from_pinned_source_snapshot() -> Result<(), Box<dyn std::
         connection.execute_batch(
             "PRAGMA foreign_keys = OFF;
              INSERT INTO edges(
-                snapshot_id, id, source_node_id, target_node_id, kind, confidence,
+                workspace_name, id, source_node_id, target_node_id, kind, confidence,
                 epistemic_status
              ) VALUES (
-                'snapshot:0', 'edge:corrupt', 'missing:a', 'missing:b',
+                'commerce', 'edge:corrupt', 'missing:a', 'missing:b',
                 '\"calls_remote\"', 1.0, '\"confirmed\"'
              );
              PRAGMA foreign_keys = ON;",

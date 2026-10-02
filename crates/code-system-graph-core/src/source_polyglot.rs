@@ -1,8 +1,14 @@
 use std::collections::BTreeSet;
 
-use crate::source_http::SourceObservationCollector;
+use crate::router_mounts::mount_observation;
+use crate::source_http::{
+    BraceClients, SourceObservationCollector, collect_brace_clients, java_method_lines
+};
+use crate::source_routers::{
+    GoRouterScope, receiver_before, script_imports, script_router_observations
+};
 use crate::{
-    ExtractionLimitExceeded, ExtractionTracker, SourceEpistemicStatus, SourceFramework, SourceLanguage, SourceLineRange, SourceObservation, SourceRole, SourceWarning, normalize_source_http_path
+    ExtractionLimitExceeded, ExtractionTracker, SourceEpistemicStatus, SourceFramework, SourceLanguage, SourceLineRange, SourceObservation, SourceRole, SourceWarning, SymbolRef, normalize_source_http_path
 };
 
 const METHODS: [(&str, &str); 8] = [
@@ -120,66 +126,65 @@ fn collect_go_source<'a>(
     let has_http = source.contains("\"net/http\"");
     let has_gin = source.contains("github.com/gin-gonic/gin");
     let has_chi = source.contains("github.com/go-chi/chi");
-    for statement in statements(source) {
+    let router_framework = if has_gin {
+        SourceFramework::Gin
+    } else if has_chi {
+        SourceFramework::Chi
+    } else {
+        SourceFramework::GoNetHttp
+    };
+    let mut scope = GoRouterScope::default();
+    for statement in go_statements(source) {
+        if has_http || has_gin || has_chi {
+            for mount in scope.observe(&statement, router_framework) {
+                observations.push(mount);
+            }
+        }
         if has_http {
-            if let Some(method) = method_call(&statement.text, "http.")
-                && matches!(method.as_str(), "GET" | "POST")
-            {
-                observations.push(http_observation(
-                    SourceLanguage::Go,
-                    SourceFramework::GoNetHttp,
-                    SourceRole::Consumer,
-                    Some(method),
-                    first_literal_after_call(&statement.text),
-                    None,
-                    statement.lines,
-                ));
-            }
-            if statement.text.contains("http.NewRequest(") {
-                observations.push(http_observation(
-                    SourceLanguage::Go,
-                    SourceFramework::GoNetHttp,
-                    SourceRole::Consumer,
-                    literal_method_argument(&statement.text),
-                    nth_literal(&statement.text, 2),
-                    None,
-                    statement.lines,
-                ));
-            }
-            if statement.text.contains("http.HandleFunc(") {
-                observations.push(incomplete_observation(
-                    SourceLanguage::Go,
-                    SourceFramework::GoNetHttp,
-                    SourceRole::Provider,
-                    None,
-                    first_literal_after_call(&statement.text)
-                        .as_deref()
-                        .and_then(literal_path),
-                    argument_identifier(&statement.text, 2),
-                    statement.lines,
-                    SourceWarning::DynamicMethod,
-                ));
-            }
+            append_go_pattern_route(&mut observations, &statement, &scope);
+        }
+        if has_http
+            && statement.text.contains("http.HandleFunc(")
+            && !first_literal_after_call(&statement.text)
+                .is_some_and(|pattern| pattern.contains(' '))
+        {
+            observations.push(incomplete_observation(
+                SourceLanguage::Go,
+                SourceFramework::GoNetHttp,
+                SourceRole::Provider,
+                None,
+                first_literal_after_call(&statement.text)
+                    .as_deref()
+                    .and_then(literal_path),
+                route_symbol(&statement.text, None),
+                statement.lines,
+                SourceWarning::DynamicMethod,
+            ));
         }
         if has_gin {
             append_receiver_route(
                 &mut observations,
-                SourceLanguage::Go,
                 SourceFramework::Gin,
                 &statement,
                 true,
+                &scope,
             );
         }
         if has_chi {
             append_receiver_route(
                 &mut observations,
-                SourceLanguage::Go,
                 SourceFramework::Chi,
                 &statement,
                 false,
+                &scope,
             );
         }
     }
+    let clients = BraceClients {
+        go_http: has_http,
+        ..BraceClients::default()
+    };
+    collect_brace_clients(source, SourceLanguage::Go, clients, &mut observations);
     observations
 }
 
@@ -212,17 +217,43 @@ fn collect_java_source<'a>(
     let web_client = source.contains("org.springframework.web.reactive.function.client.WebClient");
     let feign = source.contains("@FeignClient") || source.contains("openfeign.FeignClient");
     let lines = source.lines().collect::<Vec<_>>();
+    let methods = if spring && !feign {
+        java_method_lines(source)
+    } else {
+        Vec::new()
+    };
+    let mut class_prefix = None::<String>;
     for (index, line) in lines.iter().enumerate() {
         let trimmed = line.trim();
+        if java_annotates_type(&lines, index) {
+            if trimmed.starts_with("@RequestMapping") {
+                class_prefix = quoted_value(trimmed);
+            } else if trimmed.starts_with("@FeignClient") {
+                class_prefix = feign_path(trimmed);
+            }
+            continue;
+        }
         if spring
             && trimmed.starts_with('@')
             && let Some((method, path)) = java_mapping(trimmed)
         {
-            let symbol = lines
-                .iter()
-                .skip(index + 1)
-                .take(5)
-                .find_map(|candidate| java_method_name(candidate));
+            let path = match (&class_prefix, path) {
+                (Some(prefix), path) => Some(format!("/{prefix}/{}", path.unwrap_or_default())),
+                (None, path) => path,
+            };
+            let line = line_number(index);
+            let symbol = if feign {
+                lines
+                    .iter()
+                    .skip(index + 1)
+                    .take(5)
+                    .find_map(|candidate| java_method_name(candidate))
+            } else {
+                methods
+                    .iter()
+                    .find(|(start, _)| *start >= line)
+                    .map(|(_, name)| name.clone())
+            };
             observations.push(http_observation(
                 SourceLanguage::Java,
                 if feign {
@@ -245,28 +276,11 @@ fn collect_java_source<'a>(
             ));
         }
     }
-    if web_client {
-        for statement in statements(source) {
-            if !statement.text.contains(".uri(") {
-                continue;
-            }
-            let method = METHODS.iter().find_map(|(name, method)| {
-                statement
-                    .text
-                    .contains(&format!(".{name}()"))
-                    .then_some((*method).to_owned())
-            });
-            observations.push(http_observation(
-                SourceLanguage::Java,
-                SourceFramework::WebClient,
-                SourceRole::Consumer,
-                method,
-                literal_after(&statement.text, ".uri("),
-                None,
-                statement.lines,
-            ));
-        }
-    }
+    let clients = BraceClients {
+        web_client,
+        ..BraceClients::default()
+    };
+    collect_brace_clients(source, SourceLanguage::Java, clients, &mut observations);
     observations
 }
 
@@ -299,35 +313,20 @@ fn collect_ecmascript_at_path<'a>(
         || source.contains("require(\"axios\")")
         || source.contains("require('axios')");
     let nest = source.contains("@nestjs/common");
-    let express_receivers = assigned_receivers(source, "express");
+    let mut express_receivers = assigned_receivers(source, "express");
+    if express && source.contains("Router") {
+        express_receivers.extend(assigned_receivers(source, "Router"));
+    }
     let fastify_receivers = assigned_receivers(source, "fastify");
-    for statement in statements(source) {
-        if statement.text.contains("fetch(") {
-            let method = object_method(&statement.text).or_else(|| Some("GET".to_owned()));
-            observations.push(http_observation(
-                language,
-                SourceFramework::Fetch,
-                SourceRole::Consumer,
-                method,
-                literal_after(&statement.text, "fetch("),
-                None,
-                statement.lines,
-            ));
+    let statements = statements(source);
+    if express {
+        let imports = script_imports(&statements);
+        for mount in script_router_observations(&statements, language, &express_receivers, &imports)
+        {
+            observations.push(mount);
         }
-        if axios && statement.text.contains("axios.") {
-            let method = method_call(&statement.text, "axios.");
-            if method.is_some() {
-                observations.push(http_observation(
-                    language,
-                    SourceFramework::Axios,
-                    SourceRole::Consumer,
-                    method,
-                    first_literal_after_call(&statement.text),
-                    None,
-                    statement.lines,
-                ));
-            }
-        }
+    }
+    for statement in statements {
         if express {
             append_js_route(
                 &mut observations,
@@ -348,32 +347,79 @@ fn collect_ecmascript_at_path<'a>(
         }
     }
     if nest {
-        let lines = source.lines().collect::<Vec<_>>();
-        for (index, line) in lines.iter().enumerate() {
-            let Some((method, path)) = nest_mapping(line.trim()) else {
-                continue;
-            };
-            let symbol = lines
-                .iter()
-                .skip(index + 1)
-                .take(5)
-                .find_map(|candidate| ecmascript_method_name(candidate));
-            observations.push(http_observation(
-                language,
-                SourceFramework::NestJs,
-                SourceRole::Provider,
-                Some(method),
-                path,
-                symbol,
-                SourceLineRange {
-                    start: line_number(index),
-                    end: line_number(index),
-                },
-            ));
-        }
+        append_nest_routes(&mut observations, source, language);
+    }
+    if let Some(prefix) = nest_global_prefix(source) {
+        observations.push(mount_observation(
+            language,
+            SourceFramework::NestJs,
+            SymbolRef::Function(NEST_APPLICATION.to_owned()),
+            None,
+            Some(&prefix),
+            SourceLineRange { start: 1, end: 1 },
+        ));
     }
     append_next_app_routes(&mut observations, source_path, source, language);
+    let clients = BraceClients {
+        axios,
+        ..BraceClients::default()
+    };
+    collect_brace_clients(source, language, clients, &mut observations);
     observations
+}
+
+/// Repository-wide router of every `NestJS` controller, mounted by `setGlobalPrefix`.
+const NEST_APPLICATION: &str = "@nestjs";
+
+fn append_nest_routes(
+    observations: &mut SourceObservationCollector<'_>,
+    source: &str,
+    language: SourceLanguage,
+) {
+    let lines = source.lines().collect::<Vec<_>>();
+    let mut controller = None::<String>;
+    for (index, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+        if let Some(arguments) = trimmed.strip_prefix("@Controller(") {
+            let prefix = quoted_value(arguments.split(')').next().unwrap_or_default());
+            controller = Some(prefix.unwrap_or_default());
+            continue;
+        }
+        let Some((method, path)) = nest_mapping(trimmed) else {
+            continue;
+        };
+        let symbol = lines
+            .iter()
+            .skip(index + 1)
+            .take(5)
+            .find_map(|candidate| ecmascript_method_name(candidate));
+        let path = match (&controller, path) {
+            (Some(prefix), path) => Some(format!("/{prefix}/{}", path.unwrap_or_default())),
+            (None, Some(path)) if !path.starts_with('/') => Some(format!("/{path}")),
+            (None, path) => path,
+        };
+        let mut observation = http_observation(
+            language,
+            SourceFramework::NestJs,
+            SourceRole::Provider,
+            Some(method),
+            path,
+            symbol,
+            SourceLineRange {
+                start: line_number(index),
+                end: line_number(index),
+            },
+        );
+        observation.router = Some(SymbolRef::Function(NEST_APPLICATION.to_owned()));
+        observations.push(observation);
+    }
+}
+
+fn nest_global_prefix(source: &str) -> Option<String> {
+    let at = source.find(".setGlobalPrefix(")?;
+    quoted_values(&source[at..source[at..].find(')').map_or(source.len(), |end| at + end)])
+        .into_iter()
+        .next()
 }
 
 fn append_next_app_routes(
@@ -470,18 +516,28 @@ fn next_route_export_method(line: &str) -> Option<String> {
 }
 
 #[derive(Debug)]
-struct Statement {
-    text: String,
-    lines: SourceLineRange,
+pub(crate) struct Statement {
+    pub(crate) text: String,
+    pub(crate) lines: SourceLineRange,
 }
 
 fn statements(source: &str) -> Vec<Statement> {
+    split_statements(source, false)
+}
+
+/// Splits Go source into statements, also ending one at each opening or closing block brace so
+/// closures and blocks are visible as separate statements.
+fn go_statements(source: &str) -> Vec<Statement> {
+    split_statements(source, true)
+}
+
+fn split_statements(source: &str, split_blocks: bool) -> Vec<Statement> {
     let mut output = Vec::new();
     let mut text = String::new();
     let mut start = 1_u32;
     let mut depth = 0_i32;
     for (index, line) in source.lines().enumerate() {
-        let trimmed = line.split("//").next().unwrap_or_default().trim();
+        let trimmed = strip_line_comment(line).trim();
         if trimmed.is_empty() {
             continue;
         }
@@ -492,7 +548,8 @@ fn statements(source: &str) -> Vec<Statement> {
         }
         text.push_str(trimmed);
         depth += delimiter_delta(trimmed);
-        if depth <= 0 || trimmed.ends_with(';') {
+        let block_boundary = split_blocks && (trimmed.ends_with('{') || trimmed.starts_with('}'));
+        if depth <= 0 || trimmed.ends_with(';') || block_boundary {
             output.push(Statement {
                 text: std::mem::take(&mut text),
                 lines: SourceLineRange {
@@ -545,25 +602,31 @@ fn append_js_route(
     if method.is_none() {
         return;
     }
-    output.push(http_observation(
+    let mut observation = http_observation(
         language,
         framework,
         SourceRole::Provider,
-        method,
+        method.clone(),
         first_literal_after_call(&statement.text),
-        argument_identifier(&statement.text, 2),
+        route_symbol(&statement.text, method.as_deref()),
         statement.lines,
-    ));
+    );
+    observation.router = METHODS
+        .iter()
+        .find_map(|(name, _)| receiver_before(&statement.text, name))
+        .filter(|receiver| receivers.contains(*receiver))
+        .map(|receiver| SymbolRef::Local(receiver.to_owned()));
+    output.push(observation);
 }
 
 fn append_receiver_route(
     output: &mut SourceObservationCollector<'_>,
-    language: SourceLanguage,
     framework: SourceFramework,
     statement: &Statement,
     uppercase: bool,
+    scope: &GoRouterScope,
 ) {
-    let method = METHODS.iter().find_map(|(name, method)| {
+    let Some((call, method)) = METHODS.iter().find_map(|(name, method)| {
         let name = if uppercase {
             name.to_ascii_uppercase()
         } else {
@@ -575,20 +638,58 @@ fn append_receiver_route(
         statement
             .text
             .contains(&format!(".{name}("))
-            .then_some((*method).to_owned())
-    });
-    if method.is_none() {
+            .then(|| (name, (*method).to_owned()))
+    }) else {
         return;
-    }
-    output.push(http_observation(
-        language,
+    };
+    let mut observation = http_observation(
+        SourceLanguage::Go,
         framework,
         SourceRole::Provider,
-        method,
+        Some(method.clone()),
         first_literal_after_call(&statement.text),
-        argument_identifier(&statement.text, 2),
+        route_symbol(&statement.text, Some(&method)),
         statement.lines,
-    ));
+    );
+    observation.router =
+        receiver_before(&statement.text, &call).map(|receiver| scope.reference(receiver));
+    output.push(observation);
+}
+
+/// Records Go 1.22 `ServeMux` patterns such as `mux.HandleFunc("GET /orders/{id}", handler)`.
+fn append_go_pattern_route(
+    output: &mut SourceObservationCollector<'_>,
+    statement: &Statement,
+    scope: &GoRouterScope,
+) {
+    let Some(call) = ["HandleFunc", "Handle"]
+        .into_iter()
+        .find(|call| statement.text.contains(&format!(".{call}(")))
+    else {
+        return;
+    };
+    let Some(pattern) = first_literal_after_call(&statement.text) else {
+        return;
+    };
+    let Some((method, path)) = pattern.split_once(' ') else {
+        return;
+    };
+    let Some(method) = canonical_method(method) else {
+        return;
+    };
+    let mut observation = http_observation(
+        SourceLanguage::Go,
+        SourceFramework::GoNetHttp,
+        SourceRole::Provider,
+        Some(method.clone()),
+        Some(path.trim().to_owned()),
+        route_symbol(&statement.text, Some(&method)),
+        statement.lines,
+    );
+    observation.router = receiver_before(&statement.text, call)
+        .filter(|receiver| *receiver != "http")
+        .map(|receiver| scope.reference(receiver));
+    output.push(observation);
 }
 
 fn http_observation(
@@ -601,10 +702,9 @@ fn http_observation(
     lines: SourceLineRange,
 ) -> SourceObservation {
     let literal_missing = literal.is_none();
-    let unmapped_authority = role == SourceRole::Consumer
-        && literal
-            .as_deref()
-            .is_some_and(|value| value.starts_with("http://") || value.starts_with("https://"));
+    let authority = (role == SourceRole::Consumer)
+        .then(|| literal.as_deref().and_then(crate::routes::url_authority))
+        .flatten();
     let path = literal.and_then(|value| literal_path(&value));
     let mut warnings = Vec::new();
     if method.is_none() {
@@ -615,15 +715,11 @@ fn http_observation(
     } else if path.is_none() {
         warnings.push(SourceWarning::UnsupportedLiteralPath);
     }
-    if unmapped_authority {
-        warnings.push(SourceWarning::UnmappedAuthority);
-    }
     if role == SourceRole::Provider && symbol_name.is_none() {
         warnings.push(SourceWarning::MissingSymbol);
     }
     let confirmed = method.is_some()
         && path.is_some()
-        && !unmapped_authority
         && (role != SourceRole::Provider || symbol_name.is_some());
     SourceObservation {
         language,
@@ -634,6 +730,11 @@ fn http_observation(
         symbol_name,
         related_symbol: None,
         related_path: None,
+        authority,
+        router: None,
+        mount_parent: None,
+        url: None,
+        call: None,
         lines,
         status: if confirmed {
             SourceEpistemicStatus::Confirmed
@@ -668,6 +769,11 @@ fn incomplete_observation(
         symbol_name,
         related_symbol: None,
         related_path: None,
+        authority: None,
+        router: None,
+        mount_parent: None,
+        url: None,
+        call: None,
         lines,
         status: SourceEpistemicStatus::Incomplete,
         confidence: 0.0,
@@ -675,15 +781,24 @@ fn incomplete_observation(
     }
 }
 
-fn method_call(text: &str, prefix: &str) -> Option<String> {
-    METHODS.iter().find_map(|(name, method)| {
-        text.contains(&format!("{prefix}{name}("))
-            .then_some((*method).to_owned())
-            .or_else(|| {
-                text.contains(&format!("{prefix}{}(", name.to_ascii_uppercase()))
-                    .then_some((*method).to_owned())
-            })
-    })
+/// Removes a trailing `//` comment that starts outside string literals.
+fn strip_line_comment(line: &str) -> &str {
+    let mut quote = None;
+    let mut previous = '\0';
+    for (index, character) in line.char_indices() {
+        match quote {
+            Some(active) if character == active && previous != '\\' => quote = None,
+            None if matches!(character, '\'' | '"' | '`') => quote = Some(character),
+            None if character == '/' && previous == '/' => return &line[..index - 1],
+            Some(_) | None => {}
+        }
+        previous = if previous == '\\' && character == '\\' {
+            '\0'
+        } else {
+            character
+        };
+    }
+    line
 }
 
 fn first_literal_after_call(text: &str) -> Option<String> {
@@ -696,17 +811,11 @@ fn literal_after(text: &str, marker: &str) -> Option<String> {
     quoted_value(&text[start..])
 }
 
-fn nth_literal(text: &str, target: usize) -> Option<String> {
-    quoted_values(text)
-        .into_iter()
-        .nth(target.saturating_sub(1))
-}
-
 fn quoted_value(text: &str) -> Option<String> {
     quoted_values(text).into_iter().next()
 }
 
-fn quoted_values(text: &str) -> Vec<String> {
+pub(crate) fn quoted_values(text: &str) -> Vec<String> {
     let mut values = Vec::new();
     let mut quote = None;
     let mut start = 0;
@@ -722,15 +831,6 @@ fn quoted_values(text: &str) -> Vec<String> {
         }
     }
     values
-}
-
-fn literal_method_argument(text: &str) -> Option<String> {
-    nth_literal(text, 1).and_then(|value| canonical_method(&value))
-}
-
-fn object_method(text: &str) -> Option<String> {
-    let start = text.find("method")? + "method".len();
-    quoted_value(&text[start..]).and_then(|method| canonical_method(&method))
 }
 
 fn assigned_receivers(source: &str, factory: &str) -> BTreeSet<String> {
@@ -750,17 +850,94 @@ fn assigned_receivers(source: &str, factory: &str) -> BTreeSet<String> {
         .collect()
 }
 
-fn argument_identifier(text: &str, target: usize) -> Option<String> {
+/// Handler symbol of a route registration: its last argument as a dotted name, unwrapped from
+/// single-argument wrapper calls such as `asyncHandler(controller.list)`, or `METHOD path` for an
+/// inline function, which has no name of its own.
+fn route_symbol(text: &str, method: Option<&str>) -> Option<String> {
+    let arguments = top_level_arguments(text)?;
+    if arguments.len() < 2 {
+        return None;
+    }
+    let mut handler = arguments.last()?.trim();
+    loop {
+        let unprefixed = handler
+            .strip_prefix("async")
+            .map_or(handler, str::trim_start);
+        let inline = ["function", "(", "func(", "func "]
+            .iter()
+            .any(|prefix| unprefixed.starts_with(prefix))
+            || unprefixed
+                .split_once("=>")
+                .is_some_and(|(parameter, _)| is_dotted_name(parameter.trim()));
+        if inline {
+            let path = first_literal_after_call(text)?;
+            return Some(match method {
+                Some(method) => format!("{method} {path}"),
+                None => path,
+            });
+        }
+        let name = handler.trim_start_matches('&');
+        if is_dotted_name(name) {
+            return Some(name.to_owned());
+        }
+        let (callee, rest) = handler.split_once('(')?;
+        let inner = rest.strip_suffix(')')?.trim();
+        if !is_dotted_name(callee.trim())
+            || inner.is_empty()
+            || top_level_arguments(&format!("({inner})"))?.len() != 1
+        {
+            return None;
+        }
+        handler = inner;
+    }
+}
+
+fn is_dotted_name(text: &str) -> bool {
+    !text.is_empty()
+        && !text.starts_with('.')
+        && !text.ends_with('.')
+        && !text.starts_with(|character: char| character.is_ascii_digit())
+        && text.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '_' | '$' | '.')
+        })
+}
+
+/// Top-level arguments of the first call in `text`, ignoring nested groups and string contents.
+fn top_level_arguments(text: &str) -> Option<Vec<&str>> {
     let open = text.find('(')?;
-    let close = text.rfind(')')?;
-    let argument = text[open + 1..close].split(',').nth(target - 1)?.trim();
-    let identifier = argument
-        .trim_start_matches('&')
-        .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
-        .next()
-        .unwrap_or_default();
-    (!identifier.is_empty() && !identifier.starts_with(['"', '\'', '`']))
-        .then(|| identifier.to_owned())
+    let mut arguments = Vec::new();
+    let mut depth = 0_u32;
+    let mut quote = None;
+    let mut escaped = false;
+    let mut start = open + 1;
+    for (offset, character) in text[open + 1..].char_indices() {
+        let index = open + 1 + offset;
+        if let Some(delimiter) = quote {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == delimiter {
+                quote = None;
+            }
+            continue;
+        }
+        match character {
+            '"' | '\'' | '`' => quote = Some(character),
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' if depth == 0 => {
+                arguments.push(&text[start..index]);
+                return Some(arguments);
+            }
+            ')' | ']' | '}' => depth -= 1,
+            ',' if depth == 0 => {
+                arguments.push(&text[start..index]);
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn canonical_method(value: &str) -> Option<String> {
@@ -787,6 +964,29 @@ fn literal_path(value: &str) -> Option<String> {
     Some(normalize_source_http_path(
         path.split(['?', '#']).next().unwrap_or(path),
     ))
+}
+
+/// Whether the annotation on `index` precedes a class or interface declaration.
+fn java_annotates_type(lines: &[&str], index: usize) -> bool {
+    if !lines[index].trim_start().starts_with('@') {
+        return false;
+    }
+    lines
+        .iter()
+        .skip(index + 1)
+        .map(|line| line.trim())
+        .find(|line| !line.is_empty() && !line.starts_with('@') && !line.starts_with("//"))
+        .is_some_and(|declaration| {
+            declaration
+                .split_whitespace()
+                .any(|token| matches!(token, "class" | "interface" | "record"))
+        })
+}
+
+fn feign_path(line: &str) -> Option<String> {
+    let at = line.find("path")?;
+    let rest = line[at + "path".len()..].trim_start().strip_prefix('=')?;
+    quoted_value(rest)
 }
 
 fn java_mapping(line: &str) -> Option<(Option<String>, Option<String>)> {
@@ -822,8 +1022,12 @@ fn nest_mapping(line: &str) -> Option<(String, Option<String>)> {
         ("Put", "PUT"),
     ] {
         let marker = format!("@{name}(");
-        if line.contains(&marker) {
-            return Some((method.to_owned(), literal_after(line, &marker)));
+        if let Some(at) = line.find(&marker) {
+            let arguments = &line[at + marker.len()..];
+            let literal = (!arguments.trim_start().starts_with(')'))
+                .then(|| literal_after(line, &marker))
+                .flatten();
+            return Some((method.to_owned(), literal));
         }
     }
     None
@@ -911,6 +1115,68 @@ mod tests {
     }
 
     #[test]
+    fn route_handlers_should_be_named_through_members_middleware_wrappers_and_inline_functions() {
+        let express = r#"
+import express from "express";
+const app = express();
+app.get("/orders", auth, orders.list);
+app.post("/orders", asyncHandler(orders.create));
+app.delete("/orders/:id", async (req, res) => { res.sendStatus(204); });
+"#;
+        let gin = r#"
+package main
+import "github.com/gin-gonic/gin"
+func main() {
+	r := gin.Default()
+	r.GET("/orders/:id", handlers.GetOrder)
+}
+"#;
+        let handlers = parse_typescript_source(express)
+            .into_iter()
+            .chain(parse_go_source(gin))
+            .filter(|item| item.role == SourceRole::Provider)
+            .map(|item| item.symbol_name.unwrap_or_default())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            handlers,
+            [
+                "orders.list",
+                "orders.create",
+                "DELETE /orders/:id",
+                "handlers.GetOrder"
+            ]
+        );
+    }
+
+    #[test]
+    fn spring_handlers_should_be_the_method_declared_after_the_mapping() {
+        let source = r#"
+import org.springframework.web.bind.annotation.*;
+
+@RestController
+@RequestMapping("/orders")
+class OrdersController {
+    @GetMapping("/{id}")
+    @Operation(
+        summary = "Read one order (by id)",
+        description = "Returns the order")
+    @PreAuthorize("hasRole('reader')")
+    public Order read(@PathVariable String id) { return null; }
+
+    @PostMapping public Order create(@RequestBody Order order) { return order; }
+}
+"#;
+        let handlers = parse_java_source(source)
+            .into_iter()
+            .filter(|item| item.role == SourceRole::Provider)
+            .map(|item| item.symbol_name.unwrap_or_default())
+            .collect::<Vec<_>>();
+
+        assert_eq!(handlers, ["read", "create"]);
+    }
+
+    #[test]
     fn typescript_should_extract_fetch_axios_express_fastify_and_nestjs() {
         let source = r#"
 import express from "express";
@@ -938,6 +1204,33 @@ listUsers() {}
             ]
             .into_iter()
             .all(|framework| result.iter().any(|item| item.framework == framework))
+        );
+    }
+
+    #[test]
+    fn absolute_urls_should_survive_comment_stripping_and_record_their_authority() {
+        let source = "export async function load() {\n  await fetch('http://Orders-API:8080/v1/orders/42'); // primary\n  await fetch(\"https://payments.example.com/v1/orders/42\");\n}\n";
+
+        let result = parse_typescript_source(source);
+        let calls = result
+            .iter()
+            .map(|item| (item.status, item.path.as_deref(), item.authority.as_deref()))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            calls,
+            [
+                (
+                    SourceEpistemicStatus::Confirmed,
+                    Some("/v1/orders/42"),
+                    Some("orders-api:8080")
+                ),
+                (
+                    SourceEpistemicStatus::Confirmed,
+                    Some("/v1/orders/42"),
+                    Some("payments.example.com")
+                ),
+            ]
         );
     }
 

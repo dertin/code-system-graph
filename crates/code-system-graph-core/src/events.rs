@@ -1,6 +1,7 @@
 //! Conservative extraction of event contracts from `AsyncAPI` and source boundaries.
 
 use std::collections::BTreeSet;
+use std::sync::LazyLock;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -9,6 +10,7 @@ type Mapping = serde_json::Map<String, Value>;
 use thiserror::Error;
 
 use crate::SourceLanguage;
+use crate::markers::MarkerSet;
 
 const MAX_ASYNCAPI_BYTES: usize = 4 * 1024 * 1024;
 const MAX_SOURCE_BYTES: usize = 1024 * 1024;
@@ -268,8 +270,15 @@ fn parse_asyncapi_value(source_path: &str, input: &str) -> Result<Value, EventEx
 /// At most one mebibyte and 1,024 observations are inspected and returned.
 #[must_use]
 pub fn parse_event_source(language: SourceLanguage, input: &str) -> EventDocument {
+    parse_event_source_with_prefilter(language, input, true)
+}
+
+fn parse_event_source_with_prefilter(
+    language: SourceLanguage,
+    input: &str,
+    prefilter: bool,
+) -> EventDocument {
     let (source, truncated) = bounded_source(input);
-    let sanitized = sanitize_source(language, source);
     let mut document = EventDocument::default();
     if truncated {
         document.incomplete = true;
@@ -283,6 +292,13 @@ pub fn parse_event_source(language: SourceLanguage, input: &str) -> EventDocumen
             .warnings
             .push("source input contains a NUL byte".to_owned());
     }
+    // Comment removal can only join two tokens, which never forms a real call, so the raw text
+    // contains every marker that a sanitized candidate line can contain.
+    if prefilter && !EVENT_MARKERS.any_in(source) {
+        finish_document(&mut document);
+        return document;
+    }
+    let sanitized = sanitize_source(language, source);
 
     for index in 0..sanitized.len() {
         if document.observations.len() >= MAX_OBSERVATIONS {
@@ -1797,25 +1813,26 @@ fn source_candidate(lines: &[String], start: usize) -> Option<String> {
     Some(candidate)
 }
 
+const EVENT_LINE_MARKERS: [&str; 13] = [
+    "publish",
+    "subscribe",
+    "send",
+    "receive",
+    "consume",
+    "produce",
+    "queue",
+    "topic",
+    "writemessages",
+    "basic_",
+    "createstream",
+    "create_stream",
+    "pull(",
+];
+
+static EVENT_MARKERS: LazyLock<MarkerSet> = LazyLock::new(|| MarkerSet::new(&EVENT_LINE_MARKERS));
+
 fn possible_event_line(line: &str) -> bool {
-    let lower = line.to_ascii_lowercase();
-    [
-        "publish",
-        "subscribe",
-        "send",
-        "receive",
-        "consume",
-        "produce",
-        "queue",
-        "topic",
-        "writemessages",
-        "basic_",
-        "createstream",
-        "create_stream",
-        "pull(",
-    ]
-    .iter()
-    .any(|marker| lower.contains(marker))
+    EVENT_MARKERS.any_in(line)
 }
 
 fn delimiter_balance(line: &str) -> i32 {
@@ -2021,6 +2038,22 @@ fn observation_sort_key(observation: &EventObservation) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn source_marker_prefilter_should_not_change_any_corpus_document() {
+        let corpus = crate::markers::differential_corpus();
+        assert!(
+            corpus.len() > 100,
+            "differential corpus is unexpectedly small"
+        );
+        for (language, path, input) in corpus {
+            assert_eq!(
+                super::parse_event_source_with_prefilter(language, &input, true),
+                super::parse_event_source_with_prefilter(language, &input, false),
+                "event prefilter changed {path}"
+            );
+        }
+    }
+
     use super::*;
 
     fn source_observation(language: SourceLanguage, source: &str) -> EventObservation {

@@ -929,7 +929,6 @@ fn plugin_create_should_replace_only_an_owned_existing_plugin_binding() -> anyho
     );
     let binding_path = base.join(".local/code-system-graph/mcp-binding.json");
     let mut binding: serde_json::Value = serde_json::from_slice(&std::fs::read(&binding_path)?)?;
-    binding["generator"] = serde_json::json!("csgraph plugin compose");
     binding["workspace"] = serde_json::json!("locally-edited");
     binding
         .as_object_mut()

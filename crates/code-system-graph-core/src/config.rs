@@ -563,6 +563,7 @@ mod tests {
             implementations: None,
             excludes: None,
             include_defaults: None,
+            authorities: None,
         };
 
         let resolved = resolve_repository_config(repository.path(), &workspace)?;
@@ -600,6 +601,7 @@ mod tests {
             implementations: None,
             excludes: Some(vec!["workspace/**".to_owned()]),
             include_defaults: Some(Vec::new()),
+            authorities: None,
         };
 
         let resolved = resolve_repository_config(repository.path(), &workspace)?;
@@ -637,6 +639,7 @@ mod tests {
             implementations: None,
             excludes: None,
             include_defaults: None,
+            authorities: None,
         };
 
         let resolved = resolve_repository_config_with_use_gitignore(
@@ -669,6 +672,7 @@ mod tests {
             implementations: None,
             excludes: None,
             include_defaults: None,
+            authorities: None,
         };
 
         let resolved = resolve_repository_config(repository.path(), &workspace)?;
@@ -697,6 +701,7 @@ mod tests {
             implementations: None,
             excludes: None,
             include_defaults: None,
+            authorities: None,
         };
 
         let resolved = resolve_repository_config_with_use_gitignore(
@@ -721,10 +726,12 @@ mod tests {
             implementations: None,
             excludes: Some(vec!["coverage/**".to_owned()]),
             include_defaults: Some(vec!["vendor/internal-sdk/**".to_owned()]),
+            authorities: None,
         };
         let redundant = RepositoryConfig {
             excludes: Some(vec!["./coverage//./**".to_owned()]),
             include_defaults: Some(vec!["./vendor//internal-sdk/./**".to_owned()]),
+            authorities: None,
             ..canonical.clone()
         };
 
@@ -754,6 +761,7 @@ mod tests {
             implementations: None,
             excludes: None,
             include_defaults: Some(vec!["vendor/internal-sdk/**".to_owned()]),
+            authorities: None,
         };
 
         let resolved = resolve_repository_config(repository.path(), &workspace)?;
@@ -786,6 +794,7 @@ mod tests {
             implementations: None,
             excludes: None,
             include_defaults: None,
+            authorities: None,
         };
 
         let resolved = resolve_repository_config(repository.path(), &workspace)?;
@@ -815,6 +824,7 @@ mod tests {
             implementations: None,
             excludes: None,
             include_defaults: None,
+            authorities: None,
         };
 
         let result = resolve_repository_config(repository.path(), &workspace);
@@ -839,6 +849,7 @@ mod tests {
             implementations: None,
             excludes: None,
             include_defaults: None,
+            authorities: None,
         };
 
         let result = resolve_repository_config(repository.path(), &workspace);
@@ -866,6 +877,7 @@ mod tests {
             implementations: None,
             excludes: None,
             include_defaults: None,
+            authorities: None,
         };
 
         let result = resolve_repository_config(&repository, &workspace);
@@ -895,6 +907,7 @@ mod tests {
             implementations: None,
             excludes: None,
             include_defaults: None,
+            authorities: None,
         };
 
         let result = resolve_repository_config(repository.path(), &workspace);
@@ -916,6 +929,7 @@ mod tests {
             implementations: None,
             excludes: None,
             include_defaults: None,
+            authorities: None,
         };
 
         let result = resolve_repository_config(repository.path(), &workspace);
@@ -935,6 +949,7 @@ mod tests {
             implementations: None,
             excludes: None,
             include_defaults: None,
+            authorities: None,
         };
         let mut resolved = resolve_repository_config(repository.path(), &workspace)?;
 

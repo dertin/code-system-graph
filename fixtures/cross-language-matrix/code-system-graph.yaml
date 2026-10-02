@@ -1,0 +1,46 @@
+version: 1
+name: cross-language-matrix
+repos:
+  fastapi:
+    path: fastapi
+    authorities: [fastapi-svc]
+  flask:
+    path: flask
+    authorities: [flask-svc]
+  express:
+    path: express
+    authorities: [express-svc]
+  nest:
+    path: nest
+    authorities: [nest-svc]
+  next:
+    path: next
+    authorities: [next-svc]
+  spring:
+    path: spring
+    authorities: [spring-svc]
+  gin:
+    path: gin
+    authorities: [gin-svc]
+  chi:
+    path: chi
+    authorities: [chi-svc]
+  nethttp:
+    path: nethttp
+    authorities: [nethttp-svc]
+  axum:
+    path: axum
+    authorities: [axum-svc]
+  actix:
+    path: actix
+    authorities: [actix-svc]
+  tests-python:
+    path: tests-python
+  tests-ts:
+    path: tests-ts
+  tests-go:
+    path: tests-go
+  tests-java:
+    path: tests-java
+  tests-rust:
+    path: tests-rust

@@ -244,7 +244,7 @@ fn cli_should_expose_query_and_community_json() -> anyhow::Result<()> {
         .args(["--workspace", "commerce-platform", "--limit", "2"])
         .output()?;
     let communities = std::process::Command::new(env!("CARGO_BIN_EXE_csgraph"))
-        .args(["communities", "list", "--database"])
+        .args(["communities", "--database"])
         .arg(&database)
         .args(["--workspace", "commerce-platform", "--limit", "2"])
         .output()?;

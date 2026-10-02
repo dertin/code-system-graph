@@ -170,7 +170,7 @@ fn interconnected_100k_file_workspace_should_complete_under_finite_defaults() ->
     assert!(incremental.changed_input_count > 0);
 
     let mut work_path = database.as_os_str().to_os_string();
-    work_path.push(".work-v1.db");
+    work_path.push(".work.db");
     let work_path = std::path::PathBuf::from(work_path);
     let work_size = std::fs::metadata(&work_path)?.len();
     let cache_bytes: u64 = rusqlite::Connection::open(&work_path)?

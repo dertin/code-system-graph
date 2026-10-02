@@ -66,6 +66,12 @@ impl ScanJobTracker {
         }
     }
 
+    /// Phase of the most recent progress or phase change.
+    #[must_use]
+    pub const fn phase(&self) -> JobPhase {
+        self.phase
+    }
+
     /// Changes phase after checking the active deadlines.
     ///
     /// # Errors

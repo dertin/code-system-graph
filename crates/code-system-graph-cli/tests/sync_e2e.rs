@@ -444,7 +444,7 @@ fn watch_failure_should_not_persist_or_emit_parser_literals() -> anyhow::Result<
         .arg(&database)
         .output()?;
     anyhow::ensure!(status_output.status.success(), "status command failed");
-    let sidecar = std::path::PathBuf::from(format!("{}.work-v1.db", database.display()));
+    let sidecar = std::path::PathBuf::from(format!("{}.work.db", database.display()));
     let persisted = std::fs::read(sidecar)?;
     for (surface, bytes) in [
         ("termination JSONL", termination.as_bytes()),

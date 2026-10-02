@@ -66,7 +66,6 @@ struct AcceptedEdge {
 struct WeightedGraph {
     nodes: Vec<Node>,
     adjacency: Vec<BTreeMap<usize, f64>>,
-    undirected_edges: Vec<(usize, usize, f64)>,
     accepted_edges: Vec<AcceptedEdge>,
     weighted_degree: Vec<f64>,
     neighbor_count: Vec<usize>,
@@ -496,7 +495,6 @@ fn build_graph(
     WeightedGraph {
         nodes: graph_nodes,
         adjacency,
-        undirected_edges,
         accepted_edges,
         weighted_degree,
         neighbor_count,
@@ -578,6 +576,10 @@ where
     assignments
 }
 
+/// Local-moving Louvain phase. Each move is scored by its exact modularity gain: for node `i` with
+/// weighted degree `k`, links `k_c` to community `c`, and community degree totals `d_c`, moving from
+/// `a` to `b` changes modularity by
+/// `(k_b - k_a) / m - resolution * k * (d_b - (d_a - k)) / (2 * m^2)`.
 fn louvain<F>(
     graph: &WeightedGraph,
     seed: u64,
@@ -588,43 +590,62 @@ fn louvain<F>(
 where
     F: FnMut(u64),
 {
-    let mut assignments: Vec<usize> = (0..graph.nodes.len()).collect();
-    if graph.total_undirected_weight <= EPSILON {
+    let count = graph.nodes.len();
+    let mut assignments: Vec<usize> = (0..count).collect();
+    let total = graph.total_undirected_weight;
+    if total <= EPSILON {
         return assignments;
     }
+    let label_keys = (0..count)
+        .map(|label| seeded_label_key(graph, seed, label))
+        .collect::<Vec<_>>();
+    let mut community_degree = graph.weighted_degree.clone();
+    let mut members = vec![1_usize; count];
+    let mut empty = BTreeSet::new();
     let order = seeded_node_order(graph, seed);
     for _ in 0..max_iterations {
         let mut changed = false;
         for &node in &order {
             let current = assignments[node];
-            let baseline = modularity(graph, &assignments, resolution);
-            let mut candidates = BTreeSet::from([current]);
-            for &neighbor in graph.adjacency[node].keys() {
-                candidates.insert(assignments[neighbor]);
+            let degree = graph.weighted_degree[node];
+            let mut links = BTreeMap::from([(current, 0.0)]);
+            for (&neighbor, &weight) in &graph.adjacency[node] {
+                if neighbor != node {
+                    *links.entry(assignments[neighbor]).or_insert(0.0) += weight;
+                }
             }
-            if let Some(empty) = first_empty_label(&assignments) {
-                candidates.insert(empty);
+            if let Some(&label) = empty.first() {
+                links.entry(label).or_insert(0.0);
             }
+            let current_links = links[&current];
+            let source_degree = community_degree[current] - degree;
             let mut best = current;
-            let mut best_modularity = baseline;
-            for candidate in candidates {
+            let mut best_gain = 0.0;
+            for (&candidate, &candidate_links) in &links {
                 if candidate == current {
                     continue;
                 }
-                assignments[node] = candidate;
-                let candidate_modularity = modularity(graph, &assignments, resolution);
-                assignments[node] = current;
-                if candidate_modularity > best_modularity + EPSILON
-                    || ((candidate_modularity - best_modularity).abs() <= EPSILON
-                        && candidate_modularity > baseline + EPSILON
-                        && seeded_label_key(graph, seed, candidate)
-                            < seeded_label_key(graph, seed, best))
+                let gain = (candidate_links - current_links) / total
+                    - resolution * degree * (community_degree[candidate] - source_degree)
+                        / (2.0 * total * total);
+                if gain > best_gain + EPSILON
+                    || ((gain - best_gain).abs() <= EPSILON
+                        && gain > EPSILON
+                        && label_keys[candidate] < label_keys[best])
                 {
                     best = candidate;
-                    best_modularity = candidate_modularity;
+                    best_gain = gain;
                 }
             }
-            if best != current && best_modularity > baseline + EPSILON {
+            if best != current && best_gain > EPSILON {
+                community_degree[current] -= degree;
+                community_degree[best] += degree;
+                members[current] -= 1;
+                members[best] += 1;
+                if members[current] == 0 {
+                    empty.insert(current);
+                }
+                empty.remove(&best);
                 assignments[node] = best;
                 changed = true;
             }
@@ -635,42 +656,6 @@ where
         }
     }
     assignments
-}
-
-/// Computes generalized undirected modularity:
-/// `sum_c(internal_weight_c / m - resolution * (degree_c / (2m))^2)`.
-fn modularity(graph: &WeightedGraph, assignments: &[usize], resolution: f64) -> f64 {
-    let total = graph.total_undirected_weight;
-    if total <= EPSILON {
-        return 0.0;
-    }
-    let mut internal = BTreeMap::<usize, f64>::new();
-    let mut degree = BTreeMap::<usize, f64>::new();
-    for (node, &community) in assignments.iter().enumerate() {
-        *degree.entry(community).or_default() += graph.weighted_degree[node];
-    }
-    for &(source, target, weight) in &graph.undirected_edges {
-        if assignments[source] == assignments[target] {
-            *internal.entry(assignments[source]).or_default() += weight;
-        }
-    }
-    degree
-        .into_iter()
-        .map(|(community, community_degree)| {
-            let inside = internal.get(&community).copied().unwrap_or_default();
-            inside / total - resolution * (community_degree / (2.0 * total)).powi(2)
-        })
-        .sum()
-}
-
-fn first_empty_label(assignments: &[usize]) -> Option<usize> {
-    let mut used = vec![false; assignments.len()];
-    for &assignment in assignments {
-        if let Some(slot) = used.get_mut(assignment) {
-            *slot = true;
-        }
-    }
-    used.iter().position(|value| !value)
 }
 
 fn seeded_node_order(graph: &WeightedGraph, seed: u64) -> Vec<usize> {
@@ -1530,6 +1515,149 @@ mod tests {
             error,
             CommunityError::InvalidEdgeConfidence { .. }
         ));
+    }
+
+    /// Computes generalized undirected modularity:
+    /// `sum_c(internal_weight_c / m - resolution * (degree_c / (2m))^2)`.
+    fn modularity(graph: &WeightedGraph, assignments: &[usize], resolution: f64) -> f64 {
+        let total = graph.total_undirected_weight;
+        if total <= EPSILON {
+            return 0.0;
+        }
+        let mut internal = BTreeMap::<usize, f64>::new();
+        let mut degree = BTreeMap::<usize, f64>::new();
+        for (node, &community) in assignments.iter().enumerate() {
+            *degree.entry(community).or_default() += graph.weighted_degree[node];
+        }
+        for (source, neighbors) in graph.adjacency.iter().enumerate() {
+            for (&target, &weight) in neighbors.range(source..) {
+                if assignments[source] == assignments[target] {
+                    *internal.entry(assignments[source]).or_default() += weight;
+                }
+            }
+        }
+        degree
+            .into_iter()
+            .map(|(community, community_degree)| {
+                let inside = internal.get(&community).copied().unwrap_or_default();
+                inside / total - resolution * (community_degree / (2.0 * total)).powi(2)
+            })
+            .sum()
+    }
+
+    fn first_empty_label(assignments: &[usize]) -> Option<usize> {
+        let mut used = vec![false; assignments.len()];
+        for &assignment in assignments {
+            if let Some(slot) = used.get_mut(assignment) {
+                *slot = true;
+            }
+        }
+        used.iter().position(|value| !value)
+    }
+
+    /// Louvain local moving that recomputes full modularity for every candidate move.
+    fn reference_louvain(
+        graph: &WeightedGraph,
+        seed: u64,
+        resolution: f64,
+        max_iterations: u32,
+    ) -> Vec<usize> {
+        let mut assignments: Vec<usize> = (0..graph.nodes.len()).collect();
+        if graph.total_undirected_weight <= EPSILON {
+            return assignments;
+        }
+        let order = seeded_node_order(graph, seed);
+        for _ in 0..max_iterations {
+            let mut changed = false;
+            for &node in &order {
+                let current = assignments[node];
+                let baseline = modularity(graph, &assignments, resolution);
+                let mut candidates = BTreeSet::from([current]);
+                for &neighbor in graph.adjacency[node].keys() {
+                    candidates.insert(assignments[neighbor]);
+                }
+                if let Some(empty) = first_empty_label(&assignments) {
+                    candidates.insert(empty);
+                }
+                let mut best = current;
+                let mut best_modularity = baseline;
+                for candidate in candidates {
+                    if candidate == current {
+                        continue;
+                    }
+                    assignments[node] = candidate;
+                    let candidate_modularity = modularity(graph, &assignments, resolution);
+                    assignments[node] = current;
+                    if candidate_modularity > best_modularity + EPSILON
+                        || ((candidate_modularity - best_modularity).abs() <= EPSILON
+                            && candidate_modularity > baseline + EPSILON
+                            && seeded_label_key(graph, seed, candidate)
+                                < seeded_label_key(graph, seed, best))
+                    {
+                        best = candidate;
+                        best_modularity = candidate_modularity;
+                    }
+                }
+                if best != current && best_modularity > baseline + EPSILON {
+                    assignments[node] = best;
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        assignments
+    }
+
+    fn pseudo_random_graph(seed: u64) -> (Vec<Node>, Vec<Edge>) {
+        let mut state = seed;
+        let mut next = move |bound: u64| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) % bound
+        };
+        let nodes = (0..60)
+            .map(|index| {
+                let id = format!("n{index:02}");
+                node(&id, NodeKind::Service, "repo:one", &id)
+            })
+            .collect::<Vec<_>>();
+        let kinds = [
+            EdgeKind::CallsRemote,
+            EdgeKind::ManualLink,
+            EdgeKind::Consumes,
+            EdgeKind::Validates,
+        ];
+        let edges = (0..180)
+            .map(|number| {
+                let source = format!("n{:02}", next(60));
+                let target = format!("n{:02}", next(60));
+                let kind = kinds[usize::try_from(next(4)).expect("small index")];
+                let confidence = 0.5 + f32::from(u8::try_from(next(50)).expect("small")) / 100.0;
+                edge(&format!("e{number}"), &source, &target, kind, confidence)
+            })
+            .collect();
+        (nodes, edges)
+    }
+
+    #[test]
+    fn incremental_louvain_should_match_full_modularity_recomputation() {
+        for graph_seed in [1, 2, 3, 4] {
+            let (nodes, edges) = pseudo_random_graph(graph_seed);
+            let config = config(CommunityAlgorithm::Louvain);
+            let weights = validate_inputs(&nodes, &edges, &config).expect("weights");
+            let selected = scoped_node_ids(&nodes, &edges, &config, &weights).expect("scope");
+            let graph = build_graph(&nodes, &edges, &config, &weights, &selected);
+            for (seed, resolution) in [(17, 1.0), (3, 0.5), (99, 2.0)] {
+                assert_eq!(
+                    louvain(&graph, seed, resolution, 100, &mut |_| {}),
+                    reference_louvain(&graph, seed, resolution, 100),
+                    "graph {graph_seed}, seed {seed}, resolution {resolution}"
+                );
+            }
+        }
     }
 
     #[test]

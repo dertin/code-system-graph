@@ -10,6 +10,7 @@ use crate::extraction_budget::{
     ExtractionBudgetOverrides, ExtractionBudgets, InvalidExtractionBudget
 };
 use crate::ignore_policy::{IgnorePatternError, validate_excludes, validate_include_defaults};
+use crate::routes::normalize_authority;
 
 const MANUAL_ENDPOINT_MAX_BYTES: usize = 2_048;
 const MANUAL_CONTRACT_MAX_BYTES: usize = 1_024;
@@ -57,6 +58,9 @@ pub struct RepositoryConfig {
     pub excludes: Option<Vec<String>>,
     /// Repository-relative exceptions to reactivable built-in exclusions.
     pub include_defaults: Option<Vec<String>>,
+    /// `host` or `host:port` authorities served by this repository. An entry without a port
+    /// matches every port of that host.
+    pub authorities: Option<Vec<String>>,
 }
 
 /// Additive manifest settings introduced without changing exhaustively constructible public
@@ -101,6 +105,7 @@ struct RepositoryConfigWire {
     excludes: Option<Vec<String>>,
     include_defaults: Option<Vec<String>>,
     use_gitignore: Option<bool>,
+    authorities: Option<Vec<String>>,
 }
 
 /// Exact manual relationship or automatic-link suppression.
@@ -254,6 +259,24 @@ pub enum ManifestError {
         /// Repeated relationship.
         relation: EdgeKind,
     },
+    /// A repository authority is not a `host` or `host:port` value.
+    #[error(
+        "manifest field `{field}` must be a `host` or `host:port` authority without scheme or path"
+    )]
+    InvalidAuthority {
+        /// Dot-style field location.
+        field: String,
+    },
+    /// Two repositories declare the same authority.
+    #[error("authority `{authority}` is declared by both `repos.{first}` and `repos.{second}`")]
+    DuplicateAuthority {
+        /// Normalized authority.
+        authority: String,
+        /// Alias of the first declaring repository.
+        first: String,
+        /// Alias of the repeating repository.
+        second: String,
+    },
 }
 
 /// Parses and semantically validates a strict workspace manifest.
@@ -293,6 +316,7 @@ pub fn parse_manifest_with_extensions(
                     implementations: repository.implementations,
                     excludes: repository.excludes,
                     include_defaults: repository.include_defaults,
+                    authorities: repository.authorities,
                 },
             )
         })
@@ -386,7 +410,30 @@ fn validate_manifest(manifest: WorkspaceManifest) -> Result<WorkspaceManifest, M
         }
         validate_repository_ignore_patterns(alias, repository)?;
     }
+    validate_authorities(&manifest.repos)?;
     Ok(manifest)
+}
+
+fn validate_authorities(repos: &BTreeMap<String, RepositoryConfig>) -> Result<(), ManifestError> {
+    let mut owners = BTreeMap::<String, &str>::new();
+    for (alias, repository) in repos {
+        for (index, authority) in repository.authorities.iter().flatten().enumerate() {
+            let field = format!("repos.{alias}.authorities[{index}]");
+            validate_not_empty(&field, authority)?;
+            let normalized =
+                normalize_authority(authority).ok_or(ManifestError::InvalidAuthority { field })?;
+            if let Some(first) = owners.insert(normalized.clone(), alias)
+                && first != alias
+            {
+                return Err(ManifestError::DuplicateAuthority {
+                    authority: normalized,
+                    first: first.to_owned(),
+                    second: alias.clone(),
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 fn validate_repository_ignore_patterns(
@@ -876,6 +923,61 @@ repos:
         assert!(matches!(
             result,
             Err(ManifestError::ManualSelfLink { index: 0, .. })
+        ));
+    }
+
+    const AUTHORITIES: &str = r"
+version: 1
+name: commerce
+repos:
+  orders:
+    path: ../orders
+    authorities: [orders-api:8080, orders.internal]
+  billing:
+    path: ../billing
+    authorities: [BILLING]
+";
+
+    #[test]
+    fn parse_manifest_should_accept_repository_authorities() {
+        let manifest = parse_manifest(AUTHORITIES).expect("valid authorities");
+
+        assert_eq!(
+            manifest.repos["orders"].authorities,
+            Some(vec![
+                "orders-api:8080".to_owned(),
+                "orders.internal".to_owned()
+            ])
+        );
+    }
+
+    #[test]
+    fn parse_manifest_should_reject_authorities_with_scheme_or_path() {
+        for authority in ["http://orders", "orders/v1", "orders:http"] {
+            let input = AUTHORITIES.replace("orders.internal", authority);
+
+            let result = parse_manifest(&input);
+
+            assert!(
+                matches!(
+                    result,
+                    Err(ManifestError::InvalidAuthority { ref field })
+                        if field == "repos.orders.authorities[1]"
+                ),
+                "{authority}: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_manifest_should_reject_an_authority_declared_by_two_repositories() {
+        let input = AUTHORITIES.replace("[BILLING]", "[Orders-API:8080]");
+
+        let result = parse_manifest(&input);
+
+        assert!(matches!(
+            result,
+            Err(ManifestError::DuplicateAuthority { authority, .. }) if authority == "orders-api:8080"
         ));
     }
 }

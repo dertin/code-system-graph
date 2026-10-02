@@ -163,6 +163,7 @@ fn search_envelope(fixture: &Fixture) -> ToolEnvelope<SearchReport> {
         schema_version: 2,
         status: ToolStatus::Degraded,
         data: Some(SearchReport {
+            link_gaps: Vec::new(),
             hits: vec![
                 SearchHit {
                     node: fixture.api.clone(),
@@ -206,6 +207,7 @@ fn single_search_envelope(node: Node) -> ToolEnvelope<SearchReport> {
         schema_version: 2,
         status: ToolStatus::Ok,
         data: Some(SearchReport {
+            link_gaps: Vec::new(),
             hits: vec![SearchHit {
                 node,
                 score: 10.0,
@@ -286,6 +288,7 @@ fn repository_query_does_not_suggest_broad_source_exploration() {
         schema_version: 2,
         status: ToolStatus::Ok,
         data: Some(SearchReport {
+            link_gaps: Vec::new(),
             hits: vec![
                 SearchHit {
                     node: repository.clone(),
@@ -914,6 +917,7 @@ fn query_collapses_file_roles_and_omits_structural_contains_noise() {
         schema_version: 2,
         status: ToolStatus::Ok,
         data: Some(SearchReport {
+            link_gaps: Vec::new(),
             hits: vec![
                 SearchHit {
                     node: artifact,

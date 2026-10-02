@@ -8,7 +8,7 @@ use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension};
 use same_file::Handle;
 
 use super::{
-    LATEST_SCHEMA_VERSION, RestoreReport, StoreError, StoreLock, open_read_only_connection, schema_version, validate_exact_schema
+    RestoreReport, StoreError, StoreLock, open_read_only_connection, stored_schema_id, validate_exact_schema
 };
 #[cfg(windows)]
 use crate::file_permissions::current_user_sid_string;
@@ -61,7 +61,10 @@ fn copy_database_file_snapshot(
     destination: &Path,
 ) -> Result<blake3::Hash, StoreError> {
     let destination = canonical_destination_path(destination)?;
-    let parent = destination.parent().unwrap_or_else(|| Path::new("."));
+    let parent = destination
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
     let directory = OwnedStagingDirectory::create(parent).map_err(|source| StoreError::Io {
         path: parent.to_path_buf(),
         source,
@@ -278,7 +281,10 @@ fn create_private_staging_directory(_path: &Path) -> std::io::Result<()> {
 
 impl StagedDatabase {
     fn create(destination: &Path) -> Result<(Self, Connection), StoreError> {
-        let parent = destination.parent().unwrap_or_else(|| Path::new("."));
+        let parent = destination
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
         let directory = OwnedStagingDirectory::create(parent).map_err(|source| StoreError::Io {
             path: parent.to_path_buf(),
             source,
@@ -402,7 +408,10 @@ fn canonical_destination_path(path: &Path) -> Result<PathBuf, StoreError> {
             "database path must include a file name",
         ),
     })?;
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent).map_err(|source| StoreError::Io {
         path: parent.to_path_buf(),
         source,
@@ -783,17 +792,17 @@ pub(super) fn restore_database(
         configure_staged_restore(&destination)?;
         validate_backup(&destination, staging.path())?;
         restrict_store_permissions(staging.path())?;
-        schema_version(&destination)
+        stored_schema_id(&destination)
     })();
     drop(destination);
     let restore_result = match restore_result {
-        Ok(schema_version) => source.finish().map(|()| schema_version),
+        Ok(schema_id) => source.finish().map(|()| schema_id),
         Err(error) => Err(error),
     };
     drop(source);
 
-    let schema_version = match restore_result {
-        Ok(schema_version) => schema_version,
+    let schema_id = match restore_result {
+        Ok(schema_id) => schema_id,
         Err(operation) => return Err(staging.cleanup_error(operation)),
     };
 
@@ -842,7 +851,7 @@ pub(super) fn restore_database(
     Ok(RestoreReport {
         source_path: backup_path.to_path_buf(),
         safety_backup_path,
-        schema_version,
+        schema_id,
     })
 }
 
@@ -1002,7 +1011,10 @@ fn canonical_path_for_comparison(path: &Path) -> std::io::Result<PathBuf> {
         Ok(canonical) => Ok(canonical),
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
             let file_name = path.file_name().ok_or(source)?;
-            let parent = path.parent().unwrap_or_else(|| Path::new("."));
+            let parent = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
             Ok(fs::canonicalize(parent)?.join(file_name))
         }
         Err(source) => Err(source),
@@ -1067,10 +1079,7 @@ fn validate_backup(connection: &Connection, path: &Path) -> Result<(), StoreErro
     validate_exact_schema(connection).map_err(|error| match error {
         StoreError::InvalidSchema => StoreError::InvalidBackup {
             path: path.to_path_buf(),
-            reason: format!(
-                "schema objects do not match the exact supported contract version \
-                 {LATEST_SCHEMA_VERSION}"
-            ),
+            reason: "schema objects do not match the exact supported schema".to_owned(),
         },
         other => other,
     })

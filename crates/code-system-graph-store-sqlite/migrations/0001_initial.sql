@@ -1,7 +1,7 @@
 PRAGMA foreign_keys = ON;
 
 CREATE TABLE IF NOT EXISTS schema_metadata (
-    version INTEGER PRIMARY KEY,
+    schema_id TEXT PRIMARY KEY,
     instance_id TEXT NOT NULL,
     applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -53,42 +53,57 @@ CREATE INDEX IF NOT EXISTS workspace_repositories_repo_idx
 ON workspace_repositories(repo_id);
 
 CREATE TABLE IF NOT EXISTS repo_snapshots (
-    id TEXT PRIMARY KEY,
-    workspace_name TEXT NOT NULL REFERENCES workspaces(name) ON DELETE CASCADE,
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    is_current INTEGER NOT NULL DEFAULT 0 CHECK (is_current IN (0, 1))
+    workspace_name TEXT PRIMARY KEY REFERENCES workspaces(name) ON DELETE CASCADE,
+    id TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
-
-CREATE UNIQUE INDEX IF NOT EXISTS one_current_snapshot_per_workspace
-ON repo_snapshots(workspace_name)
-WHERE is_current = 1;
 
 CREATE UNIQUE INDEX IF NOT EXISTS repo_snapshots_id_workspace_idx
 ON repo_snapshots(id, workspace_name);
 
 CREATE TABLE IF NOT EXISTS nodes (
-    snapshot_id TEXT NOT NULL REFERENCES repo_snapshots(id) ON DELETE CASCADE,
+    node_rowid INTEGER PRIMARY KEY,
+    workspace_name TEXT NOT NULL REFERENCES workspaces(name) ON DELETE CASCADE,
     id TEXT NOT NULL,
     kind TEXT NOT NULL,
     repo_id TEXT,
     stable_key TEXT NOT NULL,
     label TEXT NOT NULL,
-    PRIMARY KEY (snapshot_id, id)
+    UNIQUE (workspace_name, id)
 );
 
-CREATE INDEX IF NOT EXISTS nodes_kind_idx ON nodes(kind);
+CREATE INDEX IF NOT EXISTS nodes_kind_idx ON nodes(workspace_name, kind);
 CREATE INDEX IF NOT EXISTS nodes_repo_idx ON nodes(repo_id);
-CREATE INDEX IF NOT EXISTS nodes_stable_key_idx ON nodes(stable_key);
+CREATE INDEX IF NOT EXISTS nodes_stable_key_idx ON nodes(workspace_name, stable_key);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
-    snapshot_id UNINDEXED,
-    node_id UNINDEXED,
     label,
     stable_key
 );
 
+CREATE TRIGGER IF NOT EXISTS nodes_fts_insert
+AFTER INSERT ON nodes
+BEGIN
+    INSERT INTO nodes_fts(rowid, label, stable_key)
+    VALUES (NEW.node_rowid, NEW.label, NEW.stable_key);
+END;
+
+CREATE TRIGGER IF NOT EXISTS nodes_fts_update
+AFTER UPDATE OF label, stable_key ON nodes
+BEGIN
+    DELETE FROM nodes_fts WHERE rowid = OLD.node_rowid;
+    INSERT INTO nodes_fts(rowid, label, stable_key)
+    VALUES (NEW.node_rowid, NEW.label, NEW.stable_key);
+END;
+
+CREATE TRIGGER IF NOT EXISTS nodes_fts_delete
+AFTER DELETE ON nodes
+BEGIN
+    DELETE FROM nodes_fts WHERE rowid = OLD.node_rowid;
+END;
+
 CREATE TABLE IF NOT EXISTS evidence (
-    snapshot_id TEXT NOT NULL REFERENCES repo_snapshots(id) ON DELETE CASCADE,
+    workspace_name TEXT NOT NULL REFERENCES workspaces(name) ON DELETE CASCADE,
     id TEXT NOT NULL,
     repo_id TEXT,
     file_path TEXT,
@@ -105,53 +120,83 @@ CREATE TABLE IF NOT EXISTS evidence (
     confidence REAL NOT NULL CHECK (confidence >= 0.0 AND confidence <= 1.0),
     content_hash TEXT,
     observed_at_commit TEXT,
-    PRIMARY KEY (snapshot_id, id)
-);
+    PRIMARY KEY (workspace_name, id)
+) WITHOUT ROWID;
 
-CREATE INDEX IF NOT EXISTS evidence_snapshot_file_lines_idx
-ON evidence(snapshot_id, repo_id, file_path, start_line, end_line);
+CREATE INDEX IF NOT EXISTS evidence_file_lines_idx
+ON evidence(workspace_name, repo_id, file_path, start_line, end_line);
 
 CREATE TABLE IF NOT EXISTS edges (
-    snapshot_id TEXT NOT NULL REFERENCES repo_snapshots(id) ON DELETE CASCADE,
+    workspace_name TEXT NOT NULL,
     id TEXT NOT NULL,
     source_node_id TEXT NOT NULL,
     target_node_id TEXT NOT NULL,
     kind TEXT NOT NULL,
     confidence REAL NOT NULL CHECK (confidence >= 0.0 AND confidence <= 1.0),
     epistemic_status TEXT NOT NULL,
-    PRIMARY KEY (snapshot_id, id),
-    FOREIGN KEY (snapshot_id, source_node_id) REFERENCES nodes(snapshot_id, id),
-    FOREIGN KEY (snapshot_id, target_node_id) REFERENCES nodes(snapshot_id, id)
-);
+    PRIMARY KEY (workspace_name, id),
+    FOREIGN KEY (workspace_name, source_node_id)
+        REFERENCES nodes(workspace_name, id) ON DELETE CASCADE,
+    FOREIGN KEY (workspace_name, target_node_id)
+        REFERENCES nodes(workspace_name, id) ON DELETE CASCADE
+) WITHOUT ROWID;
 
-CREATE INDEX IF NOT EXISTS edges_source_idx ON edges(source_node_id);
-CREATE INDEX IF NOT EXISTS edges_target_idx ON edges(target_node_id);
+CREATE INDEX IF NOT EXISTS edges_source_idx ON edges(workspace_name, source_node_id);
+CREATE INDEX IF NOT EXISTS edges_target_idx ON edges(workspace_name, target_node_id);
 CREATE INDEX IF NOT EXISTS edges_kind_idx ON edges(kind);
-CREATE INDEX IF NOT EXISTS edges_confidence_idx ON edges(confidence);
 
 CREATE TABLE IF NOT EXISTS edge_evidence (
-    snapshot_id TEXT NOT NULL,
+    workspace_name TEXT NOT NULL,
     edge_id TEXT NOT NULL,
     evidence_id TEXT NOT NULL,
-    PRIMARY KEY (snapshot_id, edge_id, evidence_id),
-    FOREIGN KEY (snapshot_id, edge_id) REFERENCES edges(snapshot_id, id) ON DELETE CASCADE,
-    FOREIGN KEY (snapshot_id, evidence_id) REFERENCES evidence(snapshot_id, id) ON DELETE CASCADE
-);
+    PRIMARY KEY (workspace_name, edge_id, evidence_id),
+    FOREIGN KEY (workspace_name, edge_id)
+        REFERENCES edges(workspace_name, id) ON DELETE CASCADE,
+    FOREIGN KEY (workspace_name, evidence_id)
+        REFERENCES evidence(workspace_name, id) ON DELETE CASCADE
+) WITHOUT ROWID;
+
+CREATE INDEX IF NOT EXISTS edge_evidence_evidence_idx
+ON edge_evidence(workspace_name, evidence_id);
 
 CREATE TABLE IF NOT EXISTS repository_snapshot_freshness (
-    snapshot_id TEXT NOT NULL REFERENCES repo_snapshots(id) ON DELETE CASCADE,
+    workspace_name TEXT NOT NULL REFERENCES workspaces(name) ON DELETE CASCADE,
     repo_id TEXT NOT NULL REFERENCES repositories(id),
     checkout_id TEXT NOT NULL REFERENCES repository_checkouts(id),
     head_commit TEXT,
     manifest_hash TEXT NOT NULL,
     state TEXT NOT NULL,
     reason TEXT,
-    PRIMARY KEY (snapshot_id, repo_id, checkout_id)
+    PRIMARY KEY (workspace_name, repo_id, checkout_id)
 );
 
+CREATE TABLE IF NOT EXISTS http_link_coverage (
+    workspace_name TEXT PRIMARY KEY REFERENCES workspaces(name) ON DELETE CASCADE,
+    linked INTEGER NOT NULL CHECK (linked >= 0),
+    no_provider INTEGER NOT NULL CHECK (no_provider >= 0),
+    ambiguous INTEGER NOT NULL CHECK (ambiguous >= 0),
+    external INTEGER NOT NULL CHECK (external >= 0)
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS http_link_gaps (
+    workspace_name TEXT NOT NULL REFERENCES workspaces(name) ON DELETE CASCADE,
+    caller_node_id TEXT NOT NULL
+        CHECK (length(CAST(caller_node_id AS BLOB)) BETWEEN 1 AND 2048),
+    method TEXT NOT NULL
+        CHECK (length(CAST(method AS BLOB)) BETWEEN 1 AND 32),
+    path TEXT NOT NULL
+        CHECK (length(CAST(path AS BLOB)) BETWEEN 1 AND 4096),
+    reason TEXT NOT NULL
+        CHECK (reason IN ('no_provider', 'ambiguous', 'external')),
+    candidates_json TEXT NOT NULL
+        CHECK (json_valid(candidates_json))
+        CHECK (json_type(candidates_json) = 'array'),
+    PRIMARY KEY (workspace_name, caller_node_id, method, path, reason)
+) STRICT, WITHOUT ROWID;
+
 CREATE TABLE IF NOT EXISTS extractor_runs (
-    id TEXT PRIMARY KEY,
-    snapshot_id TEXT NOT NULL REFERENCES repo_snapshots(id) ON DELETE CASCADE,
+    workspace_name TEXT NOT NULL REFERENCES workspaces(name) ON DELETE CASCADE,
+    id TEXT NOT NULL,
     repo_id TEXT NOT NULL REFERENCES repositories(id),
     checkout_id TEXT REFERENCES repository_checkouts(id),
     extractor TEXT NOT NULL,
@@ -160,11 +205,9 @@ CREATE TABLE IF NOT EXISTS extractor_runs (
     discovered_files INTEGER NOT NULL DEFAULT 0,
     parsed_files INTEGER NOT NULL DEFAULT 0,
     skipped_files INTEGER NOT NULL DEFAULT 0,
-    elapsed_ms INTEGER NOT NULL DEFAULT 0
+    elapsed_ms INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (workspace_name, id)
 );
-
-CREATE INDEX IF NOT EXISTS extractor_runs_snapshot_idx
-ON extractor_runs(snapshot_id);
 
 CREATE TABLE IF NOT EXISTS audit_events (
     id TEXT PRIMARY KEY,
@@ -176,7 +219,7 @@ CREATE TABLE IF NOT EXISTS audit_events (
 );
 
 CREATE TABLE IF NOT EXISTS artifact_fingerprints (
-    snapshot_id TEXT NOT NULL REFERENCES repo_snapshots(id) ON DELETE CASCADE,
+    workspace_name TEXT NOT NULL REFERENCES workspaces(name) ON DELETE CASCADE,
     repo_id TEXT NOT NULL REFERENCES repositories(id),
     checkout_id TEXT NOT NULL REFERENCES repository_checkouts(id),
     path_encoding TEXT NOT NULL,
@@ -186,38 +229,17 @@ CREATE TABLE IF NOT EXISTS artifact_fingerprints (
     content_hash TEXT NOT NULL,
     size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
     PRIMARY KEY (
-        snapshot_id,
+        workspace_name,
         repo_id,
         checkout_id,
         path_encoding,
         relative_path,
         extractor
     )
-);
-
-CREATE INDEX IF NOT EXISTS artifact_fingerprints_checkout_idx
-ON artifact_fingerprints(checkout_id, extractor);
-
-CREATE TABLE IF NOT EXISTS extractor_run_inputs (
-    run_id TEXT NOT NULL REFERENCES extractor_runs(id) ON DELETE CASCADE,
-    repo_id TEXT NOT NULL,
-    checkout_id TEXT NOT NULL,
-    path_encoding TEXT NOT NULL,
-    relative_path BLOB NOT NULL,
-    extractor TEXT NOT NULL,
-    content_hash TEXT NOT NULL,
-    PRIMARY KEY (
-        run_id,
-        repo_id,
-        checkout_id,
-        path_encoding,
-        relative_path,
-        extractor
-    )
-);
+) WITHOUT ROWID;
 
 CREATE TABLE IF NOT EXISTS extractor_batches (
-    snapshot_id TEXT NOT NULL REFERENCES repo_snapshots(id) ON DELETE CASCADE,
+    workspace_name TEXT NOT NULL REFERENCES workspaces(name) ON DELETE CASCADE,
     repo_id TEXT NOT NULL REFERENCES repositories(id),
     checkout_id TEXT NOT NULL REFERENCES repository_checkouts(id),
     path_encoding TEXT NOT NULL,
@@ -230,9 +252,10 @@ CREATE TABLE IF NOT EXISTS extractor_batches (
     budget_fingerprint TEXT NOT NULL,
     source_was_lossy INTEGER NOT NULL CHECK (source_was_lossy IN (0, 1)),
     output_count INTEGER NOT NULL CHECK (output_count >= 0),
+    payload_hash TEXT NOT NULL,
     payload BLOB NOT NULL CHECK (json_valid(CAST(payload AS TEXT))),
     PRIMARY KEY (
-        snapshot_id,
+        workspace_name,
         repo_id,
         checkout_id,
         path_encoding,
@@ -241,11 +264,9 @@ CREATE TABLE IF NOT EXISTS extractor_batches (
     )
 );
 
-CREATE INDEX IF NOT EXISTS extractor_batches_source_idx
-ON extractor_batches(repo_id, checkout_id, extractor);
-
 CREATE TABLE IF NOT EXISTS community_snapshots (
-    snapshot_id TEXT PRIMARY KEY REFERENCES repo_snapshots(id) ON DELETE CASCADE,
+    snapshot_id TEXT PRIMARY KEY,
+    workspace_name TEXT NOT NULL REFERENCES workspaces(name) ON DELETE CASCADE,
     engine_version TEXT NOT NULL,
     algorithm TEXT NOT NULL
         CHECK (json_valid(algorithm))
@@ -255,8 +276,8 @@ CREATE TABLE IF NOT EXISTS community_snapshots (
         CHECK (length(CAST(config_json AS BLOB)) <= 65536)
 );
 
-CREATE INDEX IF NOT EXISTS community_snapshots_snapshot_idx
-ON community_snapshots(snapshot_id);
+CREATE INDEX IF NOT EXISTS community_snapshots_workspace_idx
+ON community_snapshots(workspace_name);
 
 CREATE TABLE IF NOT EXISTS communities (
     snapshot_id TEXT NOT NULL,
@@ -272,12 +293,6 @@ CREATE TABLE IF NOT EXISTS communities (
     FOREIGN KEY (snapshot_id) REFERENCES community_snapshots(snapshot_id) ON DELETE CASCADE
 );
 
-CREATE INDEX IF NOT EXISTS communities_snapshot_idx
-ON communities(snapshot_id);
-
-CREATE INDEX IF NOT EXISTS communities_snapshot_community_idx
-ON communities(snapshot_id, id);
-
 CREATE TABLE IF NOT EXISTS community_memberships (
     snapshot_id TEXT NOT NULL,
     community_id TEXT NOT NULL,
@@ -286,22 +301,11 @@ CREATE TABLE IF NOT EXISTS community_memberships (
     PRIMARY KEY (snapshot_id, community_id, node_id),
     UNIQUE (snapshot_id, community_id, member_order),
     FOREIGN KEY (snapshot_id, community_id)
-        REFERENCES communities(snapshot_id, id) ON DELETE CASCADE,
-    FOREIGN KEY (snapshot_id, node_id)
-        REFERENCES nodes(snapshot_id, id) ON DELETE CASCADE
+        REFERENCES communities(snapshot_id, id) ON DELETE CASCADE
 );
 
-CREATE INDEX IF NOT EXISTS community_memberships_snapshot_idx
-ON community_memberships(snapshot_id);
-
-CREATE INDEX IF NOT EXISTS community_memberships_community_idx
-ON community_memberships(snapshot_id, community_id);
-
-CREATE INDEX IF NOT EXISTS community_memberships_member_idx
-ON community_memberships(snapshot_id, node_id);
-
 CREATE TABLE IF NOT EXISTS manual_links (
-    snapshot_id TEXT NOT NULL,
+    workspace_name TEXT NOT NULL,
     id TEXT NOT NULL
         CHECK (length(CAST(id AS BLOB)) BETWEEN 1 AND 2048)
         CHECK (length(trim(id)) > 0),
@@ -324,23 +328,13 @@ CREATE TABLE IF NOT EXISTS manual_links (
         CHECK (json_valid(CAST(decision_json AS TEXT))),
     config_version INTEGER NOT NULL
         CHECK (config_version BETWEEN 1 AND 2147483647),
-    PRIMARY KEY (snapshot_id, id),
-    UNIQUE (snapshot_id, source_node_id, target_node_id, kind),
-    FOREIGN KEY (snapshot_id) REFERENCES repo_snapshots(id) ON DELETE CASCADE,
-    FOREIGN KEY (snapshot_id, source_node_id)
-        REFERENCES nodes(snapshot_id, id) ON DELETE CASCADE,
-    FOREIGN KEY (snapshot_id, target_node_id)
-        REFERENCES nodes(snapshot_id, id) ON DELETE CASCADE
+    PRIMARY KEY (workspace_name, id),
+    UNIQUE (workspace_name, source_node_id, target_node_id, kind),
+    FOREIGN KEY (workspace_name, source_node_id)
+        REFERENCES nodes(workspace_name, id) ON DELETE CASCADE,
+    FOREIGN KEY (workspace_name, target_node_id)
+        REFERENCES nodes(workspace_name, id) ON DELETE CASCADE
 ) STRICT, WITHOUT ROWID;
-
-CREATE INDEX IF NOT EXISTS manual_links_source_idx
-ON manual_links(snapshot_id, source_node_id);
-
-CREATE INDEX IF NOT EXISTS manual_links_target_idx
-ON manual_links(snapshot_id, target_node_id);
-
-CREATE INDEX IF NOT EXISTS manual_links_disposition_idx
-ON manual_links(snapshot_id, disposition, kind);
 
 CREATE TABLE IF NOT EXISTS provider_capabilities (
     workspace_name TEXT NOT NULL
@@ -430,10 +424,4 @@ BEGIN
         ORDER BY stored_at_unix_ms DESC, snapshot_id DESC, input_fingerprint DESC
         LIMIT -1 OFFSET 1024
     );
-END;
-
-CREATE TRIGGER IF NOT EXISTS repo_snapshots_delete_fts
-AFTER DELETE ON repo_snapshots
-BEGIN
-    DELETE FROM nodes_fts WHERE snapshot_id = OLD.id;
 END;

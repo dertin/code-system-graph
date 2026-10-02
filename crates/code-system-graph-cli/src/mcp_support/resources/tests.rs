@@ -1,3 +1,5 @@
+use code_system_graph_model::HttpLinkGapReason;
+
 use super::*;
 fn repository_freshness(name: &str) -> RepoFreshness {
     RepoFreshness {
@@ -79,7 +81,7 @@ fn workspace_resource_fixtures() -> Vec<(&'static str, ResourceDocument)> {
                 schema_version: 2,
                 status: GraphStatusReport {
                     workspace: "workspace".to_owned(),
-                    schema_version: 2,
+                    schema_id: "schema:test".to_owned(),
                     integrity_ok: true,
                     snapshot: SnapshotMetrics {
                         snapshot_id: "snapshot:one".to_owned(),
@@ -137,6 +139,8 @@ fn graph_resource_fixtures() -> Vec<(&'static str, ResourceDocument)> {
                 workspace: "workspace".to_owned(),
                 runs: bounded_collection(Vec::new(), 1),
                 freshness: empty_freshness_resource(),
+                http_links: HttpLinkCoverage::default(),
+                http_link_gaps: bounded_collection(Vec::new(), 1),
             }),
         ),
         (
@@ -174,12 +178,12 @@ fn every_typed_resource_variant_should_render_its_own_markdown_fixture() {
     let goldens = [
         "mcp-resource-golden:4a0739c1a776d2951cc3f3da46f8818ffd62562b4c023a49103abc31f09ee5a5",
         "mcp-resource-golden:5bf552e3d0bdda5e42c1cf1ee9ae5de13e263870165cc5b1ed9f5850b801ada2",
-        "mcp-resource-golden:0bcdb56b1f90dc69cdb60ebd3816e410baa7e44e855fd97b668f2404fe6aa3bb",
+        "mcp-resource-golden:a7a632d875cbf35d5fed4932dc41d63f0860954dab54a8b907346283566a251e",
         "mcp-resource-golden:c21d183ace7081c78f80ecb6f3ae117c7fdde9219436dbc25cabe99fe794941a",
         "mcp-resource-golden:1fc4418c3ef31389ac48f43c3785de986be8621a1e06bac9361f7cec220b2c66",
         "mcp-resource-golden:cd051baf008bc31e8c87d86bf6a95d71ffb931eaddc9a4b7a90cc3a5d71caf0d",
         "mcp-resource-golden:d5f3b700d3f70bb59c0a03407f752f754a5233ce8751b56cefffafb9f023145b",
-        "mcp-resource-golden:0489a80e514c31d3f392dd464843579563baa7f8e3971e92d7a1fc466e457c68",
+        "mcp-resource-golden:59315d6855580169d482ff2bde2f2302c455a0f632c351aa73949087bf7fe30a",
         "mcp-resource-golden:e4a27ab1170b53c17cb04f9ba84dee61806da6b493fa258444221da65897fd22",
         "mcp-resource-golden:4869cf77e9b9e91b47a11f153130722dd46277844b4302f6265dad76f9e30cce",
     ];
@@ -225,7 +229,7 @@ fn status_resource_should_limit_repositories_with_exact_metadata() {
     let value = status_resource_value(
         GraphStatusReport {
             workspace: "workspace".to_owned(),
-            schema_version: 2,
+            schema_id: "schema:test".to_owned(),
             integrity_ok: true,
             snapshot: SnapshotMetrics {
                 snapshot_id: "snapshot:one".to_owned(),
@@ -258,13 +262,41 @@ fn coverage_resource_should_limit_runs_with_exact_metadata() {
             stale_repositories: Vec::new(),
             reasons: Vec::new(),
         },
+        (
+            HttpLinkReport {
+                coverage: HttpLinkCoverage {
+                    linked: 4,
+                    no_provider: 2,
+                    ambiguous: 0,
+                    external: 0,
+                },
+                gaps: vec![
+                    http_link_gap("test:one", HttpLinkGapReason::NoProvider),
+                    http_link_gap("test:two", HttpLinkGapReason::NoProvider),
+                ],
+            },
+            2,
+        ),
         1,
     );
 
+    assert_eq!(value.http_links.no_provider, 2);
+    assert_eq!(value.http_link_gaps.total, 2);
+    assert_eq!(value.http_link_gaps.retained(), 1);
     assert_eq!(value.runs.total, 2);
     assert_eq!(value.runs.retained(), 1);
     assert!(value.runs.truncated());
     assert_eq!(value.runs.items.len(), 1);
+}
+
+fn http_link_gap(caller: &str, reason: HttpLinkGapReason) -> HttpLinkGap {
+    HttpLinkGap {
+        caller: NodeId::new(caller),
+        method: "GET".to_owned(),
+        path: "/missing".to_owned(),
+        reason,
+        candidates: Vec::new(),
+    }
 }
 
 #[test]

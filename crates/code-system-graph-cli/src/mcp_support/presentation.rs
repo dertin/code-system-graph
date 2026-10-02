@@ -6,7 +6,9 @@ use std::fmt::Write as _;
 use code_system_graph_core::{
     AgentNextAction, ChangeImpactReport, ContractReport, ImpactReport, PullRequestInspection, SearchReport
 };
-use code_system_graph_model::{FreshnessSummary, ToolEnvelope, ToolStatus, TraceReport};
+use code_system_graph_model::{
+    FreshnessSummary, HttpLinkGapReason, ToolEnvelope, ToolStatus, TraceReport
+};
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -497,6 +499,7 @@ fn render_query(
         .filter(|gap| gap.as_str() != "Full-text scores were not provided.")
         .cloned()
         .collect::<Vec<_>>();
+    add_link_gaps(&mut document, view);
     add_gaps(
         &mut document,
         envelope,
@@ -505,6 +508,56 @@ fn render_query(
         &semantic_gaps,
     );
     document
+}
+
+fn add_link_gaps(document: &mut SemanticMarkdown, view: &AgentQueryReport) {
+    if view.link_gaps.is_empty() {
+        return;
+    }
+    let lines = view
+        .link_gaps
+        .iter()
+        .map(|gap| {
+            let caller = view
+                .results
+                .iter()
+                .find(|result| {
+                    result.entity.node_id == gap.caller.as_str()
+                        || result
+                            .alternate_node_ids
+                            .iter()
+                            .any(|id| id == gap.caller.as_str())
+                })
+                .map_or(gap.caller.as_str(), |result| {
+                    entity_display_label(&result.entity)
+                });
+            let outcome = match gap.reason {
+                HttpLinkGapReason::NoProvider => {
+                    "no provider in the workspace implements it".to_owned()
+                }
+                HttpLinkGapReason::Ambiguous => format!(
+                    "{} providers match it equally: {}",
+                    gap.candidates.len(),
+                    gap.candidates
+                        .iter()
+                        .map(|candidate| format!("`{}`", candidate.as_str()))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                HttpLinkGapReason::External => "it targets a host outside the workspace".to_owned(),
+            };
+            format!("- `{} {}` from {caller}: {outcome}.", gap.method, gap.path)
+        })
+        .collect::<Vec<_>>();
+    document.add(format!(
+        "## Unlinked HTTP calls
+
+{}",
+        lines.join(
+            "
+"
+        )
+    ));
 }
 
 fn render_source_context(

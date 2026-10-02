@@ -5,6 +5,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use std::sync::LazyLock;
 
 use serde::{Deserialize, Serialize};
 use sqlparser::ast::{
@@ -16,6 +17,7 @@ use thiserror::Error;
 use tree_sitter::Node as SyntaxNode;
 
 use crate::SourceLanguage;
+use crate::markers::MarkerSet;
 
 /// Maximum source size accepted by the database artifact extractor.
 pub const MAX_DATA_INPUT_BYTES: usize = 1_048_576;
@@ -398,14 +400,30 @@ pub fn parse_literal_sql_source_at_root(
     crate_root: &str,
     input: &str,
 ) -> DataDocument {
+    parse_literal_sql_source_with_prefilter(language, source_path, crate_root, input, true)
+}
+
+fn parse_literal_sql_source_with_prefilter(
+    language: SourceLanguage,
+    source_path: &str,
+    crate_root: &str,
+    input: &str,
+    prefilter: bool,
+) -> DataDocument {
     let mut document = empty_document(source_path, DataArtifactKind::LiteralQuerySource);
     if validate_input(input).is_err() {
         mark_incomplete(&mut document, DataWarning::LimitExceeded);
         return document;
     }
+    if prefilter && !DATA_SOURCE_MARKERS.any_in(input) {
+        finish_document(&mut document);
+        return document;
+    }
 
     if language == SourceLanguage::Rust {
-        extract_rust_database_source(input, crate_root, &mut document);
+        if !prefilter || input.contains("sqlx") || input.contains("mysql_async") {
+            extract_rust_database_source(input, crate_root, &mut document);
+        }
     } else if language == SourceLanguage::Python {
         if input.contains("pymysql") {
             document.frameworks.push(DataFramework::PyMysql);
@@ -3245,16 +3263,27 @@ fn adjacent_dynamic_operator(input: &str, start: usize, end: usize) -> bool {
         || after.starts_with(".format(")
 }
 
+const QUERY_CONTEXT_MARKERS: [&str; 10] = [
+    "query", "execute", "fetch", "select", ".sql(", "sql =", "sql!", "sqlx", "prepare", "raw",
+];
+
+// Every recognizer in `parse_literal_sql_source_at_root` requires one of these substrings:
+// query-context markers for literals, dynamic-call markers, framework imports, and the Rust
+// database crates.
+static DATA_SOURCE_MARKERS: LazyLock<MarkerSet> = LazyLock::new(|| {
+    let mut markers = QUERY_CONTEXT_MARKERS.to_vec();
+    markers.extend(["exec(", "pymysql", "psycopg", "sqlalchemy", "mysql_async"]);
+    MarkerSet::new(&markers)
+});
+
 fn has_query_context(input: &str, literal: &SourceLiteral) -> bool {
     let context_start = floor_char_boundary(input, literal.start.saturating_sub(160));
     let before = input[context_start..literal.start].to_ascii_lowercase();
     let after_end = floor_char_boundary(input, (literal.end + 80).min(input.len()));
     let after = input[literal.end..after_end].to_ascii_lowercase();
-    [
-        "query", "execute", "fetch", "select", ".sql(", "sql =", "sql!", "sqlx", "prepare", "raw",
-    ]
-    .iter()
-    .any(|marker| before.contains(marker) || after.contains(marker))
+    QUERY_CONTEXT_MARKERS
+        .iter()
+        .any(|marker| before.contains(marker) || after.contains(marker))
 }
 
 fn floor_char_boundary(input: &str, mut index: usize) -> usize {
@@ -3349,6 +3378,22 @@ fn java_method_name(line: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn source_marker_prefilter_should_not_change_any_corpus_document() {
+        let corpus = crate::markers::differential_corpus();
+        assert!(
+            corpus.len() > 100,
+            "differential corpus is unexpectedly small"
+        );
+        for (language, path, input) in corpus {
+            assert_eq!(
+                super::parse_literal_sql_source_with_prefilter(language, &path, ".", &input, true),
+                super::parse_literal_sql_source_with_prefilter(language, &path, ".", &input, false),
+                "data prefilter changed {path}"
+            );
+        }
+    }
+
     use super::*;
 
     #[test]

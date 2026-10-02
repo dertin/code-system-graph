@@ -29,8 +29,13 @@ pub const DEFAULT_WATCH_IDLE_TIMEOUT_MS: u64 = 28_800_000;
 pub const DEFAULT_MAX_WATCH_SESSION_WALL_TIME_MS: u64 = 86_400_000;
 /// Default minimum delay between watched sync pass starts.
 pub const DEFAULT_MIN_WATCH_RESCAN_INTERVAL_MS: u64 = 10_000;
-/// Default maximum retained historical checkpoint-cache bytes.
+/// Default maximum retained checkpoint-cache bytes.
 pub const DEFAULT_MAX_CHECKPOINT_CACHE_BYTES: u64 = 10_737_418_240;
+/// Default maximum concurrent extraction workers; the effective value never exceeds the host's
+/// available parallelism.
+pub const DEFAULT_MAX_EXTRACTION_WORKERS: u64 = 8;
+/// Largest accepted extraction-worker count.
+pub const MAX_EXTRACTION_WORKERS_CEILING: u64 = 256;
 pub const DEFAULT_MAX_EXPLORE_WALL_TIME_MS: u64 = 8_000;
 pub const DEFAULT_MAX_EXPLORE_CODEGRAPH_OPERATIONS: u64 = 8;
 pub const DEFAULT_MAX_EXPLORE_CONCURRENT_CODEGRAPH_PROCESSES: u64 = 2;
@@ -53,10 +58,9 @@ pub const DEFAULT_MAX_MCP_SCHEMA_CATALOG_BYTES: u64 = 2_097_152;
 /// Smallest Markdown response budget that can retain the mandatory MCP control block.
 pub const MIN_MCP_MARKDOWN_BYTES: u64 = 256;
 
-// Keep the agent-facing policy inventory in one declarative list. The two public serde structs
-// intentionally remain flat for schema-v2 compatibility; defaults, override resolution, and the
-// delivery fingerprint are generated from this list so a new field cannot silently omit one of
-// those behaviors.
+// Keep the agent-facing policy inventory in one declarative list. Defaults, override resolution,
+// and the delivery fingerprint are generated from this list so a new field cannot silently omit
+// one of those behaviors.
 macro_rules! with_agent_policy_fields {
     ($consumer:ident) => {
         $consumer! {
@@ -182,6 +186,8 @@ pub struct ExecutionPolicyOverrides {
     pub min_watch_rescan_interval_ms: Option<u64>,
     /// Optional maximum retained checkpoint-cache bytes.
     pub max_checkpoint_cache_bytes: Option<u64>,
+    /// Optional maximum concurrent extraction workers.
+    pub max_extraction_workers: Option<u64>,
     /// Optional corroboration-anchor count, or `-1` for unlimited.
     #[serde(rename = "maxCodeGraphCorroborationAnchorsPerRepo")]
     pub max_codegraph_corroboration_anchors_per_repo: Option<i64>,
@@ -248,8 +254,10 @@ pub struct ExecutionPolicy {
     pub max_watch_session_wall_time_ms: u64,
     /// Minimum delay between watched sync pass starts.
     pub min_watch_rescan_interval_ms: u64,
-    /// Maximum retained historical checkpoint-cache bytes.
+    /// Maximum retained checkpoint-cache bytes.
     pub max_checkpoint_cache_bytes: u64,
+    /// Maximum concurrent extraction workers. Output is identical for every value.
+    pub max_extraction_workers: u64,
     /// Effective corroboration-anchor count, or unlimited.
     #[serde(rename = "maxCodeGraphCorroborationAnchorsPerRepo")]
     #[schemars(with = "i64")]
@@ -311,6 +319,7 @@ impl Default for ExecutionPolicy {
             max_watch_session_wall_time_ms: DEFAULT_MAX_WATCH_SESSION_WALL_TIME_MS,
             min_watch_rescan_interval_ms: DEFAULT_MIN_WATCH_RESCAN_INTERVAL_MS,
             max_checkpoint_cache_bytes: DEFAULT_MAX_CHECKPOINT_CACHE_BYTES,
+            max_extraction_workers: DEFAULT_MAX_EXTRACTION_WORKERS,
             max_codegraph_corroboration_anchors_per_repo:
                 CodeGraphCorroborationAnchorLimit::try_from(
                     DEFAULT_MAX_CODEGRAPH_CORROBORATION_ANCHORS_PER_REPO,
@@ -351,6 +360,7 @@ impl ExecutionPolicy {
             apply!(max_watch_session_wall_time_ms);
             apply!(min_watch_rescan_interval_ms);
             apply!(max_checkpoint_cache_bytes);
+            apply!(max_extraction_workers);
             if let Some(value) = values.max_codegraph_corroboration_anchors_per_repo {
                 policy.max_codegraph_corroboration_anchors_per_repo = value.try_into()?;
             }
@@ -415,7 +425,24 @@ impl ExecutionPolicy {
                 return Err(InvalidExecutionPolicy::InvalidValue { field, value });
             }
         }
+        if self.max_extraction_workers == 0
+            || self.max_extraction_workers > MAX_EXTRACTION_WORKERS_CEILING
+        {
+            return Err(InvalidExecutionPolicy::InvalidValue {
+                field: "maxExtractionWorkers",
+                value: self.max_extraction_workers,
+            });
+        }
         Ok(())
+    }
+
+    /// Returns the extraction worker count bounded by the host's available parallelism.
+    #[must_use]
+    pub fn effective_extraction_workers(&self) -> usize {
+        let available = std::thread::available_parallelism().map_or(1, NonZeroUsize::get);
+        usize::try_from(self.max_extraction_workers)
+            .unwrap_or(usize::MAX)
+            .clamp(1, available.max(1))
     }
 
     fn validate_scan_relationships(&self) -> Result<(), InvalidExecutionPolicy> {
@@ -570,12 +597,6 @@ impl ExecutionPolicy {
         stable_id("execution-policy", &canonical)
     }
 
-    #[must_use]
-    /// Returns the historical scan-only fingerprint alias.
-    pub fn fingerprint(&self) -> String {
-        self.scan_fingerprint()
-    }
-
     /// Returns a fingerprint that also includes the additive `CodeGraph` corroboration bound.
     #[must_use]
     pub fn fingerprint_with_codegraph_limit(
@@ -717,6 +738,28 @@ pub struct ExecutionSummary {
     pub artifact_duration_p95_ms: u64,
     /// 99th-percentile artifact-extractor duration in milliseconds.
     pub artifact_duration_p99_ms: u64,
+    /// Files whose content hash was reused from filesystem metadata without a read.
+    pub stat_cache_hits: u64,
+    /// Bytes of artifact content read from disk for fingerprinting and extraction.
+    pub content_bytes_read: u64,
+    /// Rows inserted, updated, or deleted by snapshot publication.
+    pub published_rows: u64,
+    /// Effective concurrent extraction workers.
+    pub extraction_workers: u64,
+    /// Wall time and resident memory at the end of each completed worker phase.
+    pub phases: Vec<PhaseTelemetry>,
+}
+
+/// Duration and memory observation for one completed worker phase.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PhaseTelemetry {
+    /// Completed phase.
+    pub phase: JobPhase,
+    /// Wall time spent in the phase.
+    pub duration_ms: u64,
+    /// Resident memory of the worker process when the phase completed.
+    pub resident_memory_bytes: u64,
 }
 
 /// Typed failure produced when one supervised execution resource is exhausted.
@@ -902,7 +945,7 @@ mod tests {
         let second = ExecutionPolicy::resolve(Some(&ExecutionPolicyOverrides::default()))
             .expect("defaults valid");
 
-        assert_eq!(first.fingerprint(), second.fingerprint());
+        assert_eq!(first.scan_fingerprint(), second.scan_fingerprint());
     }
 
     #[test]

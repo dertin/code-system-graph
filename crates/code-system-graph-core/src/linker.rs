@@ -1,30 +1,15 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use code_system_graph_model::{
-    Edge, EdgeId, EdgeKind, EpistemicStatus, Evidence, EvidenceId, EvidenceRef, LinkDecision, LinkStatus, Node, NodeId, Provenance, stable_id
+    Edge, EdgeId, EdgeKind, EpistemicStatus, Evidence, EvidenceId, EvidenceRef, HttpLinkReport, LinkDecision, LinkStatus, Node, NodeId, Provenance, stable_id
 };
 use semver::Version;
 use thiserror::Error;
 
-use crate::{BoundaryRole, HttpBoundary, ManifestError, ManualLinkConfig, validate_manual_links};
+use crate::{ManifestError, ManualLinkConfig, validate_manual_links};
 
 const MANUAL_LINK_MATCHER: &str = "manual_exact";
 const MANUAL_LINK_EXTRACTOR: &str = "code-system-graph.manual-link";
-
-/// Error returned by deterministic boundary linking.
-#[derive(Debug, Error, PartialEq, Eq)]
-pub enum LinkError {
-    /// More than one provider has the same exact contract identity.
-    #[error("ambiguous HTTP provider for {method} {path}: {candidates:?}")]
-    AmbiguousProvider {
-        /// Canonical HTTP method.
-        method: String,
-        /// Canonical path template.
-        path: String,
-        /// Stable candidate node identifiers in deterministic order.
-        candidates: Vec<String>,
-    },
-}
 
 /// One exact HTTP contract that could not be linked because several providers matched.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,20 +29,8 @@ pub struct HttpLinkResolution {
     pub edges: Vec<Edge>,
     /// Source-free ambiguous contract identities omitted from the edge set.
     pub ambiguities: Vec<HttpLinkAmbiguity>,
-}
-
-impl HttpLinkResolution {
-    pub(crate) fn into_legacy_result(self) -> Result<Vec<Edge>, LinkError> {
-        let Self { edges, ambiguities } = self;
-        let Some(ambiguity) = ambiguities.into_iter().next() else {
-            return Ok(edges);
-        };
-        Err(LinkError::AmbiguousProvider {
-            method: ambiguity.method,
-            path: ambiguity.path,
-            candidates: ambiguity.candidates,
-        })
-    }
+    /// Consumer and test calls left without a provider edge, with outcome counts.
+    pub report: HttpLinkReport,
 }
 
 /// Endpoint field being resolved for a manual relationship.
@@ -161,91 +134,6 @@ pub struct ManualLinkResolution {
     pub decisions: Vec<LinkDecision>,
 }
 
-/// Links HTTP consumers to providers by exact canonical method and path.
-///
-/// Consumers without an observed provider remain unlinked. Callers must represent that as a
-/// coverage gap rather than concluding that no dependency exists.
-///
-/// Duplicate providers remain fail-closed for compatibility. Use
-/// [`link_http_boundaries_with_ambiguities`] to preserve ambiguities as data while continuing with
-/// unrelated contracts.
-///
-/// # Errors
-///
-/// Returns [`LinkError::AmbiguousProvider`] instead of silently omitting an ambiguous relationship.
-pub fn link_http_boundaries(boundaries: &[HttpBoundary]) -> Result<Vec<Edge>, LinkError> {
-    link_http_boundaries_with_ambiguities(boundaries).into_legacy_result()
-}
-
-/// Links exact HTTP boundaries while preserving duplicate-provider decisions.
-#[must_use]
-pub fn link_http_boundaries_with_ambiguities(boundaries: &[HttpBoundary]) -> HttpLinkResolution {
-    let mut providers: BTreeMap<(&str, &str), Vec<&HttpBoundary>> = BTreeMap::new();
-    for boundary in boundaries {
-        if boundary.role == BoundaryRole::Provider {
-            let candidates = providers
-                .entry((&boundary.method, &boundary.path))
-                .or_default();
-            if let Some(existing) = candidates
-                .iter()
-                .position(|candidate| candidate.node.id == boundary.node.id)
-            {
-                if boundary.evidence.confidence > candidates[existing].evidence.confidence {
-                    candidates[existing] = boundary;
-                }
-            } else {
-                candidates.push(boundary);
-            }
-        }
-    }
-
-    let mut edges = Vec::new();
-    let mut ambiguities = Vec::new();
-    for consumer in boundaries
-        .iter()
-        .filter(|boundary| boundary.role == BoundaryRole::Consumer)
-    {
-        let Some(candidates) = providers.get(&(consumer.method.as_str(), consumer.path.as_str()))
-        else {
-            continue;
-        };
-        if candidates.len() > 1 {
-            ambiguities.push(http_link_ambiguity(
-                &consumer.method,
-                &consumer.path,
-                candidates.iter().map(|candidate| &candidate.node.id),
-            ));
-            continue;
-        }
-        let provider = candidates[0];
-        let edge_key = format!(
-            "{}:calls_remote:{}",
-            consumer.node.id.as_str(),
-            provider.node.id.as_str()
-        );
-        edges.push(Edge {
-            id: EdgeId::new(stable_id("edge", &edge_key)),
-            source: consumer.node.id.clone(),
-            target: provider.node.id.clone(),
-            kind: EdgeKind::CallsRemote,
-            confidence: consumer
-                .evidence
-                .confidence
-                .min(provider.evidence.confidence),
-            status: consensus_status(
-                consumer
-                    .evidence
-                    .confidence
-                    .min(provider.evidence.confidence),
-            ),
-            evidence: vec![consumer.evidence.id.clone(), provider.evidence.id.clone()],
-        });
-    }
-    edges.sort_by(|left, right| left.id.cmp(&right.id));
-    sort_http_ambiguities(&mut ambiguities);
-    HttpLinkResolution { edges, ambiguities }
-}
-
 pub(crate) fn http_link_ambiguity<'a>(
     method: &str,
     path: &str,
@@ -273,14 +161,6 @@ pub(crate) fn sort_http_ambiguities(ambiguities: &mut Vec<HttpLinkAmbiguity>) {
         ))
     });
     ambiguities.dedup();
-}
-
-fn consensus_status(confidence: f32) -> EpistemicStatus {
-    if confidence >= 1.0 {
-        EpistemicStatus::Confirmed
-    } else {
-        EpistemicStatus::Inferred
-    }
 }
 
 /// Resolves and applies exact manual relationships to an automatic edge set.
@@ -517,64 +397,17 @@ fn manual_link_decision(
     }
 }
 
-/// Reuses unaffected edges and atomically replaces every affected link neighborhood.
-///
-/// Both the previous and current node-to-key maps are required because replacements may change
-/// their canonical key. Edges referencing removed nodes are never reused.
-#[must_use]
-pub fn merge_affected_link_neighborhoods<K>(
-    previous_edges: &[Edge],
-    recomputed_edges: &[Edge],
-    affected_keys: &BTreeSet<K>,
-    previous_node_keys: &BTreeMap<NodeId, K>,
-    current_node_keys: &BTreeMap<NodeId, K>,
-    current_node_ids: &BTreeSet<NodeId>,
-) -> Vec<Edge>
-where
-    K: Ord,
-{
-    let mut merged = BTreeMap::new();
-    for edge in previous_edges {
-        let endpoints_exist =
-            current_node_ids.contains(&edge.source) && current_node_ids.contains(&edge.target);
-        if endpoints_exist && !edge_touches_keys(edge, previous_node_keys, affected_keys) {
-            merged.insert(edge.id.clone(), edge.clone());
-        }
-    }
-    for edge in recomputed_edges {
-        if edge_touches_keys(edge, current_node_keys, affected_keys) {
-            merged.insert(edge.id.clone(), edge.clone());
-        }
-    }
-    merged.into_values().collect()
-}
-
-fn edge_touches_keys<K>(
-    edge: &Edge,
-    node_keys: &BTreeMap<NodeId, K>,
-    affected_keys: &BTreeSet<K>,
-) -> bool
-where
-    K: Ord,
-{
-    [&edge.source, &edge.target]
-        .into_iter()
-        .filter_map(|node| node_keys.get(node))
-        .any(|key| affected_keys.contains(key))
-}
-
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeMap, BTreeSet};
 
     use code_system_graph_model::{
         Edge, EdgeId, EdgeKind, EpistemicStatus, LinkStatus, Node, NodeId, NodeKind, Provenance, RepoId
     };
 
-    use super::{
-        LinkError, ManualLinkEndpoint, ManualLinkError, link_http_boundaries, link_http_boundaries_with_ambiguities, merge_affected_link_neighborhoods, resolve_manual_links
+    use super::{ManualLinkEndpoint, ManualLinkError, resolve_manual_links};
+    use crate::{
+        AuthorityMap, HttpConsumerConfig, ManualLinkConfig, extract_openapi, link_http_routes
     };
-    use crate::{HttpConsumerConfig, ManualLinkConfig, extract_openapi};
 
     fn consumer() -> crate::HttpBoundary {
         crate::HttpBoundary::consumer(
@@ -637,33 +470,30 @@ paths:
 
     #[test]
     fn link_http_boundaries_should_require_bilateral_evidence() {
-        let result = link_http_boundaries(&[consumer(), provider("repo:api")]);
-        let evidence_count = result.map(|edges| edges[0].evidence.len());
+        let result = link_http_routes(
+            &[consumer(), provider("repo:api")],
+            &[],
+            &[],
+            &AuthorityMap::new(),
+        );
 
-        assert_eq!(evidence_count, Ok(2));
+        assert_eq!(result.edges[0].evidence.len(), 2);
     }
 
     #[test]
     fn link_http_boundaries_should_preserve_duplicate_providers_as_ambiguity() {
-        let result = link_http_boundaries_with_ambiguities(&[
-            consumer(),
-            provider("repo:api-a"),
-            provider("repo:api-b"),
-        ]);
+        let result = link_http_routes(
+            &[consumer(), provider("repo:api-a"), provider("repo:api-b")],
+            &[],
+            &[],
+            &AuthorityMap::new(),
+        );
 
         assert_eq!(result.edges, Vec::new());
         assert_eq!(result.ambiguities.len(), 1);
         assert_eq!(result.ambiguities[0].method, "POST");
         assert_eq!(result.ambiguities[0].path, "/api/orders");
         assert_eq!(result.ambiguities[0].candidates.len(), 2);
-    }
-
-    #[test]
-    fn link_http_boundaries_compatibility_wrapper_should_reject_duplicate_providers() {
-        let result =
-            link_http_boundaries(&[consumer(), provider("repo:api-a"), provider("repo:api-b")]);
-
-        assert!(matches!(result, Err(LinkError::AmbiguousProvider { .. })));
     }
 
     #[test]
@@ -810,41 +640,5 @@ paths:
             first.unwrap_or_else(|error| panic!("first resolution should succeed: {error}")),
             second.unwrap_or_else(|error| panic!("second resolution should succeed: {error}"))
         );
-    }
-
-    #[test]
-    fn relinking_should_replace_only_affected_neighborhoods() {
-        let orders = link_http_boundaries(&[consumer(), provider("repo:api")])
-            .unwrap_or_else(|error| panic!("fixture must link: {error}"));
-        let mut health_consumer = consumer();
-        health_consumer.method = "GET".to_owned();
-        health_consumer.path = "/health".to_owned();
-        let mut health_provider = provider("repo:health");
-        health_provider.method = "GET".to_owned();
-        health_provider.path = "/health".to_owned();
-        let health = link_http_boundaries(&[health_consumer, health_provider])
-            .unwrap_or_else(|error| panic!("fixture must link: {error}"));
-        let mut previous = orders.clone();
-        previous.extend(health.clone());
-        let affected = BTreeSet::from(["POST:/api/orders".to_owned()]);
-        let previous_keys = BTreeMap::from([
-            (orders[0].source.clone(), "POST:/api/orders".to_owned()),
-            (orders[0].target.clone(), "POST:/api/orders".to_owned()),
-            (health[0].source.clone(), "GET:/health".to_owned()),
-            (health[0].target.clone(), "GET:/health".to_owned()),
-        ]);
-        let current_ids = previous_keys.keys().cloned().collect::<BTreeSet<NodeId>>();
-        let result = merge_affected_link_neighborhoods(
-            &previous,
-            &orders,
-            &affected,
-            &previous_keys,
-            &previous_keys,
-            &current_ids,
-        );
-
-        assert_eq!(result.len(), 2);
-        assert!(result.contains(&health[0]));
-        assert!(result.contains(&orders[0]));
     }
 }

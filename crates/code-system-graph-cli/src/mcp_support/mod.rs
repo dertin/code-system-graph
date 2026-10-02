@@ -390,7 +390,7 @@ pub(super) struct SnapshotMetrics {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub(super) struct GraphStatusReport {
     pub workspace: String,
-    pub schema_version: i64,
+    pub schema_id: String,
     pub integrity_ok: bool,
     pub snapshot: SnapshotMetrics,
     pub repositories: Vec<RepoFreshness>,
@@ -886,7 +886,7 @@ fn load_status(
     Ok((
         GraphStatusReport {
             workspace: workspace.to_owned(),
-            schema_version: store.schema_version().map_err(|error| error.to_string())?,
+            schema_id: store.schema_id().map_err(|error| error.to_string())?,
             integrity_ok: store.integrity_check().map_err(|error| error.to_string())?,
             snapshot: SnapshotMetrics {
                 snapshot_id: snapshot.snapshot_id,

@@ -7,6 +7,7 @@ use code_system_graph::{
     ApplicationError, ScanOverrides, WatcherState, application_exit_code, finish_watcher_lease, scan_workspace, scan_workspace_with_overrides, scan_workspace_with_worker_executable, start_watcher_lease, status_workspace
 };
 use code_system_graph_core::ExitCode;
+use code_system_graph_model::NodeKind;
 use code_system_graph_store_sqlite::SqliteStore;
 
 fn openapi(path: &str) -> String {
@@ -72,10 +73,7 @@ fn targeted_scan_should_reuse_unselected_repository_batches() -> anyhow::Result<
     let corrupted = connection.execute(
         "UPDATE extractor_batches
          SET output_count = 0, payload = CAST('[]' AS BLOB)
-         WHERE snapshot_id = (
-             SELECT id FROM repo_snapshots
-             WHERE workspace_name = 'targeted' AND is_current = 1
-         )
+         WHERE workspace_name = 'targeted'
          AND path_display = 'test_force.py'
          AND extractor = 'code-system-graph.source.python'",
         [],
@@ -404,5 +402,130 @@ fn embedding_host_should_be_able_to_select_its_worker_executable() -> anyhow::Re
     )?;
 
     assert_eq!(summary.workspace, "explicit-worker");
+    Ok(())
+}
+
+#[test]
+fn fact_free_source_files_should_not_add_artifact_nodes() -> anyhow::Result<()> {
+    let temporary = tempfile::tempdir()?;
+    let repository = temporary.path().join("api");
+    std::fs::create_dir_all(repository.join("src"))?;
+    std::fs::write(
+        repository.join("src/math.ts"),
+        "export function total(values: number[]): number {\n  return values.reduce((sum, value) => sum + value, 0);\n}\n",
+    )?;
+    std::fs::write(
+        repository.join("src/events.ts"),
+        "import { Kafka } from 'kafkajs';\n\nconst producer = new Kafka({ brokers: ['kafka:9092'] }).producer();\n\nexport async function publish() {\n  await producer.send({ topic: 'orders.created', messages: [] });\n}\n",
+    )?;
+    let manifest = temporary.path().join("code-system-graph.yaml");
+    std::fs::write(
+        &manifest,
+        "version: 1\nname: fact-free\nrepos:\n  api:\n    path: api\n",
+    )?;
+    let database = temporary.path().join("graph.db");
+
+    scan_workspace(&manifest, &database)?;
+    let store = SqliteStore::open_read_only(&database)?;
+    let (nodes, _) = store.load_current_graph("fact-free")?;
+    let math_events = store
+        .load_current_extractor_batches("fact-free")?
+        .into_iter()
+        .find(|batch| {
+            batch.source.path.display == "src/math.ts"
+                && batch.source.extractor == "code-system-graph.events.source"
+        })
+        .ok_or_else(|| anyhow::anyhow!("math.ts event batch is missing"))?;
+    let artifact_keys = nodes
+        .iter()
+        .filter(|node| node.kind == NodeKind::Artifact)
+        .map(|node| node.stable_key.as_str())
+        .collect::<Vec<_>>();
+
+    assert!(
+        artifact_keys
+            .iter()
+            .all(|key| key.ends_with(":src/events.ts")),
+        "{artifact_keys:?}"
+    );
+    assert!(
+        artifact_keys
+            .iter()
+            .any(|key| key.starts_with("event-artifact:"))
+    );
+    assert!(nodes.iter().any(|node| node.kind == NodeKind::Repository));
+    assert_eq!(
+        (math_events.output_count, math_events.payload.as_slice()),
+        (0, b"[]".as_slice())
+    );
+    Ok(())
+}
+
+#[test]
+fn unchanged_scan_should_reuse_the_snapshot_until_the_configuration_changes() -> anyhow::Result<()>
+{
+    let temporary = tempfile::tempdir()?;
+    let repository = temporary.path().join("api");
+    std::fs::create_dir(&repository)?;
+    std::fs::write(repository.join("openapi.yaml"), openapi("/orders"))?;
+    std::fs::write(
+        repository.join("routes.ts"),
+        "import express from 'express';\nconst app = express();\napp.get('/orders', listOrders);\n",
+    )?;
+    let manifest = temporary.path().join("code-system-graph.yaml");
+    let write_manifest = |budget: &str| {
+        std::fs::write(
+            &manifest,
+            format!(
+                "version: 1\nname: reuse\n{budget}repos:\n  api:\n    path: api\n    openapi: openapi.yaml\n"
+            ),
+        )
+    };
+    write_manifest("")?;
+    let database = temporary.path().join("graph.db");
+
+    let first = scan_workspace(&manifest, &database)?;
+    let unchanged = scan_workspace(&manifest, &database)?;
+    write_manifest("extractionBudgets:\n  maxWorkUnitsPerArtifact: 100000\n")?;
+    let rebudgeted = scan_workspace(&manifest, &database)?;
+
+    assert!(!first.reused_snapshot);
+    assert!(unchanged.reused_snapshot);
+    assert_eq!(unchanged.snapshot_id, first.snapshot_id);
+    assert_eq!(unchanged.node_count, first.node_count);
+    assert!(!rebudgeted.reused_snapshot);
+    assert_ne!(rebudgeted.snapshot_id, first.snapshot_id);
+    Ok(())
+}
+
+#[test]
+fn scan_should_accept_a_bare_relative_database_file_name() -> anyhow::Result<()> {
+    let temporary = tempfile::tempdir()?;
+    let repository = temporary.path().join("api");
+    std::fs::create_dir(&repository)?;
+    std::fs::write(repository.join("openapi.yaml"), openapi("/orders"))?;
+    std::fs::write(
+        temporary.path().join("code-system-graph.yaml"),
+        "version: 1\nname: relative-database\nrepos:\n  api:\n    path: api\n    openapi: openapi.yaml\n",
+    )?;
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_csgraph"))
+        .current_dir(temporary.path())
+        .args([
+            "scan",
+            "--config",
+            "code-system-graph.yaml",
+            "--database",
+            "graph.db",
+        ])
+        .output()?;
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(temporary.path().join("graph.db").is_file());
+    assert!(temporary.path().join("graph.db.work.db").is_file());
     Ok(())
 }

@@ -1,6 +1,5 @@
 //! Portable filesystem watching for the `sync --watch` command.
 
-#[cfg(target_os = "linux")]
 use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader, Read, Write};
 #[cfg(target_os = "linux")]
@@ -52,7 +51,7 @@ enum WatchSignal {
 
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const MAX_SYNC_ATTEMPTS: usize = 3;
-const WATCH_EVENT_PROTOCOL_MAX_BYTES: usize = 128;
+const WATCH_EVENT_PROTOCOL_MAX_BYTES: usize = 16 * 1024;
 
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -64,6 +63,9 @@ enum WatchEventMessage {
         schema_version: u8,
         #[serde(default)]
         refresh_scope: bool,
+        /// Aliases touched since the previous message; empty means the whole workspace.
+        #[serde(default)]
+        repositories: Vec<String>,
     },
 }
 
@@ -72,7 +74,67 @@ struct WatchEventState {
     initial_ready: bool,
     refresh_started: Option<Instant>,
     refresh_scope: bool,
+    touched: TouchedRepositories,
     failed: bool,
+}
+
+/// Repositories changed since the last synchronization pass.
+#[derive(Debug, Default)]
+struct TouchedRepositories {
+    aliases: BTreeSet<String>,
+    workspace: bool,
+}
+
+impl TouchedRepositories {
+    fn record(&mut self, scope: EventScope) {
+        match scope {
+            EventScope::Irrelevant => {}
+            EventScope::Repositories(aliases) => self.aliases.extend(aliases),
+            EventScope::Workspace => self.workspace = true,
+        }
+    }
+
+    /// Returns the touched aliases, or `None` when the next pass must cover the workspace.
+    fn take(&mut self) -> Option<Vec<String>> {
+        let touched = std::mem::take(self);
+        (!touched.workspace && !touched.aliases.is_empty())
+            .then(|| touched.aliases.into_iter().collect())
+    }
+}
+
+/// Part of the watched scope affected by one filesystem event.
+#[derive(Debug, PartialEq, Eq)]
+enum EventScope {
+    Irrelevant,
+    Repositories(BTreeSet<String>),
+    Workspace,
+}
+
+/// Change state accumulated by watcher callbacks between two `Dirty` messages.
+#[derive(Debug, Default)]
+struct PendingChanges {
+    refresh_directories: AtomicBool,
+    refresh_scope: AtomicBool,
+    touched: Mutex<TouchedRepositories>,
+}
+
+impl PendingChanges {
+    fn record(&self, scope: EventScope) {
+        match self.touched.lock() {
+            Ok(mut touched) => touched.record(scope),
+            Err(poisoned) => poisoned.into_inner().record(EventScope::Workspace),
+        }
+    }
+
+    fn take_touched(&self) -> Option<Vec<String>> {
+        match self.touched.lock() {
+            Ok(mut touched) => touched.take(),
+            Err(poisoned) => {
+                poisoned.into_inner().take();
+                None
+            }
+        }
+    }
 }
 
 struct WatchEventWorker {
@@ -94,7 +156,7 @@ impl WatchEventWorker {
         let executable = std::env::current_exe().context("failed to locate watcher worker")?;
         let mut command = Command::new(executable);
         command
-            .arg("__watch-events-v1")
+            .arg("__watch-events")
             .arg("--config")
             .arg(config)
             .arg("--database")
@@ -227,6 +289,14 @@ impl WatchEventWorker {
             .map_err(|_| anyhow::anyhow!("watcher protocol state was poisoned"))?;
         Ok(std::mem::take(&mut state.refresh_scope))
     }
+
+    fn take_touched_repositories(&self) -> anyhow::Result<Option<Vec<String>>> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("watcher protocol state was poisoned"))?;
+        Ok(state.touched.take())
+    }
 }
 
 impl Drop for WatchEventWorker {
@@ -268,9 +338,15 @@ fn spawn_watch_event_reader(
                 WatchEventMessage::Dirty {
                     schema_version: 2,
                     refresh_scope,
+                    repositories,
                 } => {
                     current.refresh_started.get_or_insert_with(Instant::now);
                     current.refresh_scope |= refresh_scope;
+                    current.touched.record(if repositories.is_empty() {
+                        EventScope::Workspace
+                    } else {
+                        EventScope::Repositories(repositories.into_iter().collect())
+                    });
                     drop(current);
                     match sender.try_send(()) {
                         Ok(()) | Err(mpsc::error::TrySendError::Full(())) => {}
@@ -312,6 +388,7 @@ struct WatchScope {
 
 #[derive(Debug, Clone)]
 struct WatchRepository {
+    alias: String,
     root: PathBuf,
     ignore_policy: IgnorePolicy,
     ignore_matcher: Arc<Mutex<RepositoryPathMatcher>>,
@@ -319,9 +396,15 @@ struct WatchRepository {
 }
 
 impl WatchRepository {
-    fn new(root: PathBuf, ignore_policy: IgnorePolicy, explicit_paths: Vec<PathBuf>) -> Self {
+    fn new(
+        alias: String,
+        root: PathBuf,
+        ignore_policy: IgnorePolicy,
+        explicit_paths: Vec<PathBuf>,
+    ) -> Self {
         let ignore_matcher = RepositoryPathMatcher::new(&root, ignore_policy.clone());
         Self {
+            alias,
             root,
             ignore_policy,
             ignore_matcher: Arc::new(Mutex::new(ignore_matcher)),
@@ -376,7 +459,8 @@ impl WatchRepository {
 
 impl PartialEq for WatchRepository {
     fn eq(&self, other: &Self) -> bool {
-        self.root == other.root
+        self.alias == other.alias
+            && self.root == other.root
             && self.ignore_policy == other.ignore_policy
             && self.explicit_paths == other.explicit_paths
     }
@@ -389,10 +473,16 @@ impl WatchScope {
         let mut repositories = load_persisted_watch_targets(database, workspace)?
             .into_iter()
             .map(|target| {
-                WatchRepository::new(target.path, target.ignore_policy, target.explicit_paths)
+                WatchRepository::new(
+                    target.alias,
+                    target.path,
+                    target.ignore_policy,
+                    target.explicit_paths,
+                )
             })
             .collect::<Vec<_>>();
-        repositories.sort_by(|left, right| left.root.cmp(&right.root));
+        repositories
+            .sort_by(|left, right| (&left.root, &left.alias).cmp(&(&right.root, &right.alias)));
         Ok(Self {
             config: absolute_path(config)?,
             database: absolute_path(database)?,
@@ -400,16 +490,23 @@ impl WatchScope {
         })
     }
 
-    fn relevant_event(&self, event: &Event) -> anyhow::Result<bool> {
-        if event.paths.is_empty() {
-            return Ok(true);
+    fn event_scope(&self, event: &Event) -> anyhow::Result<EventScope> {
+        if event.paths.is_empty() || event.need_rescan() {
+            return Ok(EventScope::Workspace);
         }
+        let mut aliases = BTreeSet::new();
         for path in &event.paths {
-            if self.relevant_path(path)? {
-                return Ok(true);
+            match self.path_scope(path)? {
+                EventScope::Irrelevant => {}
+                EventScope::Repositories(touched) => aliases.extend(touched),
+                EventScope::Workspace => return Ok(EventScope::Workspace),
             }
         }
-        Ok(false)
+        Ok(if aliases.is_empty() {
+            EventScope::Irrelevant
+        } else {
+            EventScope::Repositories(aliases)
+        })
     }
 
     fn changes_enabled_gitignore(&self, event: &Event) -> bool {
@@ -422,19 +519,29 @@ impl WatchScope {
         })
     }
 
-    fn relevant_path(&self, path: &Path) -> anyhow::Result<bool> {
+    fn path_scope(&self, path: &Path) -> anyhow::Result<EventScope> {
         if path == self.config {
-            return Ok(true);
+            return Ok(EventScope::Workspace);
         }
         if database_artifact(path, &self.database) {
-            return Ok(false);
+            return Ok(EventScope::Irrelevant);
         }
+        let mut aliases = BTreeSet::new();
         for repository in &self.repositories {
             if repository.relevant(path)? {
-                return Ok(true);
+                aliases.insert(repository.alias.clone());
             }
         }
-        Ok(false)
+        Ok(if aliases.is_empty() {
+            EventScope::Irrelevant
+        } else {
+            EventScope::Repositories(aliases)
+        })
+    }
+
+    #[cfg(test)]
+    fn relevant_path(&self, path: &Path) -> anyhow::Result<bool> {
+        Ok(self.path_scope(path)? != EventScope::Irrelevant)
     }
 
     #[cfg(any(target_os = "linux", test))]
@@ -623,24 +730,22 @@ pub(crate) async fn run_watch_event_worker(
     };
     let scope = WatchScope::load(&config, &database, &workspace)?;
     let (sender, mut receiver) = mpsc::channel(1);
-    let refresh_required = Arc::new(AtomicBool::new(false));
-    let scope_refresh_required = Arc::new(AtomicBool::new(false));
+    let pending = Arc::new(PendingChanges::default());
     let requested_poll = poll_interval_ms.map(Duration::from_millis);
     let mut watcher = build_watcher(
         &scope,
         sender.clone(),
-        Arc::clone(&refresh_required),
-        Arc::clone(&scope_refresh_required),
+        Arc::clone(&pending),
         requested_poll,
         &policy,
     )?;
     emit_watch_event(&WatchEventMessage::Ready { schema_version: 2 })?;
     while let Some(signal) = receiver.recv().await {
-        emit_watch_event(&WatchEventMessage::Dirty {
-            schema_version: 2,
-            refresh_scope: scope_refresh_required.swap(false, Ordering::AcqRel),
-        })?;
-        let refresh = refresh_required.swap(false, Ordering::AcqRel)
+        emit_dirty(
+            pending.refresh_scope.swap(false, Ordering::AcqRel),
+            pending.take_touched().unwrap_or_default(),
+        )?;
+        let refresh = pending.refresh_directories.swap(false, Ordering::AcqRel)
             || matches!(signal, WatchSignal::RefreshDirectories);
         if refresh {
             match watcher.refresh_native_directories(&scope, &policy) {
@@ -650,8 +755,7 @@ pub(crate) async fn run_watch_event_worker(
                     watcher = build_poll_watcher(
                         &scope,
                         sender.clone(),
-                        Arc::clone(&refresh_required),
-                        Arc::clone(&scope_refresh_required),
+                        Arc::clone(&pending),
                         requested_poll.unwrap_or(DEFAULT_POLL_INTERVAL),
                         &policy,
                     )?;
@@ -661,6 +765,24 @@ pub(crate) async fn run_watch_event_worker(
         emit_watch_event(&WatchEventMessage::Ready { schema_version: 2 })?;
     }
     anyhow::bail!("filesystem event channel stopped")
+}
+
+/// Emits a `Dirty` message, widening it to the whole workspace when the alias list would exceed
+/// the protocol bound.
+fn emit_dirty(refresh_scope: bool, repositories: Vec<String>) -> anyhow::Result<()> {
+    let message = WatchEventMessage::Dirty {
+        schema_version: 2,
+        refresh_scope,
+        repositories,
+    };
+    if serde_json::to_vec(&message)?.len() < WATCH_EVENT_PROTOCOL_MAX_BYTES {
+        return emit_watch_event(&message);
+    }
+    emit_watch_event(&WatchEventMessage::Dirty {
+        schema_version: 2,
+        refresh_scope,
+        repositories: Vec::new(),
+    })
 }
 
 fn emit_watch_event(message: &WatchEventMessage) -> anyhow::Result<()> {
@@ -828,6 +950,14 @@ pub(crate) async fn watch_workspace(
                 return Err(watcher_public_error(&error));
             }
         };
+        let touched = match watcher.take_touched_repositories() {
+            Ok(touched) => touched,
+            Err(error) => {
+                finish_after_error(&database, &workspace, &owner_token, &error)?;
+                return Err(watcher_public_error(&error));
+            }
+        };
+        let pass_overrides = targeted_pass_overrides(&overrides, refresh_scope, touched);
         let minimum_start =
             last_pass_started + Duration::from_millis(policy.min_watch_rescan_interval_ms);
         if Instant::now() < minimum_start {
@@ -848,7 +978,7 @@ pub(crate) async fn watch_workspace(
         if let Err(error) = retry_sync(
             &config,
             &database,
-            &overrides,
+            &pass_overrides,
             synchronize_codegraph,
             session_started,
             policy.max_watch_session_wall_time_ms,
@@ -928,6 +1058,19 @@ pub(crate) async fn watch_workspace(
             scope = refreshed;
         }
     }
+}
+
+/// Restricts a watch pass to the touched repositories unless the scope or workspace changed.
+fn targeted_pass_overrides(
+    overrides: &ScanOverrides,
+    refresh_scope: bool,
+    touched: Option<Vec<String>>,
+) -> ScanOverrides {
+    let mut pass = overrides.clone();
+    if !refresh_scope && overrides.repository.is_none() {
+        pass.touched_repositories = touched.unwrap_or_default();
+    }
+    pass
 }
 
 fn emit_sync(
@@ -1144,8 +1287,7 @@ fn finish_and_emit(
 fn build_watcher(
     scope: &WatchScope,
     sender: mpsc::Sender<WatchSignal>,
-    refresh_required: Arc<AtomicBool>,
-    scope_refresh_required: Arc<AtomicBool>,
+    pending: Arc<PendingChanges>,
     requested_poll_interval: Option<Duration>,
     policy: &code_system_graph_core::ExecutionPolicy,
 ) -> anyhow::Result<ActiveWatcher> {
@@ -1159,32 +1301,18 @@ fn build_watcher(
         return build_poll_watcher(
             scope,
             sender,
-            refresh_required,
-            scope_refresh_required,
+            pending,
             requested_poll_interval.unwrap_or(DEFAULT_POLL_INTERVAL),
             policy,
         );
     }
 
-    match build_native_watcher(
-        scope,
-        sender.clone(),
-        Arc::clone(&refresh_required),
-        Arc::clone(&scope_refresh_required),
-        policy,
-    ) {
+    match build_native_watcher(scope, sender.clone(), Arc::clone(&pending), policy) {
         Ok(watcher) => Ok(watcher),
         Err(error) if watcher_limit_exceeded(&error) => Err(error),
         Err(error) => {
             eprintln!("csgraph sync native watcher unavailable ({error}); falling back to polling");
-            build_poll_watcher(
-                scope,
-                sender,
-                refresh_required,
-                scope_refresh_required,
-                DEFAULT_POLL_INTERVAL,
-                policy,
-            )
+            build_poll_watcher(scope, sender, pending, DEFAULT_POLL_INTERVAL, policy)
         }
     }
 }
@@ -1198,20 +1326,13 @@ fn watcher_limit_exceeded(error: &anyhow::Error) -> bool {
 fn build_native_watcher(
     scope: &WatchScope,
     sender: mpsc::Sender<WatchSignal>,
-    refresh_required: Arc<AtomicBool>,
-    scope_refresh_required: Arc<AtomicBool>,
+    pending: Arc<PendingChanges>,
     policy: &code_system_graph_core::ExecutionPolicy,
 ) -> anyhow::Result<ActiveWatcher> {
     let callback_scope = scope.clone();
     let mut watcher = RecommendedWatcher::new(
         move |result| {
-            forward_event(
-                result,
-                &callback_scope,
-                &sender,
-                &refresh_required,
-                &scope_refresh_required,
-            );
+            forward_event(result, &callback_scope, &sender, &pending);
         },
         Config::default().with_follow_symlinks(false),
     )
@@ -1233,8 +1354,7 @@ fn build_native_watcher(
 fn build_poll_watcher(
     scope: &WatchScope,
     sender: mpsc::Sender<WatchSignal>,
-    refresh_required: Arc<AtomicBool>,
-    scope_refresh_required: Arc<AtomicBool>,
+    pending: Arc<PendingChanges>,
     interval: Duration,
     policy: &code_system_graph_core::ExecutionPolicy,
 ) -> anyhow::Result<ActiveWatcher> {
@@ -1245,13 +1365,7 @@ fn build_poll_watcher(
         .with_follow_symlinks(false);
     let mut watcher = PollWatcher::new(
         move |result| {
-            forward_event(
-                result,
-                &callback_scope,
-                &sender,
-                &refresh_required,
-                &scope_refresh_required,
-            );
+            forward_event(result, &callback_scope, &sender, &pending);
         },
         config,
     )
@@ -1336,27 +1450,28 @@ fn forward_event(
     result: notify::Result<Event>,
     scope: &WatchScope,
     sender: &mpsc::Sender<WatchSignal>,
-    refresh_required: &AtomicBool,
-    scope_refresh_required: &AtomicBool,
+    pending: &PendingChanges,
 ) {
     match result {
-        Ok(event) => match scope.relevant_event(&event) {
-            Ok(true) => {
+        Ok(event) => match scope.event_scope(&event) {
+            Ok(EventScope::Irrelevant) => {}
+            Ok(touched) => {
+                pending.record(touched);
                 if scope.changes_enabled_gitignore(&event) {
-                    scope_refresh_required.store(true, Ordering::Release);
+                    pending.refresh_scope.store(true, Ordering::Release);
                 }
                 let signal =
                     if event.kind.is_create() && event.paths.iter().any(|path| path.is_dir()) {
-                        refresh_required.store(true, Ordering::Release);
+                        pending.refresh_directories.store(true, Ordering::Release);
                         WatchSignal::RefreshDirectories
                     } else {
                         WatchSignal::Dirty
                     };
                 let _ignored = sender.try_send(signal);
             }
-            Ok(false) => {}
             Err(error) => {
                 eprintln!("csgraph sync could not apply repository ignore policy: {error}");
+                pending.record(EventScope::Workspace);
                 let _ignored = sender.try_send(WatchSignal::Dirty);
             }
         },
@@ -1368,6 +1483,7 @@ fn forward_event(
                     .all(|path| database_artifact(path, &scope.database)) => {}
         Err(error) => {
             eprintln!("csgraph sync filesystem watcher reported: {error}");
+            pending.record(EventScope::Workspace);
             let _ignored = sender.try_send(WatchSignal::Dirty);
         }
     }
@@ -1401,7 +1517,7 @@ fn database_artifact(path: &Path, database: &Path) -> bool {
     }
     let work_database = {
         let mut value = database.as_os_str().to_os_string();
-        value.push(".work-v1.db");
+        value.push(".work.db");
         PathBuf::from(value)
     };
     if path == work_database {
@@ -1419,10 +1535,10 @@ fn database_artifact(path: &Path, database: &Path) -> bool {
                     "-wal",
                     "-shm",
                     "-journal",
-                    ".work-v1.db",
-                    ".work-v1.db-wal",
-                    ".work-v1.db-shm",
-                    ".work-v1.db-journal",
+                    ".work.db",
+                    ".work.db-wal",
+                    ".work.db-shm",
+                    ".work.db-journal",
                 ]
                 .iter()
                 .any(|suffix| name == format!("{database_name}{suffix}"))
@@ -1479,6 +1595,7 @@ mod tests {
             initial_ready: true,
             refresh_started: Some(Instant::now()),
             refresh_scope: false,
+            touched: TouchedRepositories::default(),
             failed: false,
         }));
         let input = concat!(
@@ -1516,6 +1633,7 @@ mod tests {
             initial_ready: true,
             refresh_started: Some(original),
             refresh_scope: false,
+            touched: TouchedRepositories::default(),
             failed: false,
         }));
         let input = concat!(
@@ -1551,21 +1669,14 @@ mod tests {
         sender
             .try_send(WatchSignal::Dirty)
             .expect("channel should accept prefill");
-        let refresh_required = AtomicBool::new(false);
+        let pending = PendingChanges::default();
         let event = Event::new(notify::EventKind::Create(notify::event::CreateKind::Folder))
             .add_path(directory);
 
-        let scope_refresh_required = AtomicBool::new(false);
-        forward_event(
-            Ok(event),
-            &scope,
-            &sender,
-            &refresh_required,
-            &scope_refresh_required,
-        );
+        forward_event(Ok(event), &scope, &sender, &pending);
 
         assert!(matches!(receiver.try_recv(), Ok(WatchSignal::Dirty)));
-        assert!(refresh_required.swap(false, Ordering::AcqRel));
+        assert!(pending.refresh_directories.swap(false, Ordering::AcqRel));
     }
 
     #[test]
@@ -1577,6 +1688,7 @@ mod tests {
             config: temporary.path().join("code-system-graph.yaml"),
             database: temporary.path().join("graph.db"),
             repositories: vec![WatchRepository::new(
+                "repo".to_owned(),
                 root.clone(),
                 gitignore_policy(),
                 Vec::new(),
@@ -1586,23 +1698,17 @@ mod tests {
         sender
             .try_send(WatchSignal::Dirty)
             .expect("channel should accept prefill");
-        let refresh_required = AtomicBool::new(false);
-        let scope_refresh_required = AtomicBool::new(false);
+        let pending = PendingChanges::default();
         let event = Event::new(notify::EventKind::Modify(notify::event::ModifyKind::Data(
             notify::event::DataChange::Any,
         )))
         .add_path(root.join(".gitignore"));
 
-        forward_event(
-            Ok(event),
-            &scope,
-            &sender,
-            &refresh_required,
-            &scope_refresh_required,
-        );
+        forward_event(Ok(event), &scope, &sender, &pending);
 
         assert!(matches!(receiver.try_recv(), Ok(WatchSignal::Dirty)));
-        assert!(scope_refresh_required.swap(false, Ordering::AcqRel));
+        assert!(pending.refresh_scope.swap(false, Ordering::AcqRel));
+        assert_eq!(pending.take_touched(), Some(vec!["repo".to_owned()]));
     }
 
     #[test]
@@ -1671,6 +1777,7 @@ mod tests {
             config: temporary.path().join("code-system-graph.yaml"),
             database: temporary.path().join("graph.db"),
             repositories: vec![WatchRepository::new(
+                "repo".to_owned(),
                 root.clone(),
                 gitignore_policy(),
                 Vec::new(),
@@ -1688,6 +1795,7 @@ mod tests {
             config: temporary.path().join("code-system-graph.yaml"),
             database: temporary.path().join("graph.db"),
             repositories: vec![WatchRepository::new(
+                "repo".to_owned(),
                 root.clone(),
                 gitignore_policy(),
                 Vec::new(),
@@ -1704,6 +1812,7 @@ mod tests {
             config: PathBuf::from("/workspace/code-system-graph.yaml"),
             database: PathBuf::from("/workspace/.state/graph.db"),
             repositories: vec![WatchRepository::new(
+                "repo".to_owned(),
                 PathBuf::from("/workspace/repo"),
                 policy(&[], &[]),
                 vec![PathBuf::from(".code-system-graph.yaml")],
@@ -1713,8 +1822,8 @@ mod tests {
         assert!(scope.relevant_path(Path::new("/workspace/code-system-graph.yaml"))?);
         assert!(!scope.relevant_path(Path::new("/workspace/repo/.codegraph/codegraph.db-wal"))?);
         assert!(!scope.relevant_path(Path::new("/workspace/.state/graph.db-wal"))?);
-        assert!(!scope.relevant_path(Path::new("/workspace/.state/graph.db.work-v1.db-wal"))?);
-        assert!(!scope.relevant_path(Path::new("/workspace/.state/graph.db.work-v1.db-shm"))?);
+        assert!(!scope.relevant_path(Path::new("/workspace/.state/graph.db.work.db-wal"))?);
+        assert!(!scope.relevant_path(Path::new("/workspace/.state/graph.db.work.db-shm"))?);
         Ok(())
     }
 
@@ -1724,6 +1833,7 @@ mod tests {
             config: PathBuf::from("/workspace/code-system-graph.yaml"),
             database: PathBuf::from("/workspace/.state/graph.db"),
             repositories: vec![WatchRepository::new(
+                "repo".to_owned(),
                 PathBuf::from("/workspace/repo"),
                 policy(&["./generated//./**"], &["./vendor//internal-sdk/./**"]),
                 vec![PathBuf::from("generated/explicit.yaml")],
@@ -1754,15 +1864,88 @@ mod tests {
             config: temporary.path().join("code-system-graph.yaml"),
             database: temporary.path().join("graph.db"),
             repositories: vec![
-                WatchRepository::new(root.clone(), policy(&["generated/*"], &[]), Vec::new()),
-                WatchRepository::new(root, policy(&[], &[]), Vec::new()),
+                WatchRepository::new(
+                    "restrictive".to_owned(),
+                    root.clone(),
+                    policy(&["generated/*"], &[]),
+                    Vec::new(),
+                ),
+                WatchRepository::new("permissive".to_owned(), root, policy(&[], &[]), Vec::new()),
             ],
         };
 
         assert_eq!(scope.repositories.len(), 2);
         assert!(scope.relevant_path(&source)?);
+        assert!(matches!(
+            scope.path_scope(&source)?,
+            EventScope::Repositories(aliases) if aliases.contains("permissive")
+        ));
         assert!(scope.should_watch_directory(&repository)?);
         Ok(())
+    }
+
+    #[test]
+    fn manifest_and_rescan_events_should_widen_the_pass_to_the_workspace() -> anyhow::Result<()> {
+        let scope = WatchScope {
+            config: PathBuf::from("/workspace/code-system-graph.yaml"),
+            database: PathBuf::from("/workspace/.state/graph.db"),
+            repositories: vec![WatchRepository::new(
+                "repo".to_owned(),
+                PathBuf::from("/workspace/repo"),
+                policy(&[], &[]),
+                Vec::new(),
+            )],
+        };
+        let modify = || {
+            Event::new(notify::EventKind::Modify(notify::event::ModifyKind::Data(
+                notify::event::DataChange::Any,
+            )))
+        };
+
+        assert_eq!(
+            scope.event_scope(&modify().add_path(PathBuf::from("/workspace/repo/src/lib.rs")))?,
+            EventScope::Repositories(BTreeSet::from(["repo".to_owned()]))
+        );
+        assert_eq!(
+            scope.event_scope(
+                &modify().add_path(PathBuf::from("/workspace/code-system-graph.yaml"))
+            )?,
+            EventScope::Workspace
+        );
+        assert_eq!(
+            scope.event_scope(&modify().set_flag(notify::event::Flag::Rescan))?,
+            EventScope::Workspace
+        );
+        assert_eq!(
+            scope.event_scope(&modify().add_path(PathBuf::from("/elsewhere/file.rs")))?,
+            EventScope::Irrelevant
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn touched_repositories_should_select_a_targeted_pass_only_when_bounded() {
+        let mut touched = TouchedRepositories::default();
+        touched.record(EventScope::Repositories(BTreeSet::from(["b".to_owned()])));
+        touched.record(EventScope::Repositories(BTreeSet::from(["a".to_owned()])));
+        assert_eq!(touched.take(), Some(vec!["a".to_owned(), "b".to_owned()]));
+        assert_eq!(touched.take(), None);
+
+        touched.record(EventScope::Repositories(BTreeSet::from(["a".to_owned()])));
+        touched.record(EventScope::Workspace);
+        assert_eq!(touched.take(), None);
+
+        let overrides = ScanOverrides::default();
+        let targeted = targeted_pass_overrides(&overrides, false, Some(vec!["a".to_owned()]));
+        assert_eq!(targeted.touched_repositories, vec!["a".to_owned()]);
+        let refreshed = targeted_pass_overrides(&overrides, true, Some(vec!["a".to_owned()]));
+        assert_eq!(refreshed.touched_repositories, Vec::<String>::new());
+        let explicit = ScanOverrides {
+            repository: Some("b".to_owned()),
+            ..ScanOverrides::default()
+        };
+        let explicit = targeted_pass_overrides(&explicit, false, Some(vec!["a".to_owned()]));
+        assert_eq!(explicit.touched_repositories, Vec::<String>::new());
     }
 
     #[test]

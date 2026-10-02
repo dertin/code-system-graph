@@ -6,7 +6,7 @@ use code_system_graph_core::{
     AgentNextAction, ResolvedSymbol, SearchCoverage, SearchExplanation, SearchReport
 };
 use code_system_graph_model::{
-    EdgeKind, EpistemicStatus, EvidenceId, FreshnessSummary, Node, NodeId, NodeKind, Provenance, RepoFreshnessState, RepoId, ToolStatus, TraceReport
+    EdgeKind, EpistemicStatus, EvidenceId, FreshnessSummary, HttpLinkGap, Node, NodeId, NodeKind, Provenance, RepoFreshnessState, RepoId, ToolStatus, TraceReport
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -162,6 +162,8 @@ pub(super) struct AgentQueryReport {
     pub truncated: bool,
     pub coverage: SearchCoverage,
     pub next_actions: Vec<AgentNextAction>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub link_gaps: Vec<HttpLinkGap>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -218,7 +220,7 @@ pub(super) struct AgentRepositoryFreshness {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub(super) struct AgentStatusReport {
     pub workspace: String,
-    pub database_schema: i64,
+    pub database_schema: String,
     pub integrity_ok: bool,
     pub snapshot_id: String,
     pub node_count: usize,
@@ -348,6 +350,7 @@ pub(super) fn query_view(
             .take(2)
             .cloned()
             .collect(),
+        link_gaps: report.link_gaps.clone(),
     }
 }
 
@@ -495,7 +498,7 @@ pub(super) fn status_view(
         .count();
     AgentStatusReport {
         workspace: report.workspace.clone(),
-        database_schema: report.schema_version,
+        database_schema: report.schema_id.clone(),
         integrity_ok: report.integrity_ok,
         snapshot_id: report.snapshot.snapshot_id.clone(),
         node_count: report.snapshot.node_count,

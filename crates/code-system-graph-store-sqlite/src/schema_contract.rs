@@ -1,6 +1,6 @@
 use rusqlite::Connection;
 
-use super::{INITIAL_SCHEMA, LATEST_SCHEMA_VERSION, StoreError, schema_version};
+use super::{INITIAL_SCHEMA, StoreError, schema_identity, stored_schema_id};
 
 type SchemaContractEntry = (String, String, String, String);
 
@@ -9,8 +9,8 @@ pub(super) fn validate_exact_schema(connection: &Connection) -> Result<(), Store
     if schema_contract(connection)? != expected {
         return Err(StoreError::InvalidSchema);
     }
-    match schema_version(connection) {
-        Ok(LATEST_SCHEMA_VERSION) => Ok(()),
+    match stored_schema_id(connection) {
+        Ok(schema_id) if schema_id == schema_identity() => Ok(()),
         Ok(_) | Err(_) => Err(StoreError::InvalidSchema),
     }
 }
