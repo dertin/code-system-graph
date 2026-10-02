@@ -551,7 +551,7 @@ fn scan_should_apply_exact_codegraph_corroboration_without_source_payloads() -> 
     let registry = register_workspace(&manifest, &source, &parsed)?;
     let repo_id = &registry.record.repositories[0].id;
     let capability =
-        store.load_provider_capabilities("codegraph-scan", repo_id, "codegraph", "1.5.0")?;
+        store.load_provider_capabilities("codegraph-scan", repo_id, "codegraph", "1.6.1")?;
     let codegraph_evidence = store
         .search_current_nodes("codegraph-scan", "anchor", 10)?
         .len();

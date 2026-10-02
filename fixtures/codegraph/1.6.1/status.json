@@ -1,0 +1,36 @@
+{
+  "initialized": true,
+  "version": "1.6.1",
+  "projectPath": "/fixture/repository",
+  "indexPath": "/fixture/repository/.codegraph",
+  "lastIndexed": "2026-10-02T00:00:00.000Z",
+  "fileCount": 3,
+  "nodeCount": 7,
+  "edgeCount": 5,
+  "dbSizeBytes": 176128,
+  "walSizeBytes": 8272,
+  "backend": "node-sqlite",
+  "journalMode": "wal",
+  "nodesByKind": {
+    "file": 3,
+    "function": 3,
+    "import": 1
+  },
+  "languages": [
+    "rust"
+  ],
+  "pendingChanges": {
+    "added": 0,
+    "modified": 0,
+    "removed": 0
+  },
+  "worktreeMismatch": null,
+  "index": {
+    "builtWithVersion": "1.6.1",
+    "builtWithExtractionVersion": 27,
+    "currentExtractionVersion": 27,
+    "reindexRecommended": false,
+    "state": "complete",
+    "pendingRefs": 0
+  }
+}

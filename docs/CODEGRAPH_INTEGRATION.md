@@ -175,23 +175,30 @@ All persisted resources and other tools remain source-free.
 
 ## Compatibility matrix
 
-The minimum and currently tested production contract is CodeGraph 1.5.0. The structured CLI
-adapter accepts the 1.5.x contract family; later versions are incompatible until fixtures and
-contract tests are added. MCP capability discovery remains name/schema-driven, but unknown
-structured output is never parsed speculatively.
+The minimum and currently tested production contract is CodeGraph 1.6.1. The structured CLI
+adapter accepts 1.6.1 and later 1.6.x patch releases; earlier versions, pre-releases, and later
+minor versions are reported as incompatible until fixtures and contract tests are added. MCP
+capability discovery remains name/schema-driven, but unknown structured output is never parsed
+speculatively.
 
 | Adapter | Version tested | Capabilities | Result |
 | --- | --- | --- | --- |
-| Public MCP | 1.5.0 | `codegraph_explore`; `query`, `maxFiles`, `projectPath`; protocol `2024-11-05` | Passing |
-| Public CLI JSON | 1.5.0 | status, query, callers, callees, impact, affected | Passing |
-| Public CLI text | 1.5.0 | explore context fallback | Passing, opaque and bounded |
-| Process fake | 1.5.0 contract | success, invalid MCP, timeout, cancellation, output cap | Passing |
-| Live host smoke | 1.5.0 | initialize, tools/list, status, capability mapping | Passing |
+| Public MCP | 1.6.1 | `codegraph_explore`; `query`, `maxFiles`, `projectPath`; protocol `2024-11-05` | Passing |
+| Public CLI JSON | 1.6.1 | status, query, callers, callees, impact, affected | Passing |
+| Public CLI text | 1.6.1 | explore context fallback, file context | Passing, opaque and bounded |
+| Process fake | 1.6.1 contract | success, invalid MCP, timeout, cancellation, output cap | Passing |
+| Live host smoke | 1.6.1 | initialize, tools/list, status, capability mapping, query, callers, impact, affected | Passing |
 
-The versioned fixtures are under `fixtures/codegraph/1.5.0/`; degradation fixtures cover missing
-indexes, stale indexes, missing optional tools, invalid MCP responses, and oversized output.
+The versioned fixtures under `fixtures/codegraph/1.6.1/` are captured from CodeGraph 1.6.1 and
+parsed by the contract tests; degradation fixtures cover missing indexes, stale indexes, missing
+optional tools, invalid MCP responses, and oversized output. The live smoke test is ignored by
+default and runs against an explicitly indexed checkout of this repository:
 
-Operation selection for 1.5.0 is:
+```bash
+cargo test -p code-system-graph-core --test codegraph_provider_e2e -- --ignored
+```
+
+Operation selection for 1.6.1 is:
 
 - local context: MCP `codegraph_explore`, then CLI `explore` fallback;
 - symbol resolution: CLI `query --json`;

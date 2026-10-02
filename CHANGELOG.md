@@ -5,8 +5,15 @@ Versioning.
 
 ## [1.2.0] - Unreleased
 
+### Changed
+
+- The CodeGraph adapter is validated against CodeGraph 1.6.1. The structured CLI contract accepts
+  1.6.1 and later 1.6.x patch releases; CodeGraph 1.5 and earlier are reported as incompatible.
+
 ### Release engineering
 
+- Replaced the CodeGraph 1.5.0 fixtures with fixtures captured from CodeGraph 1.6.1; contract tests
+  parse every structured CLI output, and the live smoke test runs each structured operation.
 - Lowered the workspace MSRV from 1.97.1 to 1.96.0, the lowest toolchain that builds every locked
   dependency at its latest release.
 - Updated all dependencies to their latest releases, including `jsonschema` 0.58, `sqlparser`

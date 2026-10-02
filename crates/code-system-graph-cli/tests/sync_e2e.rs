@@ -158,7 +158,7 @@ fn stale_codegraph_index_should_corroborate_even_without_native_changes() -> any
     std::fs::write(
         &binary,
         format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$1\" in\n  status)\n    if [ -f '{}' ]; then modified=0; else modified=1; fi\n    printf '{{\"initialized\":true,\"version\":\"1.5.0\",\"pendingChanges\":{{\"added\":0,\"modified\":%s,\"removed\":0}},\"worktreeMismatch\":null,\"index\":{{\"reindexRecommended\":false,\"state\":\"complete\"}}}}\\n' \"$modified\"\n    ;;\n  sync) : > '{}' ;;\n  *) exec python3 '{}' \"$@\" ;;\nesac\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$1\" in\n  status)\n    if [ -f '{}' ]; then modified=0; else modified=1; fi\n    printf '{{\"initialized\":true,\"version\":\"1.6.1\",\"pendingChanges\":{{\"added\":0,\"modified\":%s,\"removed\":0}},\"worktreeMismatch\":null,\"index\":{{\"reindexRecommended\":false,\"state\":\"complete\"}}}}\\n' \"$modified\"\n    ;;\n  sync) : > '{}' ;;\n  *) exec python3 '{}' \"$@\" ;;\nesac\n",
             invocation_log.display(),
             synchronized_marker.display(),
             synchronized_marker.display(),
