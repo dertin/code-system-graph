@@ -213,7 +213,8 @@ tool are separate states. Federated boundaries remain queryable, but local detai
 coverage warnings prevent false-safe conclusions.
 
 `sync` does not start a CodeGraph daemon and does not reuse CodeGraph's private lock or database
-format. Its own watcher observes source trees and invokes one-shot public syncs serially. The
+format. Its own watcher observes source trees and invokes one-shot public syncs for up to four
+repositories at a time (bounded by `executionPolicy.maxExtractionWorkers`). The
 short-lived MCP child still starts with `--no-watch`, avoiding duplicate hidden watchers per scan.
 CodeGraph database/WAL changes under `.codegraph/` are excluded from csgraph watch events.
 

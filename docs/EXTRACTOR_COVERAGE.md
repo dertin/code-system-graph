@@ -128,7 +128,10 @@ schemas outside the extracted file set, or infer application handlers from gener
   and truncates oversized column/index detail without aborting the workspace scan.
 - Factory Boy `Meta.model` links from a factory symbol to its statically imported Python model.
 - Literal SELECT/WITH/INSERT/UPDATE/DELETE observations across supported source languages with
-  reader/writer roles and enclosing-symbol anchors.
+  reader/writer roles and enclosing-symbol anchors. JavaScript under `theme`, `themes`, `vendor`,
+  `vendors`, `third_party`, `third-party`, or `bower_components` directories, files named
+  `*.min.js`, `*-min.js`, `*.bundle.js`, or `*.chunk.js`, and minified content (at least 4 KiB with
+  lines averaging 500 bytes or more) are not scanned for SQL.
 - Exact linking to one unambiguous normalized table identity shared across languages and
   repositories.
 
@@ -142,6 +145,8 @@ literal values are discarded before persistence.
 - Docker Compose services, images, ports, dependencies, and environment key names.
 - Kubernetes workloads, Services, Ingresses, static resources, selectors, and Secret key names.
 - Helm templates and values with static names retained and templated values marked incomplete.
+  A template is a `.yaml`, `.yml`, or `.tpl` file under a `templates` directory whose parent holds
+  `Chart.yaml`; Jinja `*.j2` files and other `templates` directories are not Helm.
 - Terraform/OpenTofu literal resource declarations and dependency metadata.
 - Repository `deploys`, deployment `provides`, resource dependency, and config-key links from
   direct declarations.
@@ -165,12 +170,15 @@ credentials, connection strings, and secret material are never stored.
 ## Incremental and linking behavior
 
 Extractor outputs are stored per repository, checkout, lossless source path, extractor, content
-hash, and extractor version. Identical batches are reused. Adds, replacements, and deletions
-recompute only affected method/path neighborhoods; a missing previous deletion batch fails closed.
-`--force` never reuses a planned replacement, and internal extractor revisions invalidate cached
-outputs even when source content is unchanged.
-Duplicate providers remain ambiguous. Consumers, tests, provider contracts, and implementation
-symbols require direct evidence before edges are created.
+hash, and extractor version. Identical batches are reused. Relationships are relinked from the
+complete set of current batches on every scan, so an incremental scan publishes exactly the graph a
+full scan would. `--force` never reuses a planned replacement, and internal extractor revisions
+invalidate cached outputs even when source content is unchanged. A source file whose event,
+GraphQL, generated-protobuf, or literal-SQL scan finds no facts keeps a persisted batch without
+outputs and adds no artifact node to the graph; declared AsyncAPI, GraphQL, protobuf, and data artifacts always
+appear.
+Equally specific providers that no scope rule separates remain ambiguous. Consumers, tests, provider
+contracts, and implementation symbols require direct evidence before edges are created.
 
 Optional scan-time CodeGraph corroboration uses only public MCP/CLI operations. Exact symbol
 path/name/line matches add provenance to an existing source-derived implementation edge; they

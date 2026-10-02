@@ -63,7 +63,7 @@ Each community reports:
 - incomplete inputs and other limitations.
 
 Labels use only bounded structural terms from repository, service, contract, and central-node
-labels. LLM-generated names are outside the factual 1.0.0 engine.
+labels. LLM-generated names are outside the factual engine.
 
 ## Snapshot deltas
 

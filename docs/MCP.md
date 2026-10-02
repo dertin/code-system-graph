@@ -135,7 +135,10 @@ read only after substituting a concrete stable ID. Every resource uses `text/mar
 catalog embeds each generated JSON Schema in a closed fenced `json` block. Resource item and byte
 limits come from the immutable workspace policy. Every resource collection reports its `total`,
 retained count, and truncation state in Markdown; status, coverage, and freshness use
-collection-specific names for the same metadata.
+collection-specific names for the same metadata. The coverage resource also reports HTTP link
+coverage (linked, without a provider, ambiguous, and external calls) and the bounded list of
+unlinked calls, and query results list the unlinked HTTP calls among their entities under
+"Unlinked HTTP calls".
 
 ## Administrative profile
 

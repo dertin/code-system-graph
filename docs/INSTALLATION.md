@@ -5,7 +5,7 @@ for maintainers are in [Release engineering](RELEASE.md).
 
 ## Current availability
 
-Code System Graph `1.1.0` is published on [crates.io](https://crates.io/crates/code-system-graph)
+Code System Graph `1.2.0` is published on [crates.io](https://crates.io/crates/code-system-graph)
 and [GitHub Releases](https://github.com/dertin/code-system-graph/releases). Native release CI
 validates Linux x86_64/ARM64, macOS x86_64/ARM64, and Windows x86_64 before their archives are
 published.
@@ -84,8 +84,8 @@ For a Linux x86_64 archive:
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-tar -xzf code-system-graph-x86_64-unknown-linux-gnu-v1.1.0.tgz
-PREFIX="$HOME/.local" ./code-system-graph-x86_64-unknown-linux-gnu-v1.1.0/install.sh
+tar -xzf code-system-graph-x86_64-unknown-linux-gnu-v1.2.0.tgz
+PREFIX="$HOME/.local" ./code-system-graph-x86_64-unknown-linux-gnu-v1.2.0/install.sh
 ```
 
 Replace the target in the archive name with `x86_64-apple-darwin`,
@@ -93,7 +93,7 @@ Replace the target in the archive name with `x86_64-apple-darwin`,
 same installer.
 
 The Windows archive is a ZIP file. Verify `SHA256SUMS`, extract
-`code-system-graph-x86_64-pc-windows-msvc-v1.1.0.zip`, and add its `bin` directory containing
+`code-system-graph-x86_64-pc-windows-msvc-v1.2.0.zip`, and add its `bin` directory containing
 `csgraph.exe` and `code-system-graph-hooks.exe` to `PATH`.
 
 `PREFIX` defaults to `$HOME/.local`. The installer places binaries under `$PREFIX/bin`, installed
@@ -153,13 +153,10 @@ The package installer preserves replaced binaries under:
 $PREFIX/share/code-system-graph/backups/
 ```
 
-Version 1.1.0 deliberately rejects 1.0.x databases, query caches, checkpoints, generated plugin
-bindings, and delivery contracts. Archive or remove the old `.code-system-graph` database and
-operational sidecars, regenerate any Agent Plugin/binding, then run a complete scan. Backup and
-restore accept only the exact 1.1.0 schema and never migrate older state. Direct MCP registrations
-must add `--config`; MCP consumers receive one human-oriented Markdown text block plus typed
-`structuredContent` as its complete machine-readable mirror, while HTTP/CLI consumers must accept
-delivery schema v2.
+A database is accepted only when its schema exactly matches the running binary. When `csgraph`
+reports an incompatible database, remove the `.code-system-graph` database and its operational
+sidecars, regenerate any Agent Plugin binding with `plugin create --replace-generated`, and run a
+complete scan.
 
 ## Uninstall
 
@@ -175,7 +172,7 @@ cargo uninstall code-system-graph-hooks
 Run `uninstall.sh` from the verified extracted package with the same prefix:
 
 ```bash
-PREFIX="$HOME/.local" ./code-system-graph-x86_64-unknown-linux-gnu-v1.1.0/uninstall.sh
+PREFIX="$HOME/.local" ./code-system-graph-x86_64-unknown-linux-gnu-v1.2.0/uninstall.sh
 ```
 
 Before uninstalling either installation type, remove any optional agent hooks:

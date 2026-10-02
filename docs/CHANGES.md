@@ -57,7 +57,7 @@ Rate limits are returned to the caller; Code System Graph does not sleep or retr
 Provider responses normalize metadata, refs, changed-file counts, CI/check state, reviews,
 approvals, warnings, and rate-limit metadata. Patch bodies and raw responses are discarded.
 Structured ETag/TTL caching retains only this source-free normalized result. Bitbucket Data Center
-is intentionally not implemented in 1.0.0.
+is intentionally not implemented.
 
 `csgraph pr list` returns one provider page of source-free summaries for GitHub or Bitbucket
 Cloud. It uses the same enablement, per-call consent, credential, HTTPS, rate-limit, cancellation,

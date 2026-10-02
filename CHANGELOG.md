@@ -7,11 +7,140 @@ Versioning.
 
 ### Changed
 
+- The SQLite store keeps one current graph per workspace and publishes each scan as a delta:
+  only inserted, changed, and removed nodes, edges, evidence, fingerprints, and extractor batches
+  are written. An unchanged republication writes no graph rows, and the database no longer grows
+  with the number of scans.
+- The database records a schema identity derived from the embedded schema definition. `status`,
+  `doctor`, restore, and MCP status report `schema_id`.
+- Communities are recomputed only when graph topology changes; the analyses of the current and the
+  previous snapshot are retained for comparison.
+- FTS5 search rows are maintained by triggers keyed by node row.
+- Every store read runs in one SQLite read transaction, so readers never observe a snapshot that a
+  concurrent publication replaced between statements.
+- Scans fingerprint each physical file once and reuse its content hash from a per-file stat cache
+  (size, modification time, and, on Unix, device, inode, and change time) when unchanged; files
+  modified within two seconds of the cached observation are always read.
+- Changed files are read once and shared by all of their extractors. Extraction runs on up to
+  `executionPolicy.maxExtractionWorkers` threads (default 8, bounded by available parallelism) and
+  merges results in artifact-key order, so the published graph is identical for every worker count.
+- Event and literal-SQL source extractors skip files that contain none of their recognizer
+  markers, and Rust files are parsed for database calls only when they reference `sqlx` or
+  `mysql_async`.
+- Checkpointed batches are written in one sidecar transaction and stored as raw payload BLOBs;
+  only artifacts that differ from the published graph are looked up in the checkpoint cache.
+- Targeted `--repository` scans discover and fingerprint only the selected repository.
+- The scan no longer stages a complete copy of the candidate graph in the operational sidecar
+  before publication.
+- `ExecutionSummary` reports `statCacheHits`, `extractionWorkers`, `contentBytesRead`,
+  `publishedRows`, and per-phase wall time and resident memory in `phases`.
+- Source files whose GraphQL, event, generated-protobuf, or literal-SQL scan finds no facts no
+  longer add a per-file artifact node and `contains` edge; their batches are persisted without
+  outputs, and reusing a batch without outputs decodes nothing. Every registered repository has a
+  repository node.
+- A scan whose snapshot identity (a hash of the manifest, the extraction contract, the budgets, and
+  every artifact fingerprint) equals the current snapshot reuses it without loading the previous
+  fingerprints or any extractor batch. The snapshot identifier now covers artifact paths and sizes
+  in addition to content hashes.
+- Incremental scans publish fingerprints and extractor batches as a delta planned against the
+  stored fingerprints; `--force` scans compare every stored artifact row. The incremental plan
+  lists only added, modified, and deleted artifacts, and `ArtifactChangeKind::Unchanged`, the
+  unused extractor-batch planner (`plan_extractor_batches`, `ExtractorBatchPlan`, `PlannedBatch`,
+  `BatchAction`), and `ArtifactKey` are removed from the public API.
+- Community detection evaluates each Louvain move from incremental modularity gains and community
+  degree totals instead of recomputing modularity for every candidate.
+- The scan worker reports progress at most every 50 ms. The supervisor's memory sampler reads only
+  process memory and parent links instead of listing every thread and reading CPU, disk usage, and
+  executable paths of every process, which cuts each sample by about four times on a desktop host
+  and keeps the no-progress watchdog on schedule under CPU contention.
+- CodeGraph corroboration, extraction planning, and extractor-run accounting index artifacts and
+  graph elements by borrowed keys in `foldhash` maps instead of scanning or cloning them per
+  artifact, and reused extractor batches are moved rather than copied.
+- Workspace registration inspects repositories in parallel and caches each `origin` remote by the
+  modification time and size of its Git config. `sync` resolves the workspace once per pass and runs
+  CodeGraph status and sync for up to four repositories concurrently.
+- HTTP operations are identified by method and canonical route shape, so `{id}`, `:id`,
+  `<int:id>`, `{id:int}`, `[id]`, and catch-all forms such as `{*rest}` or `[...slug]` declare the
+  same operation. One per-method route index resolves `calls_remote`, `validates`, and
+  `implemented_by`: concrete paths such as `/orders/42` match templates, the most specific template
+  wins, and equally specific providers are narrowed to an explicit repository restriction or the
+  caller's repository before being reported as ambiguous with their candidates.
+- Relationships are relinked from all current batches on every scan, so incremental and full scans
+  publish identical graphs.
+- `sync --watch` passes after the initial one discover and synchronize only the repositories touched
+  by the coalesced filesystem events; manifest edits, ignore-rule changes, event overflow, and
+  watcher errors widen the pass to the whole workspace.
+- Absolute consumer URLs are linked by path and scoped by their authority. Loopback hosts resolve
+  across the workspace, the new per-repository `authorities` manifest field restricts a host to one
+  repository, Compose and Kubernetes service names are inferred as authorities of the declaring
+  repository, and any other host is classified external instead of being reported as a call
+  without a provider.
+- TypeScript, JavaScript, Go, and Java source extraction no longer treats `//` inside string
+  literals as a comment, so absolute URLs are recognized.
+- Server routes are published with their full path. Router prefixes are composed per repository,
+  across files, for FastAPI `include_router`, Flask blueprints, Express `use`, NestJS controllers
+  and global prefixes, Spring and Feign class-level mappings, Gin and Chi groups and mounts, Axum
+  `nest`/`merge`, and Actix Web `scope`/`service`/`configure`. Go 1.22 `net/http` method patterns
+  such as `"GET /orders/{id}"` are recognized.
+- Client URLs are evaluated instead of requiring one string literal: constants and variables bound
+  earlier in the same function or file, concatenation, Python f-strings, `%` and `.format`, Rust
+  `format!` and `concat!`, JavaScript template literals, Go `fmt.Sprintf`, Java `String.format`,
+  and conversions such as `encodeURIComponent` or `strconv.Itoa`. Runtime values in the scheme,
+  the authority, or a whole path segment keep the path exact, with the segment as a parameter.
+- Client calls are composed per repository through wrapper functions: a call whose URL depends on a
+  parameter of its function is instantiated at every call site that binds it, also through
+  wrappers of wrappers and across modules. Tests are linked to the endpoints reached through the
+  helpers they call and the pytest fixtures they request, including fixtures in `conftest.py`.
+- TypeScript and JavaScript clients are recognized per call instead of per statement, so every
+  `fetch` in a callback is reported; Axios instances created with `axios.create({ baseURL })`,
+  Axios config-object requests, Go `http.Client` receivers, `http.Head`, `http.PostForm`, and
+  `http.NewRequestWithContext` are recognized, and client calls carry their enclosing function.
+- Tests are recognized in every supported language: Jest, Vitest, Mocha, and Playwright
+  `describe`/`it`/`test` blocks, identified by file, `describe` chain, and title and linked to the
+  `beforeEach`/`beforeAll` blocks that run before them; Go `TestX(t *testing.T)` functions; and
+  JUnit `@Test`, `@ParameterizedTest`, and `@RepeatedTest` methods.
+- In-process test clients are recognized and resolve only against providers in their own
+  repository: Python `TestClient`, Flask `test_client()`, and HTTPX with `app=` or an ASGI/WSGI
+  transport, including pytest fixtures that return them; supertest and Playwright `request`; Go
+  `httptest.NewRequest` and `httptest.NewServer` URLs; Spring MockMvc, RestAssured,
+  `WebTestClient`, `RestTemplate`, and `TestRestTemplate`; Axum `Request` builders sent with
+  `oneshot`; and Actix `test::TestRequest`.
+- Helm templates are recognized only as YAML or `.tpl` files under the `templates` directory of a
+  chart with `Chart.yaml`, so Jinja `*.j2` files and other `templates` directories are no longer
+  parsed as Helm. Path classification uses repository-relative paths only.
+- Vendored, theme, bundled, and minified JavaScript is no longer scanned for literal SQL.
+- Route handlers are resolved through middleware arguments, member references such as
+  `orders.list`, single-argument wrappers, FastAPI `add_api_route`, Flask `add_url_rule`, and Spring
+  mapping annotations followed by other annotations; inline handlers are identified by method and
+  path.
 - The CodeGraph adapter is validated against CodeGraph 1.6.1. The structured CLI contract accepts
   1.6.1 and later 1.6.x patch releases; CodeGraph 1.5 and earlier are reported as incompatible.
 
+### Added
+
+- Every scan publishes an HTTP link report: counts of linked, provider-less, ambiguous, and
+  external consumer and test calls, and each unlinked call with its reason and candidate
+  providers. `status` reports it in `http_links`, query results list the unlinked calls among
+  their entities in `link_gaps`, and the MCP coverage resource and query rendering include both.
+
+### Fixed
+
+- `--database` accepts a bare file name such as `graph.db`; the database, its lock, and its work
+  sidecar are created in the current directory.
+
 ### Release engineering
 
+- Added a release-mode 200-repository, 50,000-file synchronization acceptance test that gates
+  content reads of an unchanged scan, rows published by a one-file sync, and database growth
+  across 20 syncs. Results and a comparison with 1.1.0 are recorded in `docs/PERFORMANCE.md`.
+- Added the `fixtures/cross-language-matrix` workspace: tests in Python, TypeScript, Go, Java, and
+  Rust call FastAPI, Flask, Express, NestJS, Next.js, Spring, Gin, Chi, `net/http`, Axum, and
+  Actix Web providers through base URLs and cross-file router prefixes, and every pair must
+  produce `validates` and `implemented_by` edges.
+- Added differential tests: an incrementally maintained database, including its fingerprints and
+  extractor batches, equals a fresh scan after each step of a mutation sequence, and the published
+  graph, evidence, link report, and artifact rows are identical across repository order, file
+  creation order, and extraction worker count.
 - Replaced the CodeGraph 1.5.0 fixtures with fixtures captured from CodeGraph 1.6.1; contract tests
   parse every structured CLI output, and the live smoke test runs each structured operation.
 - Lowered the workspace MSRV from 1.97.1 to 1.96.0, the lowest toolchain that builds every locked

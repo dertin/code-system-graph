@@ -1,10 +1,11 @@
-# Code System Graph 1.1.0 Release
+# Code System Graph 1.2.0 Release
 
-Code System Graph 1.1.0 is an intentionally breaking agent-delivery release. MCP tools pair
-bounded Markdown with typed agent delivery schema v5, resources are bounded Markdown, typed
-HTTP/CLI envelopes use delivery schema v2, Explore performs
-multi-step ephemeral source/flow enrichment under one global policy, and Query supplies grounded
-next actions. The source tree and package version are `1.1.0`. Continuous integration
+Code System Graph 1.2.0 is a synchronization and linking release. Each workspace keeps one current
+graph that every scan updates by delta publication; unchanged files are recognized from a per-file
+stat cache without being read, changed files are read once for all of their extractors, and
+extraction runs in parallel with a deterministic merge. One route engine links consumers, tests,
+and implementations across languages by canonical HTTP method and path, and every scan reports the
+calls it could not link. The source tree and package version are `1.2.0`. Continuous integration
 runs on GitHub at `https://github.com/dertin/code-system-graph`.
 
 Platform claims below require native build, test, packaging, and archive-smoke evidence from the
@@ -26,12 +27,19 @@ target.
 
 ## Included capabilities
 
-Code System Graph 1.1.0 includes:
+Code System Graph 1.2.0 includes:
 
 - multi-repository workspace registration with lossless native-path identity;
 - incremental, source-free extraction for package, HTTP, event, GraphQL, RPC, data,
   infrastructure, documentation, ownership, configuration, test, and implementation boundaries;
-- deterministic linking, exact manual links and suppressions, immutable snapshots, and freshness;
+- one current graph per workspace published as a delta, a per-file stat cache, one read per changed
+  file, and parallel extraction whose output is identical for every worker count;
+- cross-language HTTP linking by canonical route shape with concrete-path matching, router
+  prefixes composed across files, evaluated client URLs, client wrappers, test helpers and
+  fixtures, in-process test clients, and per-repository `authorities`;
+- an HTTP link report of linked, provider-less, ambiguous, and external calls in `status`, query
+  results, and MCP coverage;
+- deterministic linking, exact manual links and suppressions, and freshness;
 - bounded search, trace, community analysis, compatibility, impact, and change analysis;
 - opt-in CodeGraph integration through public MCP or CLI contracts;
 - configurable per-repository corroboration bounds and opt-in Git-native ignore discovery;
@@ -46,22 +54,6 @@ Code System Graph 1.1.0 includes:
 - CLI, read-only MCP stdio, optional authenticated HTTP, exports, diagnostics, and host hooks;
 - exact-schema SQLite backup, restore, and integrity validation;
 - deterministic Linux package archives, CycloneDX SBOMs, and SHA-256 checksums.
-
-## Breaking migration from 1.0.x
-
-- Databases created by 1.0.x are rejected. Remove or archive the old database and operational
-  sidecars, then perform a complete 1.1.0 scan; there is no in-place migration or legacy mode.
-- Regenerate Agent Plugins and local bindings. Binding and ownership contracts are version 2 and
-  older generated state is not accepted as a runtime binding.
-- Direct `csgraph mcp` invocations must add `--config <global-manifest>`; `--binding` mode resolves
-  the manifest recorded in the binding.
-- MCP consumers receive one Markdown text block plus typed `structuredContent`. They must not
-  expect a JSON text block, the CLI/HTTP envelope inside `content`, or result `outputSchema`
-  metadata.
-- HTTP and CLI consumers must accept `schema_version: 2`; Explore data is now `ExploreReport`, with
-  source in `source_markdown` rather than `LocalContextResult.content`.
-- Workspace manifests may omit all new policy fields to use the documented defaults. Inputs such
-  as Explore `max_files` can request less work but cannot exceed the effective global policy.
 
 ## Local validation
 
@@ -109,8 +101,8 @@ GNU tar, and SHA-256 tooling. The workspace MSRV remains 1.96.0 and is validated
 
 ```text
 SOURCE_DATE_EPOCH=0 scripts/package-release.sh x86_64-unknown-linux-gnu
-scripts/smoke-install.sh dist/code-system-graph-x86_64-unknown-linux-gnu-v1.1.0
-sha256sum --check dist/code-system-graph-x86_64-unknown-linux-gnu-v1.1.0.sha256
+scripts/smoke-install.sh dist/code-system-graph-x86_64-unknown-linux-gnu-v1.2.0
+sha256sum --check dist/code-system-graph-x86_64-unknown-linux-gnu-v1.2.0.sha256
 ```
 
 The package contains `csgraph`, `code-system-graph-hooks`, the visible Agent integration template
@@ -144,7 +136,7 @@ clean `main` branch aligned with `origin/main`, Cargo credentials for crates.io,
 selects `prepare`:
 
 ```text
-.github/workflows/release.sh 1.1.0 prepare
+.github/workflows/release.sh 1.2.0 prepare
 ```
 
 Preparation runs the complete publish-readiness suite and dry-runs all five packages without
@@ -152,7 +144,7 @@ creating a tag, publishing a crate, or dispatching a workflow. To perform the ir
 pass `publish` explicitly:
 
 ```text
-.github/workflows/release.sh 1.1.0 publish
+.github/workflows/release.sh 1.2.0 publish
 ```
 
 Publish mode verifies that the workspace repository matches `origin`, creates and pushes the

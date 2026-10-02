@@ -2,8 +2,7 @@
 
 ## Supported versions
 
-- `1.0.x`: receives security fixes.
-- Older versions: none have been published.
+- `1.2.x`: receives security fixes.
 
 Platform support applies only to targets listed in the release notes with completed native
 validation.
