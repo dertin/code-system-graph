@@ -620,24 +620,6 @@ fn parse_impact_direction(value: &str) -> Result<ImpactDirection, String> {
     }
 }
 
-#[cfg(test)]
-mod help_tests {
-    use clap::Parser as _;
-
-    use super::Cli;
-
-    #[test]
-    fn root_examples_should_include_the_required_manifest_for_direct_commands() {
-        let help = Cli::try_parse_from(["csgraph", "--help"])
-            .expect_err("help should stop argument parsing")
-            .to_string();
-        assert!(help.contains(
-            "csgraph query \"orders contract\" --config code-system-graph.yaml --workspace"
-        ));
-        assert!(help.contains("csgraph mcp --config code-system-graph.yaml --workspace"));
-    }
-}
-
 async fn shutdown_signal() -> std::io::Result<()> {
     #[cfg(unix)]
     {
@@ -2111,4 +2093,22 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod help_tests {
+    use clap::Parser as _;
+
+    use super::Cli;
+
+    #[test]
+    fn root_examples_should_include_the_required_manifest_for_direct_commands() {
+        let help = Cli::try_parse_from(["csgraph", "--help"])
+            .expect_err("help should stop argument parsing")
+            .to_string();
+        assert!(help.contains(
+            "csgraph query \"orders contract\" --config code-system-graph.yaml --workspace"
+        ));
+        assert!(help.contains("csgraph mcp --config code-system-graph.yaml --workspace"));
+    }
 }
