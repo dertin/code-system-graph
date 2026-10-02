@@ -1893,27 +1893,29 @@ pub fn trace_workspace(
         });
     }
     let store = SqliteStore::open_read_only(database_path)?;
-    let snapshot = store.current_snapshot_summary(workspace)?;
-    let (nodes, edges) = store.load_graph_snapshot(&snapshot.snapshot_id)?;
-    let freshness = freshness_summary(&store.load_freshness_snapshot(&snapshot.snapshot_id)?);
-    let graph = FederatedGraph::new(nodes, edges)?;
-    let report = graph.trace(
-        &NodeId::new(&input.from),
-        &NodeId::new(&input.to),
-        input.max_depth,
-    )?;
-    let status = if report.coverage_gaps.is_empty() && freshness.overall == OverallFreshness::Fresh
-    {
-        ToolStatus::Ok
-    } else {
-        ToolStatus::Degraded
-    };
-    Ok(ToolEnvelope {
-        schema_version: 2,
-        status,
-        data: Some(report),
-        freshness,
-        warnings: Vec::new(),
+    store.consistent_read(|| {
+        let snapshot = store.current_snapshot_summary(workspace)?;
+        let (nodes, edges) = store.load_graph_snapshot(&snapshot.snapshot_id)?;
+        let freshness = freshness_summary(&store.load_freshness_snapshot(&snapshot.snapshot_id)?);
+        let graph = FederatedGraph::new(nodes, edges)?;
+        let report = graph.trace(
+            &NodeId::new(&input.from),
+            &NodeId::new(&input.to),
+            input.max_depth,
+        )?;
+        let status =
+            if report.coverage_gaps.is_empty() && freshness.overall == OverallFreshness::Fresh {
+                ToolStatus::Ok
+            } else {
+                ToolStatus::Degraded
+            };
+        Ok(ToolEnvelope {
+            schema_version: 2,
+            status,
+            data: Some(report),
+            freshness,
+            warnings: Vec::new(),
+        })
     })
 }
 
@@ -1972,103 +1974,116 @@ pub(crate) fn search_workspace_for_delivery(
     action_capabilities: QueryActionCapabilities,
 ) -> Result<ToolEnvelope<SearchReport>, ApplicationError> {
     let store = SqliteStore::open_read_only(database_path)?;
-    let snapshot = store.current_snapshot_summary(workspace)?;
-    let input_fingerprint = query_cache_fingerprint(input, policy, action_capabilities)?;
-    let now_unix_ms = current_unix_millis();
-    if let Some(cached) = store.load_query_cache(
-        workspace,
-        &snapshot.snapshot_id,
-        &input_fingerprint,
-        now_unix_ms,
-    )? && let Ok(envelope) =
-        serde_json::from_slice::<ToolEnvelope<SearchReport>>(&cached.result_summary_json)
-    {
-        return Ok(envelope);
-    }
-    let (mut nodes, edges) = store.load_graph_snapshot(&snapshot.snapshot_id)?;
-    let registry = store.load_workspace_registry(workspace)?;
-    apply_repository_alias_labels(&mut nodes, &registry);
-    let repository_freshness = store.load_freshness_snapshot(&snapshot.snapshot_id)?;
-    let freshness = freshness_summary(&repository_freshness);
-    let fts_hits = if input.query.trim().is_empty() {
-        Vec::new()
-    } else {
-        store.search_snapshot_nodes_ranked(&snapshot.snapshot_id, &input.query, 500)?
-    };
-    let community_snapshot = store.load_community_snapshot(&snapshot.snapshot_id)?;
-    let evidence = store.load_evidence_snapshot(&snapshot.snapshot_id)?;
-    let request = SearchRequest {
-        query: input.query.clone(),
-        filters: SearchFilters {
-            node_kinds: input.node_kinds.clone(),
-            repo_ids: input.repo_ids.clone(),
-            workspace_nodes: Vec::new(),
-            service_ids: input.service_ids.clone(),
-            community_ids: input.community_ids.clone(),
-        },
-        fts_scores: fts_search_scores(&fts_hits),
-        centrality_scores: community_centrality_scores(&community_snapshot.communities),
-        service_memberships: service_memberships(&nodes, &edges),
-        community_memberships: community_memberships(&community_snapshot.communities),
-        evidence: node_evidence(&edges, &evidence),
-        freshness: repository_freshness
+    let (envelope, cache_record) = store.consistent_read(|| {
+        let snapshot = store.current_snapshot_summary(workspace)?;
+        let input_fingerprint = query_cache_fingerprint(input, policy, action_capabilities)?;
+        let now_unix_ms = current_unix_millis();
+        if let Some(cached) = store.load_query_cache(
+            workspace,
+            &snapshot.snapshot_id,
+            &input_fingerprint,
+            now_unix_ms,
+        )? && let Ok(envelope) =
+            serde_json::from_slice::<ToolEnvelope<SearchReport>>(&cached.result_summary_json)
+        {
+            return Ok::<_, ApplicationError>((envelope, None));
+        }
+        let (mut nodes, edges) = store.load_graph_snapshot(&snapshot.snapshot_id)?;
+        let registry = store.load_workspace_registry(workspace)?;
+        apply_repository_alias_labels(&mut nodes, &registry);
+        let repository_freshness = store.load_freshness_snapshot(&snapshot.snapshot_id)?;
+        let freshness = freshness_summary(&repository_freshness);
+        let fts_hits = if input.query.trim().is_empty() {
+            Vec::new()
+        } else {
+            store.search_snapshot_nodes_ranked(&snapshot.snapshot_id, &input.query, 500)?
+        };
+        let community_snapshot = store.load_community_snapshot(&snapshot.snapshot_id)?;
+        let evidence = store.load_evidence_snapshot(&snapshot.snapshot_id)?;
+        let request = SearchRequest {
+            query: input.query.clone(),
+            filters: SearchFilters {
+                node_kinds: input.node_kinds.clone(),
+                repo_ids: input.repo_ids.clone(),
+                workspace_nodes: Vec::new(),
+                service_ids: input.service_ids.clone(),
+                community_ids: input.community_ids.clone(),
+            },
+            fts_scores: fts_search_scores(&fts_hits),
+            centrality_scores: community_centrality_scores(&community_snapshot.communities),
+            service_memberships: service_memberships(&nodes, &edges),
+            community_memberships: community_memberships(&community_snapshot.communities),
+            evidence: node_evidence(&edges, &evidence),
+            freshness: repository_freshness
+                .iter()
+                .map(|item| (item.repo_id.clone(), item.state))
+                .collect(),
+            offset: input.offset,
+            limit: input.limit,
+        };
+        let mut report = search(&nodes, &request)?;
+        let hit_ids = report
+            .hits
             .iter()
-            .map(|item| (item.repo_id.clone(), item.state))
-            .collect(),
-        offset: input.offset,
-        limit: input.limit,
-    };
-    let mut report = search(&nodes, &request)?;
-    let hit_ids = report
-        .hits
-        .iter()
-        .map(|hit| hit.node.id.clone())
-        .collect::<Vec<_>>();
-    report.link_gaps = store.load_http_link_gaps_for_callers(workspace, &hit_ids)?;
-    report.next_actions = query_next_actions(
-        workspace,
-        input,
-        &report,
-        &registry,
-        policy,
-        action_capabilities,
-    );
-    if report.hits.is_empty() {
-        report
-            .coverage
-            .gaps
-            .push(zero_hit_gap(action_capabilities).to_owned());
+            .map(|hit| hit.node.id.clone())
+            .collect::<Vec<_>>();
+        report.link_gaps = store.load_http_link_gaps_for_callers(workspace, &hit_ids)?;
+        report.next_actions = query_next_actions(
+            workspace,
+            input,
+            &report,
+            &registry,
+            policy,
+            action_capabilities,
+        );
+        if report.hits.is_empty() {
+            report
+                .coverage
+                .gaps
+                .push(zero_hit_gap(action_capabilities).to_owned());
+        }
+        let status =
+            if report.coverage.gaps.is_empty() && freshness.overall == OverallFreshness::Fresh {
+                ToolStatus::Ok
+            } else {
+                ToolStatus::Degraded
+            };
+        let envelope = ToolEnvelope {
+            schema_version: 2,
+            status,
+            data: Some(report),
+            freshness,
+            warnings: Vec::new(),
+        };
+        let (envelope, encoded) = encode_query_cache(&envelope)?;
+        Ok((
+            envelope,
+            Some(QueryCacheRecord {
+                workspace_name: workspace.to_owned(),
+                snapshot_id: snapshot.snapshot_id,
+                input_fingerprint,
+                result_summary_json: encoded,
+                stored_at_unix_ms: now_unix_ms,
+                expires_at_unix_ms: None,
+            }),
+        ))
+    })?;
+    drop(store);
+    if let Some(record) = cache_record {
+        store_query_cache(database_path, &record);
     }
-    let status = if report.coverage.gaps.is_empty() && freshness.overall == OverallFreshness::Fresh
-    {
-        ToolStatus::Ok
-    } else {
-        ToolStatus::Degraded
-    };
-    let envelope = ToolEnvelope {
-        schema_version: 2,
-        status,
-        data: Some(report),
-        freshness,
-        warnings: Vec::new(),
-    };
-    let encoded = serde_json::to_vec(&envelope)
+    Ok(envelope)
+}
+
+/// Keeps freshly computed and cached query results identical after JSON normalization.
+fn encode_query_cache(
+    envelope: &ToolEnvelope<SearchReport>,
+) -> Result<(ToolEnvelope<SearchReport>, Vec<u8>), ApplicationError> {
+    let encoded = serde_json::to_vec(envelope)
         .map_err(|error| ApplicationError::Initialization(error.to_string()))?;
     let envelope = serde_json::from_slice(&encoded)
         .map_err(|error| ApplicationError::Initialization(error.to_string()))?;
-    drop(store);
-    store_query_cache(
-        database_path,
-        &QueryCacheRecord {
-            workspace_name: workspace.to_owned(),
-            snapshot_id: snapshot.snapshot_id,
-            input_fingerprint,
-            result_summary_json: encoded,
-            stored_at_unix_ms: now_unix_ms,
-            expires_at_unix_ms: None,
-        },
-    );
-    Ok(envelope)
+    Ok((envelope, encoded))
 }
 
 fn zero_hit_gap(capabilities: QueryActionCapabilities) -> &'static str {
@@ -2542,32 +2557,34 @@ pub async fn analyze_workspace_changes_with_cancellation(
         )
     })?;
     let store = SqliteStore::open_read_only(database_path)?;
-    let snapshot = store.current_snapshot_summary(workspace)?;
-    let (nodes, edges) = store.load_graph_snapshot(&snapshot.snapshot_id)?;
-    let evidence = store.load_evidence_snapshot(&snapshot.snapshot_id)?;
-    let community = store.load_community_snapshot(&snapshot.snapshot_id)?;
-    let freshness = store.load_freshness_snapshot(&snapshot.snapshot_id)?;
-    let report = analyze_changes(
-        &change_set,
-        &nodes,
-        &edges,
-        &evidence,
-        Some(&community),
-        &freshness,
-        &[],
-        options,
-    )?;
-    let status = if collected.status == ToolStatus::Ok && report.coverage.complete {
-        ToolStatus::Ok
-    } else {
-        ToolStatus::Degraded
-    };
-    Ok(ToolEnvelope {
-        schema_version: 2,
-        status,
-        data: Some(report),
-        freshness: collected.freshness,
-        warnings: collected.warnings,
+    store.consistent_read(|| {
+        let snapshot = store.current_snapshot_summary(workspace)?;
+        let (nodes, edges) = store.load_graph_snapshot(&snapshot.snapshot_id)?;
+        let evidence = store.load_evidence_snapshot(&snapshot.snapshot_id)?;
+        let community = store.load_community_snapshot(&snapshot.snapshot_id)?;
+        let freshness = store.load_freshness_snapshot(&snapshot.snapshot_id)?;
+        let report = analyze_changes(
+            &change_set,
+            &nodes,
+            &edges,
+            &evidence,
+            Some(&community),
+            &freshness,
+            &[],
+            options,
+        )?;
+        let status = if collected.status == ToolStatus::Ok && report.coverage.complete {
+            ToolStatus::Ok
+        } else {
+            ToolStatus::Degraded
+        };
+        Ok(ToolEnvelope {
+            schema_version: 2,
+            status,
+            data: Some(report),
+            freshness: collected.freshness,
+            warnings: collected.warnings,
+        })
     })
 }
 
@@ -2744,35 +2761,37 @@ fn load_impact_context(
     workspace: &str,
 ) -> Result<LoadedImpactContext, ApplicationError> {
     let store = SqliteStore::open_read_only(database_path)?;
-    let snapshot = store.current_snapshot_summary(workspace)?;
-    let (nodes, edges) = store.load_graph_snapshot(&snapshot.snapshot_id)?;
-    let persisted_freshness = store.load_freshness_snapshot(&snapshot.snapshot_id)?;
-    let freshness = freshness_summary(&persisted_freshness);
-    let communities = store.load_community_snapshot(&snapshot.snapshot_id)?;
-    let evidence = store.load_evidence_snapshot(&snapshot.snapshot_id)?;
-    let registry = store.load_workspace_registry(workspace)?;
-    let node_evidence = node_evidence(&edges, &evidence);
-    let context = ImpactContext {
-        centrality: impact_centrality_scores(&communities.communities),
-        service_memberships: service_memberships(&nodes, &edges),
-        recommended_commands: recommended_test_commands(&nodes, &node_evidence),
-        nodes,
-        edges,
-        communities: Some(communities),
-        freshness: conservative_repo_freshness(&persisted_freshness),
-        compatibility: Vec::new(),
-        local_enrichment: Vec::new(),
-        public_contracts: Vec::new(),
-        criticality: Vec::new(),
-        environments: Vec::new(),
-        graph_complete: true,
-        coverage_gaps: Vec::new(),
-    };
-    Ok(LoadedImpactContext {
-        context,
-        freshness,
-        registry,
-        node_evidence,
+    store.consistent_read(|| {
+        let snapshot = store.current_snapshot_summary(workspace)?;
+        let (nodes, edges) = store.load_graph_snapshot(&snapshot.snapshot_id)?;
+        let persisted_freshness = store.load_freshness_snapshot(&snapshot.snapshot_id)?;
+        let freshness = freshness_summary(&persisted_freshness);
+        let communities = store.load_community_snapshot(&snapshot.snapshot_id)?;
+        let evidence = store.load_evidence_snapshot(&snapshot.snapshot_id)?;
+        let registry = store.load_workspace_registry(workspace)?;
+        let node_evidence = node_evidence(&edges, &evidence);
+        let context = ImpactContext {
+            centrality: impact_centrality_scores(&communities.communities),
+            service_memberships: service_memberships(&nodes, &edges),
+            recommended_commands: recommended_test_commands(&nodes, &node_evidence),
+            nodes,
+            edges,
+            communities: Some(communities),
+            freshness: conservative_repo_freshness(&persisted_freshness),
+            compatibility: Vec::new(),
+            local_enrichment: Vec::new(),
+            public_contracts: Vec::new(),
+            criticality: Vec::new(),
+            environments: Vec::new(),
+            graph_complete: true,
+            coverage_gaps: Vec::new(),
+        };
+        Ok(LoadedImpactContext {
+            context,
+            freshness,
+            registry,
+            node_evidence,
+        })
     })
 }
 

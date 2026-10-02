@@ -2372,18 +2372,29 @@ impl SqliteStore {
         load_community_snapshot(&self.connection, snapshot_id)
     }
 
-    /// Runs `read` in one deferred transaction so all of its statements observe the same
-    /// publication; a concurrent writer may replace the current snapshot between statements.
-    fn consistent_read<T>(
-        &self,
-        read: impl FnOnce() -> Result<T, StoreError>,
-    ) -> Result<T, StoreError> {
+    /// Runs related reads in one deferred transaction so they observe the same publication.
+    ///
+    /// Include snapshot selection and all dependent reads in the callback: a concurrent writer
+    /// can replace the current snapshot after this transaction ends. Nested calls reuse the
+    /// existing transaction. The callback must only perform reads on this connection.
+    ///
+    /// # Errors
+    ///
+    /// Returns errors from the callback or transaction setup/commit. A failed callback rolls back
+    /// a transaction started here; an existing transaction remains owned by its caller.
+    pub fn consistent_read<T, E>(&self, read: impl FnOnce() -> Result<T, E>) -> Result<T, E>
+    where
+        E: From<StoreError>,
+    {
         if !self.connection.is_autocommit() {
             return read();
         }
-        let transaction = self.connection.unchecked_transaction()?;
+        let transaction = self
+            .connection
+            .unchecked_transaction()
+            .map_err(StoreError::from)?;
         let value = read()?;
-        transaction.commit()?;
+        transaction.commit().map_err(StoreError::from)?;
         Ok(value)
     }
 
@@ -4777,6 +4788,70 @@ mod tests {
         drop(initial);
         let repeated = SqliteStore::open(&database)?;
         assert_eq!(repeated.schema_id()?, super::schema_identity());
+        Ok(())
+    }
+
+    #[test]
+    fn composite_reads_should_keep_graph_and_evidence_during_publication()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temporary = tempfile::tempdir()?;
+        let database = temporary.path().join("composite.db");
+        let workspace = workspace();
+        let (mut nodes, edges, evidence) = fixture();
+        nodes.sort_by(|left, right| left.id.cmp(&right.id));
+        let mut writer = SqliteStore::open(&database)?;
+        writer.publish_snapshot(SnapshotBatch {
+            workspace: &workspace,
+            snapshot_id: "snapshot:before",
+            nodes: &nodes,
+            edges: &edges,
+            evidence: &evidence,
+            fingerprints: &[],
+            extractor_batches: &[],
+            extractor_runs: &[],
+            manual_links: &[],
+            community_snapshot: None,
+        })?;
+        let reader = SqliteStore::open_read_only(&database)?;
+        let mut next_nodes = nodes.clone();
+        next_nodes[0].label = "POST /updated".to_owned();
+        let mut next_evidence = evidence.clone();
+        next_evidence[0].content_hash = Some("updated".to_owned());
+
+        let (read_nodes, read_edges, read_evidence) = reader.consistent_read(|| {
+            let snapshot = reader.current_snapshot_summary("commerce")?;
+            let (read_nodes, read_edges) = reader.load_graph_snapshot(&snapshot.snapshot_id)?;
+            // Publish through a separate connection after the graph read has finished.
+            writer.publish_snapshot(SnapshotBatch {
+                workspace: &workspace,
+                snapshot_id: "snapshot:after",
+                nodes: &next_nodes,
+                edges: &edges,
+                evidence: &next_evidence,
+                fingerprints: &[],
+                extractor_batches: &[],
+                extractor_runs: &[],
+                manual_links: &[],
+                community_snapshot: None,
+            })?;
+            let read_evidence = reader.load_evidence_snapshot(&snapshot.snapshot_id)?;
+            Ok::<_, StoreError>((read_nodes, read_edges, read_evidence))
+        })?;
+        assert_eq!(read_nodes, nodes);
+        assert_eq!(read_edges, edges);
+        assert_eq!(read_evidence, evidence);
+        assert!(reader.connection.is_autocommit());
+        assert_eq!(reader.load_current_graph("commerce")?.0, next_nodes);
+        assert_eq!(reader.load_current_evidence("commerce")?, next_evidence);
+        assert!(matches!(
+            reader.load_evidence_snapshot("snapshot:before"),
+            Err(StoreError::SnapshotMissing(_))
+        ));
+
+        let failed = reader.consistent_read(|| reader.load_graph_snapshot("snapshot:missing"));
+        assert!(matches!(failed, Err(StoreError::SnapshotMissing(_))));
+        assert!(reader.connection.is_autocommit());
+        assert_eq!(reader.load_current_graph("commerce")?.0, next_nodes);
         Ok(())
     }
 

@@ -253,9 +253,11 @@ fn source_boundary(
 }
 
 fn call_scope(authority: Option<&str>, in_process: bool) -> CallScope {
+    if in_process {
+        return CallScope::InProcess;
+    }
     match authority {
         Some(authority) => CallScope::Authority(authority.to_owned()),
-        None if in_process => CallScope::InProcess,
         None => CallScope::Workspace,
     }
 }

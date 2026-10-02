@@ -83,14 +83,15 @@ impl AgentPresentationContext {
     ) -> Result<Self, String> {
         let store =
             SqliteStore::open_read_only(database_path).map_err(|error| error.to_string())?;
-        let registry = store
-            .load_workspace_registry(workspace)
-            .map_err(|error| error.to_string())?;
-        let (nodes, edges) = store
-            .load_graph_snapshot(snapshot_id)
-            .map_err(|error| error.to_string())?;
-        let evidence = store
-            .load_evidence_snapshot(snapshot_id)
+        let (registry, nodes, edges, evidence) = store
+            .consistent_read(|| {
+                let registry = store.load_workspace_registry(workspace)?;
+                let (nodes, edges) = store.load_graph_snapshot(snapshot_id)?;
+                let evidence = store.load_evidence_snapshot(snapshot_id)?;
+                Ok::<_, code_system_graph_store_sqlite::StoreError>((
+                    registry, nodes, edges, evidence,
+                ))
+            })
             .map_err(|error| error.to_string())?;
         Ok(Self::from_parts(
             registry

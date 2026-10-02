@@ -127,6 +127,50 @@ class InvoicesControllerTest {
 
 const MANIFEST: &str = "version: 1\nname: inproc\nrepos:\n  orders-py:\n    path: orders-py\n  orders-js:\n    path: orders-js\n  inventory:\n    path: inventory\n  billing:\n    path: billing\n";
 
+#[test]
+fn absolute_urls_in_process_should_validate_only_the_local_provider() -> anyhow::Result<()> {
+    let temporary = tempfile::tempdir()?;
+    let manifest = write_workspace(temporary.path())?;
+    std::fs::write(
+        temporary.path().join("orders-py/tests/test_absolute.py"),
+        r#"import httpx
+from fastapi.testclient import TestClient
+from app.main import app
+
+client = TestClient(app)
+
+def test_absolute_url():
+    client.get("http://testserver/orders/42")
+
+async def test_asgi_absolute_url():
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app)) as api:
+        await api.get("http://testserver/orders/43")
+"#,
+    )?;
+    let database = temporary.path().join("graph.db");
+    scan_workspace(&manifest, &database)?;
+    let store = SqliteStore::open_read_only(&database)?;
+    let (nodes, edges) = store.load_current_graph("inproc")?;
+    let nodes = nodes
+        .iter()
+        .map(|node| (&node.id, node))
+        .collect::<BTreeMap<_, _>>();
+    for name in ["test_absolute_url", "test_asgi_absolute_url"] {
+        let links = edges
+            .iter()
+            .filter(|edge| {
+                edge.kind == EdgeKind::Validates && nodes[&edge.source].label.ends_with(name)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(links.len(), 1, "missing local validation for {name}");
+        let source = nodes[&links[0].source];
+        let target = nodes[&links[0].target];
+        assert_eq!(source.repo_id, target.repo_id);
+        assert_eq!(target.label, "GET /orders/{order_id}");
+    }
+    Ok(())
+}
+
 fn write_workspace(root: &Path) -> anyhow::Result<std::path::PathBuf> {
     for (path, contents) in SOURCES {
         let path = root.join(path);

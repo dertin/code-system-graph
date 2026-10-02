@@ -46,6 +46,13 @@ fn write_files(root: &Path, files: &[(PathBuf, Vec<u8>)]) -> anyhow::Result<()> 
 
 fn write_manifest(root: &Path, reversed: bool, workers: u64) -> anyhow::Result<PathBuf> {
     let template = std::fs::read_to_string(fixture_root().join("code-system-graph.yaml"))?;
+    let manifest = root.join("code-system-graph.yaml");
+    std::fs::write(&manifest, manifest_contents(&template, reversed, workers)?)?;
+    Ok(manifest)
+}
+
+fn manifest_contents(template: &str, reversed: bool, workers: u64) -> anyhow::Result<String> {
+    let template = template.replace("\r\n", "\n");
     let (header, repositories) = template
         .split_once("repos:\n")
         .ok_or_else(|| anyhow::anyhow!("fixture manifest has no repositories"))?;
@@ -62,15 +69,23 @@ fn write_manifest(root: &Path, reversed: bool, workers: u64) -> anyhow::Result<P
     if reversed {
         entries.reverse();
     }
-    let manifest = root.join("code-system-graph.yaml");
-    std::fs::write(
-        &manifest,
-        format!(
-            "{header}executionPolicy:\n  maxExtractionWorkers: {workers}\nrepos:\n{}",
-            entries.concat()
-        ),
-    )?;
-    Ok(manifest)
+    Ok(format!(
+        "{header}executionPolicy:\n  maxExtractionWorkers: {workers}\nrepos:\n{}",
+        entries.concat()
+    ))
+}
+
+#[test]
+fn fixture_manifest_should_support_crlf_checkouts() -> anyhow::Result<()> {
+    let template = std::fs::read_to_string(fixture_root().join("code-system-graph.yaml"))?
+        .replace("\r\n", "\n");
+    for reversed in [false, true] {
+        assert_eq!(
+            manifest_contents(&template.replace('\n', "\r\n"), reversed, 4)?,
+            manifest_contents(&template, reversed, 4)?,
+        );
+    }
+    Ok(())
 }
 
 /// Canonical serialization of everything a scan publishes for queries and for later reuse.
