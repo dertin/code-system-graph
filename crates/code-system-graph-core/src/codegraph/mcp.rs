@@ -8,7 +8,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use rmcp::model::{
-    CallToolRequestParams, ClientCapabilities, ClientInfo, Implementation, JsonObject
+    CallToolRequestParams, ClientCapabilities, ClientConfig, Implementation, JsonObject
 };
 use rmcp::service::RunningService;
 use rmcp::{RoleClient, ServiceExt};
@@ -38,7 +38,7 @@ pub(crate) struct CodeGraphMcp {
     binary: OsString,
 }
 
-type McpService = RunningService<RoleClient, ClientInfo>;
+type McpService = RunningService<RoleClient, ClientConfig>;
 
 struct McpConnection {
     service: McpService,
@@ -227,7 +227,7 @@ impl CodeGraphMcp {
             .max_output_bytes
             .saturating_add(PROTOCOL_OVERHEAD_BYTES);
         let reader = LimitedAsyncRead::new(stdout, protocol_limit, protocol_exceeded.clone());
-        let client = ClientInfo::new(
+        let client = ClientConfig::new(
             ClientCapabilities::default(),
             Implementation::new("code-system-graph", env!("CARGO_PKG_VERSION")),
         );

@@ -1,12 +1,13 @@
-use std::collections::{BTreeMap, BTreeSet};
-
 use code_system_graph_model::{
     ArtifactChange, ArtifactChangeKind, ArtifactFingerprint, CheckoutId, NativePath, RepoId
 };
 
-type ArtifactKey = (RepoId, CheckoutId, NativePath, String);
+type ArtifactKey<'a> = (&'a RepoId, &'a CheckoutId, &'a NativePath, &'a str);
 
 /// Deterministic incremental plan for extractor-relevant artifacts.
+///
+/// Only artifacts that require extraction or deletion are listed; every current artifact absent
+/// from [`Self::changes`] is unchanged.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IncrementalPlan {
     /// Changes sorted by repository, checkout, path, and extractor.
@@ -17,18 +18,13 @@ impl IncrementalPlan {
     /// Returns whether any artifact requires add, modify, or delete processing.
     #[must_use]
     pub fn has_changes(&self) -> bool {
-        self.changes
-            .iter()
-            .any(|change| change.kind != ArtifactChangeKind::Unchanged)
+        !self.changes.is_empty()
     }
 
     /// Returns the number of artifacts requiring extractor or deletion work.
     #[must_use]
     pub fn changed_count(&self) -> usize {
-        self.changes
-            .iter()
-            .filter(|change| change.kind != ArtifactChangeKind::Unchanged)
-            .count()
+        self.changes.len()
     }
 }
 
@@ -40,47 +36,59 @@ pub fn plan_incremental_scan(
 ) -> IncrementalPlan {
     let previous = fingerprint_map(previous);
     let current = fingerprint_map(current);
-    let keys = previous
+    let added_or_modified = current.iter().filter_map(|(key, after)| {
+        let kind = match previous.get(key) {
+            None => ArtifactChangeKind::Added,
+            Some(before) if before.content_hash != after.content_hash => {
+                ArtifactChangeKind::Modified
+            }
+            Some(_) => return None,
+        };
+        Some((*key, kind))
+    });
+    let deleted = previous
         .keys()
-        .chain(current.keys())
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    let changes = keys
-        .into_iter()
-        .filter_map(|key| {
-            let kind = match (previous.get(&key), current.get(&key)) {
-                (None, Some(_)) => ArtifactChangeKind::Added,
-                (Some(_), None) => ArtifactChangeKind::Deleted,
-                (Some(before), Some(after)) if before.content_hash != after.content_hash => {
-                    ArtifactChangeKind::Modified
-                }
-                (Some(_), Some(_)) => ArtifactChangeKind::Unchanged,
-                (None, None) => return None,
-            };
-            Some(ArtifactChange {
-                repo_id: key.0,
-                checkout_id: key.1,
-                path: key.2,
-                extractor: key.3,
-                kind,
-            })
+        .filter(|key| !current.contains_key(*key))
+        .map(|key| (*key, ArtifactChangeKind::Deleted));
+    let mut changes = added_or_modified
+        .chain(deleted)
+        .map(|(key, kind)| ArtifactChange {
+            repo_id: key.0.clone(),
+            checkout_id: key.1.clone(),
+            path: key.2.clone(),
+            extractor: key.3.to_owned(),
+            kind,
         })
-        .collect();
+        .collect::<Vec<_>>();
+    changes.sort_by(|left, right| {
+        (
+            &left.repo_id,
+            &left.checkout_id,
+            &left.path,
+            &left.extractor,
+        )
+            .cmp(&(
+                &right.repo_id,
+                &right.checkout_id,
+                &right.path,
+                &right.extractor,
+            ))
+    });
     IncrementalPlan { changes }
 }
 
 fn fingerprint_map(
     fingerprints: &[ArtifactFingerprint],
-) -> BTreeMap<ArtifactKey, &ArtifactFingerprint> {
+) -> foldhash::HashMap<ArtifactKey<'_>, &ArtifactFingerprint> {
     fingerprints
         .iter()
         .map(|fingerprint| {
             (
                 (
-                    fingerprint.repo_id.clone(),
-                    fingerprint.checkout_id.clone(),
-                    fingerprint.path.clone(),
-                    fingerprint.extractor.clone(),
+                    &fingerprint.repo_id,
+                    &fingerprint.checkout_id,
+                    &fingerprint.path,
+                    fingerprint.extractor.as_str(),
                 ),
                 fingerprint,
             )
@@ -112,7 +120,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_should_classify_add_modify_delete_and_unchanged() {
+    fn plan_should_list_only_added_deleted_and_modified_artifacts_in_key_order() {
         let previous = vec![
             fingerprint("deleted.yaml", "a"),
             fingerprint("modified.yaml", "a"),
@@ -125,20 +133,29 @@ mod tests {
         ];
 
         let plan = plan_incremental_scan(&previous, &current);
-        let kinds = plan
+        let changes = plan
             .changes
             .iter()
-            .map(|change| change.kind)
+            .map(|change| (change.path.display.as_str(), change.kind))
             .collect::<Vec<_>>();
 
         assert_eq!(
-            kinds,
+            changes,
             vec![
-                ArtifactChangeKind::Added,
-                ArtifactChangeKind::Deleted,
-                ArtifactChangeKind::Modified,
-                ArtifactChangeKind::Unchanged,
+                ("added.yaml", ArtifactChangeKind::Added),
+                ("deleted.yaml", ArtifactChangeKind::Deleted),
+                ("modified.yaml", ArtifactChangeKind::Modified),
             ]
         );
+        assert_eq!(plan.changed_count(), 3);
+    }
+
+    #[test]
+    fn plan_should_report_no_changes_for_identical_artifact_sets() {
+        let fingerprints = vec![fingerprint("same.yaml", "a")];
+
+        let plan = plan_incremental_scan(&fingerprints, &fingerprints);
+
+        assert!(!plan.has_changes());
     }
 }

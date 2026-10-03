@@ -243,9 +243,16 @@ pub(crate) fn cli_operations(version: &str) -> Vec<ProviderOperationCapability> 
     .collect()
 }
 
+/// The structured CLI adapter is validated against `CodeGraph` 1.6.1; pre-releases and other minor
+/// versions are rejected until their fixtures are captured.
 pub(crate) fn supports_cli_contract(version: &str) -> bool {
-    let version = version.trim().trim_start_matches('v');
-    version == "1.5" || version.starts_with("1.5.")
+    let mut parts = version.trim().trim_start_matches('v').split('.');
+    let (Some(major), Some(minor), Some(patch), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return false;
+    };
+    major == "1" && minor == "6" && patch.parse::<u32>().is_ok_and(|patch| patch >= 1)
 }
 
 fn schema_parameters(schema: &Value) -> Vec<String> {
@@ -270,13 +277,17 @@ fn contains_any(value: &str, candidates: &[&str]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{DiscoveredTool, StatusContract, map_mcp_tools, supports_cli_contract};
+    use serde_json::Value;
+
+    use super::{
+        AffectedTestsContract, DiscoveredTool, ImpactContract, NeighborsContract, StatusContract, SymbolQueryContract, map_mcp_tools, supports_cli_contract
+    };
     use crate::{ProviderOperation, ProviderStatus};
 
     #[test]
-    fn codegraph_1_5_tools_should_map_context_by_name_and_schema() {
+    fn codegraph_1_6_tools_should_map_context_by_name_and_schema() {
         let tools: Vec<DiscoveredTool> = serde_json::from_str(include_str!(
-            "../../../../fixtures/codegraph/1.5.0/tools-list.json"
+            "../../../../fixtures/codegraph/1.6.1/tools-list.json"
         ))
         .expect("fixture should be valid");
         let operations = map_mcp_tools(&tools);
@@ -284,6 +295,61 @@ mod tests {
         assert_eq!(operations.len(), 1);
         assert_eq!(operations[0].operation, ProviderOperation::LocalContext);
         assert!(operations[0].parameters.contains(&"projectPath".to_owned()));
+    }
+
+    #[test]
+    fn codegraph_1_6_initialize_should_negotiate_the_tested_protocol() {
+        let initialize: Value = serde_json::from_str(include_str!(
+            "../../../../fixtures/codegraph/1.6.1/initialize.json"
+        ))
+        .expect("fixture should be valid");
+
+        assert_eq!(initialize["protocolVersion"], "2024-11-05");
+        assert_eq!(initialize["serverInfo"]["version"], "1.6.1");
+        assert!(initialize["capabilities"]["tools"].is_object());
+    }
+
+    #[test]
+    fn codegraph_1_6_cli_json_should_match_the_structured_contracts() {
+        let symbols: Vec<SymbolQueryContract> = serde_json::from_str(include_str!(
+            "../../../../fixtures/codegraph/1.6.1/query.json"
+        ))
+        .expect("query fixture should parse");
+        let neighbors: NeighborsContract = serde_json::from_str(include_str!(
+            "../../../../fixtures/codegraph/1.6.1/neighbors.json"
+        ))
+        .expect("neighbors fixture should parse");
+        let impact: ImpactContract = serde_json::from_str(include_str!(
+            "../../../../fixtures/codegraph/1.6.1/impact.json"
+        ))
+        .expect("impact fixture should parse");
+        let affected: AffectedTestsContract = serde_json::from_str(include_str!(
+            "../../../../fixtures/codegraph/1.6.1/affected.json"
+        ))
+        .expect("affected fixture should parse");
+
+        let symbol = symbols
+            .into_iter()
+            .next()
+            .expect("query fixture should resolve one symbol")
+            .into_symbol();
+        assert_eq!(
+            (
+                symbol.name.as_str(),
+                symbol.file_path.as_str(),
+                symbol.start_line
+            ),
+            ("scan_workspace", "src/lib.rs", 3)
+        );
+        assert_eq!(neighbors.symbol, "discover");
+        assert_eq!(neighbors.callers.len(), 1);
+        assert_eq!(neighbors.callers[0].name, "scan_workspace");
+        assert!(neighbors.callees.is_empty());
+        assert_eq!((impact.symbol.as_str(), impact.depth), ("discover", 2));
+        assert_eq!(impact.node_count, impact.affected.len());
+        assert_eq!(affected.changed_files, ["src/provider.ts"]);
+        assert_eq!(affected.affected_tests, ["tests/provider.test.ts"]);
+        assert_eq!(affected.total_dependents_traversed, 1);
     }
 
     #[test]
@@ -312,11 +378,11 @@ mod tests {
     }
 
     #[test]
-    fn status_contract_should_accept_null_index_state_from_codegraph_1_5() {
+    fn status_contract_should_treat_a_null_index_state_as_stale() {
         let status: StatusContract = serde_json::from_str(
             r#"{
                 "initialized": true,
-                "version": "1.5.0",
+                "version": "1.6.1",
                 "worktreeMismatch": null,
                 "pendingChanges": {"added": 0, "modified": 0, "removed": 0},
                 "index": {"reindexRecommended": true, "state": null}
@@ -330,16 +396,36 @@ mod tests {
     #[test]
     fn status_contract_should_recognize_current_index() {
         let status: StatusContract = serde_json::from_str(include_str!(
-            "../../../../fixtures/codegraph/1.5.0/status.json"
+            "../../../../fixtures/codegraph/1.6.1/status.json"
         ))
         .expect("fixture should be valid");
 
+        assert_eq!(status.version.as_deref(), Some("1.6.1"));
         assert_eq!(status.status(), ProviderStatus::Available);
     }
 
     #[test]
-    fn cli_contract_should_reject_unvalidated_versions() {
-        assert!(supports_cli_contract("1.5.0"));
-        assert!(!supports_cli_contract("1.6.0"));
+    fn cli_contract_should_accept_only_validated_versions() {
+        for version in ["1.6.1", "v1.6.1", "1.6.2", " 1.6.10\n"] {
+            assert!(
+                supports_cli_contract(version),
+                "{version} should be accepted"
+            );
+        }
+        for version in [
+            "1.5.0",
+            "1.6",
+            "1.6.0",
+            "1.6.1-rc.1",
+            "1.6.1.0",
+            "1.7.0",
+            "2.6.1",
+            "",
+        ] {
+            assert!(
+                !supports_cli_contract(version),
+                "{version} should be rejected"
+            );
+        }
     }
 }

@@ -1,0 +1,24 @@
+[
+  {
+    "node": {
+      "id": "function:fixture",
+      "kind": "function",
+      "name": "scan_workspace",
+      "qualifiedName": "scan_workspace",
+      "filePath": "src/lib.rs",
+      "language": "rust",
+      "startLine": 3,
+      "endLine": 5,
+      "startColumn": 0,
+      "endColumn": 1,
+      "signature": "(root: &str) -> usize",
+      "visibility": "public",
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "isAbstract": false,
+      "updatedAt": 1790899200000
+    },
+    "score": 91.66
+  }
+]

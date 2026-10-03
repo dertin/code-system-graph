@@ -6,6 +6,22 @@ import pathlib
 import sys
 import time
 
+ANCHOR = {
+    "name": "anchor",
+    "kind": "function",
+    "filePath": "src/lib.rs",
+    "startLine": 7,
+    "id": "function:fixture",
+    "qualifiedName": "fixture::anchor",
+    "language": "rust",
+}
+NEIGHBOR = {
+    "name": "neighbor",
+    "kind": "function",
+    "filePath": "src/neighbor.rs",
+    "startLine": 9,
+}
+
 
 def emit(value):
     print(json.dumps(value, separators=(",", ":")), flush=True)
@@ -28,7 +44,7 @@ def mcp_server(mode):
                     "result": {
                         "protocolVersion": "2024-11-05",
                         "capabilities": {"tools": {}},
-                        "serverInfo": {"name": "codegraph", "version": "1.5.0"},
+                        "serverInfo": {"name": "codegraph", "version": "1.6.1"},
                     },
                 }
             )
@@ -75,14 +91,14 @@ def main():
     mode = pathlib.Path(sys.argv[0]).name.removeprefix("codegraph-")
     command = sys.argv[1] if len(sys.argv) > 1 else ""
     if command == "--version":
-        print("1.5.0")
+        print("1.6.1")
     elif command == "serve":
         mcp_server(mode)
     elif command == "status":
         emit(
             {
                 "initialized": True,
-                "version": "1.5.0",
+                "version": "1.6.1",
                 "pendingChanges": {"added": 0, "modified": 0, "removed": 0},
                 "worktreeMismatch": None,
                 "index": {"reindexRecommended": False, "state": "complete"},
@@ -113,14 +129,14 @@ def main():
         emit(
             {
                 "symbol": "anchor",
-                command: [
-                    {
-                        "name": "neighbor",
-                        "kind": "function",
-                        "filePath": "src/neighbor.rs",
-                        "startLine": 9,
-                    }
-                ],
+                "targets": [ANCHOR],
+                "ambiguous": False,
+                "aggregation": "definition",
+                "filteredOut": False,
+                command: [NEIGHBOR],
+                "total": 1,
+                "limit": 20,
+                "truncated": False,
             }
         )
     elif command == "impact":
@@ -128,15 +144,13 @@ def main():
             {
                 "symbol": "anchor",
                 "depth": 2,
+                "targets": [ANCHOR],
+                "ambiguous": False,
+                "aggregation": "definition",
+                "filteredOut": False,
                 "nodeCount": 1,
-                "affected": [
-                    {
-                        "name": "neighbor",
-                        "kind": "function",
-                        "filePath": "src/neighbor.rs",
-                        "startLine": 9,
-                    }
-                ],
+                "edgeCount": 0,
+                "affected": [NEIGHBOR],
             }
         )
     elif command == "affected":

@@ -48,7 +48,7 @@ string_id!(
 
 /// Lossless platform encoding used for a native filesystem path.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum NativePathEncoding {
@@ -61,7 +61,9 @@ pub enum NativePathEncoding {
 }
 
 /// Lossless native path plus a diagnostic-only display form.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
 pub struct NativePath {
     /// Platform-specific lossless encoding.
     pub encoding: NativePathEncoding,
@@ -179,8 +181,6 @@ pub enum ArtifactChangeKind {
     Modified,
     /// Artifact is absent from the current scan.
     Deleted,
-    /// Artifact fingerprint is unchanged.
-    Unchanged,
 }
 
 /// Planned incremental action for one artifact identity.
@@ -620,6 +620,82 @@ pub struct RepositoryCoverageGap {
     pub repo_id: RepoId,
     /// Source-free, actionable reason for the gap.
     pub reason: String,
+}
+
+/// Why an HTTP consumer or test call has no provider edge.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpLinkGapReason {
+    /// No workspace provider matches the method and path within the call's scope.
+    NoProvider,
+    /// Several equally specific providers match; the candidates are listed.
+    Ambiguous,
+    /// The call names a host outside the workspace.
+    External,
+}
+
+impl HttpLinkGapReason {
+    /// Stable persisted name.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NoProvider => "no_provider",
+            Self::Ambiguous => "ambiguous",
+            Self::External => "external",
+        }
+    }
+
+    /// Parses a persisted name.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "no_provider" => Some(Self::NoProvider),
+            "ambiguous" => Some(Self::Ambiguous),
+            "external" => Some(Self::External),
+            _ => None,
+        }
+    }
+}
+
+/// An HTTP consumer or test call that produced no provider edge.
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+pub struct HttpLinkGap {
+    /// Consumer boundary or test case node.
+    pub caller: NodeId,
+    /// HTTP method of the call.
+    pub method: String,
+    /// Concrete or templated path of the call.
+    pub path: String,
+    /// Why the call has no provider edge.
+    pub reason: HttpLinkGapReason,
+    /// Equally specific providers of an ambiguous call, in stable order.
+    pub candidates: Vec<NodeId>,
+}
+
+/// Counts of HTTP consumer and test calls by link outcome.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct HttpLinkCoverage {
+    /// Calls linked to exactly one provider.
+    pub linked: u64,
+    /// Calls without a matching provider.
+    pub no_provider: u64,
+    /// Calls with several equally specific providers.
+    pub ambiguous: u64,
+    /// Calls to hosts outside the workspace, which are not coverage gaps.
+    pub external: u64,
+}
+
+/// HTTP link outcome of one published graph.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct HttpLinkReport {
+    /// Counts of calls by outcome.
+    pub coverage: HttpLinkCoverage,
+    /// Calls without a provider edge, in stable order.
+    pub gaps: Vec<HttpLinkGap>,
 }
 
 /// Status of a public tool result.

@@ -8,9 +8,9 @@ use code_system_graph::{
 };
 use code_system_graph_core::{RegisteredWorkspace, parse_manifest, register_workspace};
 use code_system_graph_model::{
-    EdgeKind, ExtractorRunStatus, OverallFreshness, RepoFreshnessState, ToolEnvelope, ToolStatus, TraceReport, stable_id
+    EdgeKind, ExtractorRunStatus, Node, NodeKind, OverallFreshness, RepoFreshnessState, ToolEnvelope, ToolStatus, TraceReport, stable_id
 };
-use code_system_graph_store_sqlite::{SqliteStore, latest_schema_version};
+use code_system_graph_store_sqlite::{SqliteStore, schema_identity};
 
 #[derive(Debug, PartialEq, Eq)]
 struct TraceObservation {
@@ -19,7 +19,7 @@ struct TraceObservation {
     evidence_count: usize,
     tool_status: ToolStatus,
     segment_count: usize,
-    schema_version: i64,
+    schema_id: String,
     freshness: OverallFreshness,
     discovered_inputs: usize,
     changed_inputs: usize,
@@ -277,7 +277,7 @@ fn scan_and_trace_should_link_python_test_to_rust_implementation() -> anyhow::Re
             evidence_count: summary.evidence_count,
             tool_status: envelope.status,
             segment_count,
-            schema_version: status.schema_version,
+            schema_id: status.schema_id,
             freshness: status.freshness.overall,
             discovered_inputs: summary.discovered_input_count,
             changed_inputs: summary.changed_input_count,
@@ -288,12 +288,12 @@ fn scan_and_trace_should_link_python_test_to_rust_implementation() -> anyhow::Re
             cross_language_edges,
         },
         TraceObservation {
-            node_count: 101,
-            edge_count: 117,
-            evidence_count: 105,
+            node_count: 89,
+            edge_count: 105,
+            evidence_count: 93,
             tool_status: ToolStatus::Ok,
             segment_count: 1,
-            schema_version: latest_schema_version(),
+            schema_id: schema_identity().to_owned(),
             freshness: OverallFreshness::Fresh,
             discovered_inputs: 45,
             changed_inputs: 45,
@@ -551,7 +551,7 @@ fn scan_should_apply_exact_codegraph_corroboration_without_source_payloads() -> 
     let registry = register_workspace(&manifest, &source, &parsed)?;
     let repo_id = &registry.record.repositories[0].id;
     let capability =
-        store.load_provider_capabilities("codegraph-scan", repo_id, "codegraph", "1.5.0")?;
+        store.load_provider_capabilities("codegraph-scan", repo_id, "codegraph", "1.6.1")?;
     let codegraph_evidence = store
         .search_current_nodes("codegraph-scan", "anchor", 10)?
         .len();
@@ -581,6 +581,14 @@ fn scan_should_apply_exact_codegraph_corroboration_without_source_payloads() -> 
                 .any(|item| item.starts_with("operation:"))
     }));
     Ok(())
+}
+
+fn http_operation_labels(nodes: &[Node]) -> Vec<&str> {
+    nodes
+        .iter()
+        .filter(|node| node.kind == NodeKind::HttpOperation)
+        .map(|node| node.label.as_str())
+        .collect()
 }
 
 #[test]
@@ -618,10 +626,10 @@ fn cli_openapi_override_should_take_precedence_and_invalidate_plain_status() -> 
     assert_eq!(
         (
             summary.node_count,
-            nodes.first().map(|node| node.label.as_str()),
+            http_operation_labels(&nodes),
             status.freshness.overall,
         ),
-        (1, Some("GET /cli"), OverallFreshness::Stale)
+        (2, vec!["GET /cli"], OverallFreshness::Stale)
     );
     Ok(())
 }
@@ -655,11 +663,8 @@ fn cli_repo_openapi_flag_should_override_manifest() -> anyhow::Result<()> {
     let (nodes, _) = SqliteStore::open_read_only(&database)?.load_current_graph("cli-override")?;
 
     assert_eq!(
-        (
-            output.status.success(),
-            nodes.first().map(|node| node.label.as_str()),
-        ),
-        (true, Some("GET /cli"))
+        (output.status.success(), http_operation_labels(&nodes),),
+        (true, vec!["GET /cli"])
     );
     Ok(())
 }

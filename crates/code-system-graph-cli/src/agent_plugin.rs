@@ -24,7 +24,6 @@ use thiserror::Error;
 use crate::{ApplicationError, application_exit_code, status_workspace};
 
 const BINDING_GENERATOR: &str = "csgraph plugin binding";
-const LEGACY_COMPOSE_GENERATOR: &str = "csgraph plugin compose";
 const BINDING_RELATIVE_PATH: &str = ".local/code-system-graph/mcp-binding.json";
 const INTEGRATION_RECEIPT_RELATIVE_PATH: &str = ".local/code-system-graph/plugin-integration.json";
 
@@ -534,7 +533,7 @@ fn write_local_binding(
 }
 
 fn recognized_binding_generator(generator: &str) -> bool {
-    generator == BINDING_GENERATOR || generator == LEGACY_COMPOSE_GENERATOR
+    generator == BINDING_GENERATOR
 }
 
 fn read_json_file(path: &Path, file: &'static str) -> Result<serde_json::Value, AgentPluginError> {

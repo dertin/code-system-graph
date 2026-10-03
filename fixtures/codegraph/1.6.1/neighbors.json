@@ -1,0 +1,77 @@
+{
+  "symbol": "discover",
+  "targets": [
+    {
+      "name": "discover",
+      "kind": "function",
+      "filePath": "src/provider.rs",
+      "startLine": 1,
+      "id": "function:fixture-1",
+      "qualifiedName": "discover",
+      "language": "rust"
+    }
+  ],
+  "ambiguous": false,
+  "aggregation": "definition",
+  "filteredOut": false,
+  "definitions": [
+    {
+      "definition": {
+        "name": "discover",
+        "kind": "function",
+        "filePath": "src/provider.rs",
+        "startLine": 1,
+        "id": "function:fixture-1",
+        "qualifiedName": "discover",
+        "language": "rust"
+      },
+      "roots": [
+        "function:fixture-1"
+      ],
+      "callers": [
+        {
+          "id": "function:fixture-2",
+          "name": "scan_workspace",
+          "kind": "function",
+          "filePath": "src/lib.rs",
+          "startLine": 3,
+          "relationships": [
+            "calls"
+          ]
+        }
+      ],
+      "edges": [
+        {
+          "source": "function:fixture-2",
+          "target": "function:fixture-1",
+          "kind": "calls",
+          "metadata": {
+            "confidence": 0.9,
+            "resolvedBy": "import",
+            "refName": "provider::discover"
+          },
+          "line": 4,
+          "column": 4,
+          "provenance": null
+        }
+      ],
+      "total": 1,
+      "limit": 10,
+      "truncated": false
+    }
+  ],
+  "callers": [
+    {
+      "name": "scan_workspace",
+      "kind": "function",
+      "filePath": "src/lib.rs",
+      "startLine": 3,
+      "relationships": [
+        "calls"
+      ]
+    }
+  ],
+  "total": 1,
+  "limit": 10,
+  "truncated": false
+}

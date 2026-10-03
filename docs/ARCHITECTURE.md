@@ -1,15 +1,16 @@
 # Code System Graph Architecture
 
-Code System Graph builds a federated graph of repository boundaries, contracts, deployments, ownership,
-evidence, and immutable snapshots. It complements repository-local symbol and call graphs instead
-of duplicating them.
+Code System Graph builds a federated graph of repository boundaries, contracts, deployments,
+ownership, and evidence, and keeps one current graph per workspace. It complements
+repository-local symbol and call graphs instead of duplicating them.
 
 ## Design principles
 
 - Dependencies point inward toward domain types and application-owned ports.
 - Extraction is conservative: ambiguous or dynamic observations remain explicit and unlinked.
 - Durable data is source-free and secret-safe.
-- Published snapshots are immutable and become visible atomically.
+- Each publication replaces the current graph atomically; readers see the previous or the new
+  graph, never a mix.
 - Query results expose freshness, coverage, evidence, ambiguity, and truncation.
 - External providers are optional, bounded adapters rather than sources of graph truth.
 
@@ -76,7 +77,9 @@ malformed locations, unsafe metadata, and unbounded fields before publication.
 Tree-sitter parsers and narrow framework recognizers extract literal or conservatively resolvable
 facts. Source-owned output batches are keyed by repository, checkout, lossless path, and extractor.
 Their payloads contain structured observations and evidence locators, never source bodies.
-Unchanged compatible batches can be reused while affected link neighborhoods are recomputed.
+Unchanged compatible batches are reused, and every relationship is relinked from all current
+batches, so incremental and full scans publish identical graphs. A scan whose snapshot identity
+matches the current snapshot keeps it without loading any batch.
 
 Extractors cover package and HTTP contracts, events, GraphQL, protobuf and gRPC, SQL and ORM data,
 Docker Compose, Kubernetes, Helm, Terraform and OpenTofu, Markdown and ADR references, CODEOWNERS,
@@ -95,9 +98,9 @@ Snapshot-scoped records preserve the declaration, reason, resolution, and histor
 
 ### Infrastructure adapters
 
-SQLite stores the registry, immutable snapshots, source-free extraction batches, communities,
-manual links, provider capabilities, and bounded query summaries. A single blocking writer works
-with WAL readers. See `DATA_MODEL.md` and ADR 0003 for storage details.
+SQLite stores the registry, the current graph of each workspace, source-free extraction batches,
+communities, manual links, provider capabilities, and bounded query summaries. A single blocking
+writer works with WAL readers. See `DATA_MODEL.md` and ADR 0003 for storage details.
 
 The local Git adapter emits repository state, native paths, changed-file layers, and line
 positions without retaining diff bodies. GitHub and Bitbucket Cloud inspection is opt-in and uses
@@ -113,18 +116,25 @@ returned by the provider remain ephemeral.
 ## Scan and publication flow
 
 1. Validate the workspace manifest and canonicalize repositories beneath allowed roots.
-2. Fingerprint relevant artifacts and plan added, modified, deleted, and reusable inputs.
-3. Extract structured facts and evidence into source-owned batches.
+2. Fingerprint relevant artifacts once per physical file and plan added, modified, deleted, and
+   reusable inputs. A file whose size, modification time, and, on Unix, device, inode, and change
+   time match the operational stat cache reuses its content hash without a read; files modified
+   within two seconds of the cached observation are always read.
+3. Extract structured facts and evidence into source-owned batches. Each changed file is read once
+   and shared by all of its extractors; files are processed by at most `maxExtractionWorkers`
+   threads and merged in artifact-key order, so the result never depends on scheduling. Completed
+   batches are checkpointed in one sidecar transaction.
 4. Normalize identities and perform deterministic bilateral linking.
 5. Apply exact manual additions and suppressions.
-6. Validate the complete candidate graph and persist it in one transaction.
-7. Publish the snapshot only after the transaction commits.
+6. Validate the complete candidate graph and write only its difference from the current graph in
+   one transaction.
+7. Publish the new snapshot ID only after the transaction commits.
 
-If scanning fails, the last valid snapshot remains queryable.
+If scanning fails, the last published graph remains queryable.
 
 ## Query and change flow
 
-1. Resolve query anchors against the selected immutable snapshot.
+1. Resolve query anchors against the current graph of the selected workspace.
 2. Validate freshness and graph consistency.
 3. Traverse only within declared direction, depth, result, and time bounds.
 4. Optionally request bounded local context from CodeGraph.
@@ -142,7 +152,7 @@ false-safe conclusion.
 
 Tokio coordinates cancellation and bounded asynchronous work. Repository, extractor, and provider
 concurrency use explicit semaphores. Shutdown cancels work, terminates child processes, drains
-diagnostics, and leaves only fully published snapshots visible.
+diagnostics, and leaves only fully published graphs visible.
 
 Operational and release details are documented in `INTERFACES.md`, `PERFORMANCE.md`,
 `INSTALLATION.md`, `RELEASE.md`, and ADR 0009.

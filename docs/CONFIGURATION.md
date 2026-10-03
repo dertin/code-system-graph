@@ -58,6 +58,9 @@ repos:
     includeDefaults:
       - vendor/internal-sdk/**
     useGitignore: true
+    authorities:
+      - orders-api:8080
+      - orders.internal
     httpConsumers:
       - method: POST
         path: /orders
@@ -73,9 +76,29 @@ repos:
 | `excludes` | Additional repository-relative paths must be omitted from automatic discovery |
 | `includeDefaults` | A specific path inside a default dependency or build exclusion must be discovered |
 | `useGitignore` | Repository-contained `.gitignore` rules should filter automatic discovery |
+| `authorities` | Other repositories call this one through absolute URLs whose host is not a Compose or Kubernetes service |
 
 These fields add explicit evidence. They are not required for supported, unambiguous source
 patterns.
+
+## HTTP authorities
+
+An absolute URL such as `http://orders-api:8080/v1/orders/42` is linked by its path, and its
+`host:port` authority decides which repositories may provide it:
+
+- `localhost`, `127.0.0.0/8`, `::1`, `0.0.0.0`, and `host.docker.internal` resolve across the
+  workspace with the usual scope rules, so a test that calls a locally started service links to
+  the repository that serves the route.
+- An authority listed in a repository's `authorities` restricts resolution to that repository. An
+  entry without a port matches every port of the host. Entries are `host` or `host:port` values
+  without scheme or path, are compared case-insensitively, and must be unique across repositories.
+- Compose services, Kubernetes deployments and Services, their declared service names, and host
+  aliases name the repository that declares them. Cluster DNS names such as
+  `orders.shop.svc.cluster.local` resolve to the service name. When the declaring repository has no
+  matching route, resolution falls back to the workspace; a name declared by several repositories
+  is not used.
+- Any other host is external: the call is kept as a consumer boundary, is not linked, and is
+  counted as external in the HTTP link report rather than as a call without a provider.
 
 ## Discovery exclusions
 
@@ -307,6 +330,7 @@ executionPolicy:
   maxWatchSessionWallTimeMs: 86400000
   minWatchRescanIntervalMs: 10000
   maxCheckpointCacheBytes: 10737418240
+  maxExtractionWorkers: 8
 
   maxExploreWallTimeMs: 8000
   maxExploreCodeGraphOperations: 8
@@ -331,10 +355,14 @@ executionPolicy:
 ```
 
 The defaults allow six hours and 16 GiB per worker, five minutes without verified completed work,
-eight idle hours and 24 total hours per watcher session, and 10 GiB of historical checkpoint cache.
-The cache is not preallocated. Completed batches and a fully validated candidate graph may be
-resumed from the owner-only operational sidecar; that candidate remains invisible to every query
-surface until one atomic publication transaction succeeds.
+eight idle hours and 24 total hours per watcher session, and 10 GiB of checkpoint cache. The cache
+is not preallocated. Completed extractor batches are checkpointed in the owner-only operational
+sidecar and reused by the next pass; the graph remains invisible to every query surface until one
+atomic publication transaction succeeds.
+
+`maxExtractionWorkers` bounds concurrent file extraction. The effective value never exceeds the
+host's available parallelism, and the published graph is identical for every value: results are
+merged in artifact-key order, never in completion order. It accepts `1` through `256`.
 
 All values must be positive and representable except
 `maxCodeGraphCorroborationAnchorsPerRepo`, which also accepts `-1` for unlimited. Its default is

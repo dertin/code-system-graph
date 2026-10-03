@@ -158,7 +158,7 @@ fn stale_codegraph_index_should_corroborate_even_without_native_changes() -> any
     std::fs::write(
         &binary,
         format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$1\" in\n  status)\n    if [ -f '{}' ]; then modified=0; else modified=1; fi\n    printf '{{\"initialized\":true,\"version\":\"1.5.0\",\"pendingChanges\":{{\"added\":0,\"modified\":%s,\"removed\":0}},\"worktreeMismatch\":null,\"index\":{{\"reindexRecommended\":false,\"state\":\"complete\"}}}}\\n' \"$modified\"\n    ;;\n  sync) : > '{}' ;;\n  *) exec python3 '{}' \"$@\" ;;\nesac\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$1\" in\n  status)\n    if [ -f '{}' ]; then modified=0; else modified=1; fi\n    printf '{{\"initialized\":true,\"version\":\"1.6.1\",\"pendingChanges\":{{\"added\":0,\"modified\":%s,\"removed\":0}},\"worktreeMismatch\":null,\"index\":{{\"reindexRecommended\":false,\"state\":\"complete\"}}}}\\n' \"$modified\"\n    ;;\n  sync) : > '{}' ;;\n  *) exec python3 '{}' \"$@\" ;;\nesac\n",
             invocation_log.display(),
             synchronized_marker.display(),
             synchronized_marker.display(),
@@ -444,7 +444,7 @@ fn watch_failure_should_not_persist_or_emit_parser_literals() -> anyhow::Result<
         .arg(&database)
         .output()?;
     anyhow::ensure!(status_output.status.success(), "status command failed");
-    let sidecar = std::path::PathBuf::from(format!("{}.work-v1.db", database.display()));
+    let sidecar = std::path::PathBuf::from(format!("{}.work.db", database.display()));
     let persisted = std::fs::read(sidecar)?;
     for (surface, bytes) in [
         ("termination JSONL", termination.as_bytes()),

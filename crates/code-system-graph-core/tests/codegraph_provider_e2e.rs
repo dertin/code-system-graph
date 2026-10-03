@@ -77,7 +77,7 @@ async fn provider_should_probe_mcp_and_execute_all_supported_operations() {
         .expect("probe should succeed");
 
     assert_eq!(capability.status, ProviderStatus::Available);
-    assert_eq!(capability.version.as_deref(), Some("1.5.0"));
+    assert_eq!(capability.version.as_deref(), Some("1.6.1"));
     assert!(capability.operations.iter().any(|operation| {
         operation.operation == ProviderOperation::LocalContext
             && operation.transport == ProviderTransport::Mcp
@@ -139,7 +139,7 @@ async fn provider_should_probe_mcp_and_execute_all_supported_operations() {
         })
         .await
         .expect("affected-tests query should succeed")
-        .expect("CodeGraph 1.5 supports affected tests");
+        .expect("CodeGraph 1.6 supports affected tests");
     assert_eq!(tests.affected_tests, vec!["tests/anchor.rs"]);
 }
 
@@ -224,16 +224,16 @@ async fn cli_should_enforce_cancellation_and_output_caps() {
 
 #[tokio::test]
 #[ignore = "requires a user-installed and explicitly indexed CodeGraph checkout"]
-async fn live_codegraph_1_5_should_match_the_declared_public_contract() {
+async fn live_codegraph_1_6_should_match_the_declared_public_contract() {
     let project_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()
         .expect("workspace root should be canonicalized");
     let provider =
         CodeGraphProvider::new(CodeGraphConfig::default()).expect("default config should be valid");
-    let request = ProviderRequest {
+    let request = || ProviderRequest {
         repo_id: RepoId::new("repo:live-smoke"),
-        project_path,
+        project_path: project_path.clone(),
         budget: ProviderBudget {
             timeout: Duration::from_secs(10),
             max_output_bytes: 1024 * 1024,
@@ -242,11 +242,11 @@ async fn live_codegraph_1_5_should_match_the_declared_public_contract() {
         cancellation: CancellationToken::new(),
     };
     let capability = provider
-        .probe(request)
+        .probe(request())
         .await
         .expect("live CodeGraph probe should succeed");
 
-    assert_eq!(capability.version.as_deref(), Some("1.5.0"));
+    assert_eq!(capability.version.as_deref(), Some("1.6.1"));
     assert!(matches!(
         capability.status,
         ProviderStatus::Available | ProviderStatus::Stale
@@ -255,4 +255,45 @@ async fn live_codegraph_1_5_should_match_the_declared_public_contract() {
         operation.operation == ProviderOperation::LocalContext
             && operation.transport == ProviderTransport::Mcp
     }));
+
+    let symbols = provider
+        .resolve_symbols(ResolveSymbolsRequest {
+            request: request(),
+            query: "CodeGraphProvider".to_owned(),
+        })
+        .await
+        .expect("live symbol query should parse");
+    assert!(
+        symbols
+            .symbols
+            .iter()
+            .any(|symbol| symbol.name == "CodeGraphProvider")
+    );
+    provider
+        .get_local_neighbors(LocalNeighborsRequest {
+            request: request(),
+            symbol: "supports_cli_contract".to_owned(),
+            direction: LocalNeighborDirection::Callers,
+        })
+        .await
+        .expect("live callers query should parse");
+    provider
+        .get_local_impact(LocalImpactRequest {
+            request: request(),
+            symbol: "supports_cli_contract".to_owned(),
+            max_depth: 2,
+        })
+        .await
+        .expect("live impact query should parse");
+    provider
+        .get_affected_tests(AffectedTestsRequest {
+            request: request(),
+            changed_files: vec![
+                "crates/code-system-graph-core/src/codegraph/contract.rs".to_owned(),
+            ],
+            max_depth: 3,
+        })
+        .await
+        .expect("live affected-tests query should parse")
+        .expect("CodeGraph 1.6 supports affected tests");
 }

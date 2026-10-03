@@ -6,35 +6,42 @@
 mod access_lock;
 mod backup_restore;
 mod file_permissions;
+mod publication;
 mod schema_contract;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use access_lock::StoreAccessLock;
 use backup_restore::{backup_connection, restore_database};
 use code_system_graph_model::{
-    ArtifactFingerprint, CheckoutId, Community, CommunityAlgorithm, CommunityConfig, CommunityId, CommunityMetrics, CommunitySnapshot, Edge, EdgeId, EdgeKind, EpistemicStatus, Evidence, EvidenceId, ExtractorRun, LinkDecision, LinkStatus, NativePath, Node, NodeId, NodeKind, RepoFreshness, RepoFreshnessState, RepoId, RepositoryCoverageGap, RepositoryRecord, StoredExtractorBatch, WorkspaceId, WorkspaceRecord, contains_unsafe_metadata_characters, stable_id
+    ArtifactChange, ArtifactFingerprint, CheckoutId, Community, CommunityAlgorithm, CommunityConfig, CommunityId, CommunityMetrics, CommunitySnapshot, Edge, EdgeId, EdgeKind, EpistemicStatus, Evidence, EvidenceId, ExtractorRun, HttpLinkCoverage, HttpLinkGap, HttpLinkGapReason, HttpLinkReport, LinkDecision, LinkStatus, NativePath, Node, NodeId, NodeKind, RepoFreshness, RepoFreshnessState, RepoId, RepositoryCoverageGap, RepositoryRecord, StoredExtractorBatch, WorkspaceId, WorkspaceRecord, contains_unsafe_metadata_characters, stable_id
 };
 pub use file_permissions::set_owner_only_file;
 use file_permissions::{
     SQLITE_ARTIFACT_SUFFIXES, artifact_path, prepare_database_file, restrict_store_permissions
 };
+use publication::{PublicationInput, publish_current_graph, replace_manual_links};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use schema_contract::validate_exact_schema;
 use sysinfo::{Pid, ProcessesToUpdate, System};
 use thiserror::Error;
 
 const INITIAL_SCHEMA: &str = include_str!("../migrations/0001_initial.sql");
-const LATEST_SCHEMA_VERSION: i64 = 2;
+static SCHEMA_ID: LazyLock<String> =
+    LazyLock::new(|| stable_id("schema", &INITIAL_SCHEMA.replace("\r\n", "\n")));
 
-/// Returns the newest on-disk schema version supported by this binary.
+/// Returns the identity of the exact on-disk schema supported by this binary.
+///
+/// The identity is derived from the embedded schema definition, so any schema change produces a
+/// new identity and databases created by other builds are rejected.
 #[must_use]
-pub const fn latest_schema_version() -> i64 {
-    LATEST_SCHEMA_VERSION
+pub fn schema_identity() -> &'static str {
+    SCHEMA_ID.as_str()
 }
 
 /// Source-free runtime capabilities observed from one open store connection.
@@ -257,6 +264,21 @@ pub struct SnapshotBatch<'a> {
     pub community_snapshot: Option<&'a CommunitySnapshot>,
 }
 
+/// Artifact rows of a candidate that differ from the current graph of its workspace.
+///
+/// Publishing with a delta writes only these rows; every other stored fingerprint and extractor
+/// batch must already equal the candidate, which holds when the delta was planned against the
+/// stored fingerprints under the writer lock.
+#[derive(Debug, Clone, Copy)]
+pub struct ArtifactDelta<'a> {
+    /// Added or modified fingerprints.
+    pub upserted_fingerprints: &'a [&'a ArtifactFingerprint],
+    /// Extractor batches that are not stored in their current form.
+    pub upserted_batches: &'a [&'a StoredExtractorBatch],
+    /// Artifacts removed since the current graph; both their fingerprint and batch are deleted.
+    pub removed: &'a [ArtifactChange],
+}
+
 /// Result of restoring a database backup.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RestoreReport {
@@ -264,8 +286,8 @@ pub struct RestoreReport {
     pub source_path: PathBuf,
     /// Safety backup of the replaced database, when it existed.
     pub safety_backup_path: Option<PathBuf>,
-    /// Exact schema version restored.
-    pub schema_version: i64,
+    /// Exact schema identity restored.
+    pub schema_id: String,
 }
 
 /// Compact persisted workspace registry entry.
@@ -514,7 +536,7 @@ impl SqliteStore {
         Ok(())
     }
 
-    /// Opens an exact 1.1.0 store or initializes a new empty database.
+    /// Opens an exact-schema store or initializes a new empty database.
     ///
     /// # Errors
     ///
@@ -529,7 +551,7 @@ impl SqliteStore {
         })
     }
 
-    /// Creates a validated online backup of the exact 1.1.0 schema.
+    /// Creates a validated online backup of the exact embedded schema.
     ///
     /// A source on read-only media is treated as immutable only when no `SQLite` sidecars exist.
     ///
@@ -541,7 +563,7 @@ impl SqliteStore {
         backup_restore::backup_file(access_lock.database_path(), destination)
     }
 
-    /// Restores a validated backup with the exact 1.1.0 schema.
+    /// Restores a validated backup with the exact embedded schema.
     ///
     /// The existing destination is first preserved as a non-overwriting safety backup.
     /// Restore is refused while another [`SqliteStore`] has the destination open.
@@ -581,7 +603,7 @@ impl SqliteStore {
     ///
     /// # Errors
     ///
-    /// Returns [`StoreError`] if the database is absent, corrupt, or not the exact 1.1.0 schema.
+    /// Returns [`StoreError`] if the database is absent, corrupt, or not the exact embedded schema.
     pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let path = path.as_ref();
         let access_lock = StoreAccessLock::shared(path)?;
@@ -617,13 +639,13 @@ impl SqliteStore {
         })
     }
 
-    /// Returns the exact initial schema version recorded by this store.
+    /// Returns the schema identity recorded by this store.
     ///
     /// # Errors
     ///
     /// Returns [`StoreError`] when schema metadata cannot be read.
-    pub fn schema_version(&self) -> Result<i64, StoreError> {
-        schema_version(&self.connection)
+    pub fn schema_id(&self) -> Result<String, StoreError> {
+        stored_schema_id(&self.connection)
     }
 
     /// Returns the opaque identity that binds disposable operational state to this database.
@@ -784,8 +806,10 @@ impl SqliteStore {
         &self,
         workspace: &str,
     ) -> Result<Vec<RepoFreshness>, StoreError> {
-        let snapshot_id = self.current_snapshot_id(workspace)?;
-        self.load_freshness_snapshot(&snapshot_id)
+        self.consistent_read(|| {
+            let snapshot_id = self.current_snapshot_id(workspace)?;
+            self.load_freshness_snapshot(&snapshot_id)
+        })
     }
 
     /// Loads per-repository freshness from one immutable graph snapshot.
@@ -797,38 +821,172 @@ impl SqliteStore {
         &self,
         snapshot_id: &str,
     ) -> Result<Vec<RepoFreshness>, StoreError> {
-        self.require_snapshot(snapshot_id)?;
-        let mut statement = self.connection.prepare(
-            "SELECT repo_id, checkout_id, head_commit, manifest_hash, state, reason
-             FROM repository_snapshot_freshness
-             WHERE snapshot_id = ?1
-             ORDER BY repo_id, checkout_id",
-        )?;
+        self.consistent_read(|| {
+            let workspace = self.require_snapshot(snapshot_id)?;
+            let mut statement = self.connection.prepare(
+                "SELECT repo_id, checkout_id, head_commit, manifest_hash, state, reason
+                 FROM repository_snapshot_freshness
+                 WHERE workspace_name = ?1
+                 ORDER BY repo_id, checkout_id",
+            )?;
+            let rows = statement
+                .query_map([workspace], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows.into_iter()
+                .map(
+                    |(repo_id, checkout_id, head_commit, manifest_hash, state, reason)| {
+                        Ok(RepoFreshness {
+                            repo_id: RepoId::new(repo_id),
+                            checkout_id: CheckoutId::new(checkout_id),
+                            head_commit,
+                            manifest_hash,
+                            state: serde_json::from_str::<RepoFreshnessState>(&state)?,
+                            reason,
+                        })
+                    },
+                )
+                .collect()
+        })
+    }
+
+    /// Loads the HTTP link coverage of the current graph with at most `gap_limit` gaps: calls
+    /// without a provider first, then ambiguous calls, then external calls. The second value is
+    /// the total number of stored gaps.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when no current snapshot exists or stored coverage is invalid.
+    pub fn load_http_link_report(
+        &self,
+        workspace: &str,
+        gap_limit: usize,
+    ) -> Result<(HttpLinkReport, usize), StoreError> {
+        self.consistent_read(|| {
+            self.current_snapshot_id(workspace)?;
+            let counts = self
+                .connection
+                .query_row(
+                    "SELECT linked, no_provider, ambiguous, external
+                     FROM http_link_coverage WHERE workspace_name = ?1",
+                    [workspace],
+                    |row| {
+                        Ok([
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, i64>(2)?,
+                            row.get::<_, i64>(3)?,
+                        ])
+                    },
+                )
+                .optional()?
+                .unwrap_or_default();
+            let count = |value: i64| {
+                u64::try_from(value).map_err(|_| StoreError::IntegerOutOfRange {
+                    field: "http_link_coverage",
+                    value: i128::from(value),
+                })
+            };
+            let coverage = HttpLinkCoverage {
+                linked: count(counts[0])?,
+                no_provider: count(counts[1])?,
+                ambiguous: count(counts[2])?,
+                external: count(counts[3])?,
+            };
+            let total = self.connection.query_row(
+                "SELECT COUNT(*) FROM http_link_gaps WHERE workspace_name = ?1",
+                [workspace],
+                |row| row.get::<_, i64>(0),
+            )?;
+            let limit = i64::try_from(gap_limit).unwrap_or(i64::MAX);
+            let gaps = self.http_link_gaps(
+                "SELECT caller_node_id, method, path, reason, candidates_json
+                 FROM http_link_gaps
+                 WHERE workspace_name = ?1
+                 ORDER BY CASE reason
+                     WHEN 'no_provider' THEN 0 WHEN 'ambiguous' THEN 1 ELSE 2 END,
+                     caller_node_id, method, path
+                 LIMIT ?2",
+                params![workspace, limit],
+            )?;
+            Ok((
+                HttpLinkReport { coverage, gaps },
+                usize::try_from(total).unwrap_or(usize::MAX),
+            ))
+        })
+    }
+
+    /// Loads the HTTP link gaps of the given callers in the current graph.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when no current snapshot exists or stored gaps are invalid.
+    pub fn load_http_link_gaps_for_callers(
+        &self,
+        workspace: &str,
+        callers: &[NodeId],
+    ) -> Result<Vec<HttpLinkGap>, StoreError> {
+        if callers.is_empty() {
+            return Ok(Vec::new());
+        }
+        let callers =
+            serde_json::to_string(&callers.iter().map(NodeId::as_str).collect::<Vec<_>>())?;
+        self.consistent_read(|| {
+            self.current_snapshot_id(workspace)?;
+            self.http_link_gaps(
+                "SELECT caller_node_id, method, path, reason, candidates_json
+                 FROM http_link_gaps
+                 WHERE workspace_name = ?1
+                   AND caller_node_id IN (SELECT value FROM json_each(?2))
+                 ORDER BY caller_node_id, method, path, reason",
+                params![workspace, callers],
+            )
+        })
+    }
+
+    fn http_link_gaps(
+        &self,
+        sql: &str,
+        parameters: impl rusqlite::Params,
+    ) -> Result<Vec<HttpLinkGap>, StoreError> {
+        let mut statement = self.connection.prepare(sql)?;
         let rows = statement
-            .query_map([snapshot_id], |row| {
+            .query_map(parameters, |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
-                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
                     row.get::<_, String>(4)?,
-                    row.get::<_, Option<String>>(5)?,
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
         rows.into_iter()
-            .map(
-                |(repo_id, checkout_id, head_commit, manifest_hash, state, reason)| {
-                    Ok(RepoFreshness {
-                        repo_id: RepoId::new(repo_id),
-                        checkout_id: CheckoutId::new(checkout_id),
-                        head_commit,
-                        manifest_hash,
-                        state: serde_json::from_str::<RepoFreshnessState>(&state)?,
-                        reason,
-                    })
-                },
-            )
+            .map(|(caller, method, path, reason, candidates)| {
+                let reason = HttpLinkGapReason::parse(&reason).ok_or_else(|| {
+                    StoreError::InvalidGraphSnapshot(format!(
+                        "unknown HTTP link gap reason `{reason}`"
+                    ))
+                })?;
+                Ok(HttpLinkGap {
+                    caller: NodeId::new(caller),
+                    method,
+                    path,
+                    reason,
+                    candidates: serde_json::from_str::<Vec<String>>(&candidates)?
+                        .into_iter()
+                        .map(NodeId::new)
+                        .collect(),
+                })
+            })
             .collect()
     }
 
@@ -841,61 +999,63 @@ impl SqliteStore {
         &self,
         workspace: &str,
     ) -> Result<Vec<ArtifactFingerprint>, StoreError> {
-        let snapshot_id = self.current_snapshot_id(workspace)?;
-        let mut statement = self.connection.prepare(
-            "SELECT
-                repo_id, checkout_id, path_encoding, relative_path, path_display,
-                extractor, content_hash, size_bytes
-             FROM artifact_fingerprints
-             WHERE snapshot_id = ?1
-             ORDER BY repo_id, checkout_id, path_encoding, relative_path, extractor",
-        )?;
-        let rows = statement
-            .query_map([snapshot_id], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, Vec<u8>>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, String>(5)?,
-                    row.get::<_, String>(6)?,
-                    row.get::<_, i64>(7)?,
-                ))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        rows.into_iter()
-            .map(
-                |(
-                    repo_id,
-                    checkout_id,
-                    encoding,
-                    bytes,
-                    display,
-                    extractor,
-                    content_hash,
-                    stored_size_bytes,
-                )| {
-                    Ok(ArtifactFingerprint {
-                        repo_id: RepoId::new(repo_id),
-                        checkout_id: CheckoutId::new(checkout_id),
-                        path: NativePath {
-                            encoding: serde_json::from_str(&encoding)?,
-                            bytes,
-                            display,
-                        },
+        self.consistent_read(|| {
+            self.current_snapshot_id(workspace)?;
+            let mut statement = self.connection.prepare(
+                "SELECT
+                    repo_id, checkout_id, path_encoding, relative_path, path_display,
+                    extractor, content_hash, size_bytes
+                 FROM artifact_fingerprints
+                 WHERE workspace_name = ?1
+                 ORDER BY repo_id, checkout_id, path_encoding, relative_path, extractor",
+            )?;
+            let rows = statement
+                .query_map([workspace], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Vec<u8>>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, i64>(7)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows.into_iter()
+                .map(
+                    |(
+                        repo_id,
+                        checkout_id,
+                        encoding,
+                        bytes,
+                        display,
                         extractor,
                         content_hash,
-                        size_bytes: u64::try_from(stored_size_bytes).map_err(|_| {
-                            StoreError::IntegerOutOfRange {
-                                field: "artifact_fingerprints.size_bytes",
-                                value: i128::from(stored_size_bytes),
-                            }
-                        })?,
-                    })
-                },
-            )
-            .collect()
+                        stored_size_bytes,
+                    )| {
+                        Ok(ArtifactFingerprint {
+                            repo_id: RepoId::new(repo_id),
+                            checkout_id: CheckoutId::new(checkout_id),
+                            path: NativePath {
+                                encoding: serde_json::from_str(&encoding)?,
+                                bytes,
+                                display,
+                            },
+                            extractor,
+                            content_hash,
+                            size_bytes: u64::try_from(stored_size_bytes).map_err(|_| {
+                                StoreError::IntegerOutOfRange {
+                                    field: "artifact_fingerprints.size_bytes",
+                                    value: i128::from(stored_size_bytes),
+                                }
+                            })?,
+                        })
+                    },
+                )
+                .collect()
+        })
     }
 
     /// Loads reusable source-owned extractor outputs from the current snapshot.
@@ -923,81 +1083,114 @@ impl SqliteStore {
         workspace: &str,
         maximum_payload_bytes: u64,
     ) -> Result<Vec<StoredExtractorBatch>, StoreError> {
-        let snapshot_id = self.current_snapshot_id(workspace)?;
-        let maximum_payload_bytes = i64::try_from(maximum_payload_bytes).unwrap_or(i64::MAX);
-        let mut statement = self.connection.prepare(
-            "SELECT
-                repo_id, checkout_id, path_encoding, relative_path, path_display,
-                extractor, content_hash, size_bytes, extractor_version, budget_fingerprint,
-                source_was_lossy, output_count, payload
-             FROM extractor_batches
-             WHERE snapshot_id = ?1 AND length(payload) <= ?2
-             ORDER BY repo_id, checkout_id, path_encoding, relative_path, extractor",
-        )?;
-        let rows = statement
-            .query_map(params![snapshot_id, maximum_payload_bytes], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, Vec<u8>>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, String>(5)?,
-                    row.get::<_, String>(6)?,
-                    row.get::<_, i64>(7)?,
-                    row.get::<_, String>(8)?,
-                    row.get::<_, String>(9)?,
-                    row.get::<_, bool>(10)?,
-                    row.get::<_, i64>(11)?,
-                    row.get::<_, Vec<u8>>(12)?,
-                ))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        rows.into_iter()
-            .map(
-                |(
-                    repo_id,
-                    checkout_id,
-                    encoding,
-                    bytes,
-                    display,
-                    extractor,
-                    content_hash,
-                    stored_size_bytes,
-                    extractor_version,
-                    budget_fingerprint,
-                    source_was_lossy,
-                    stored_output_count,
-                    payload,
-                )| {
-                    Ok(StoredExtractorBatch {
-                        source: ArtifactFingerprint {
-                            repo_id: RepoId::new(repo_id),
-                            checkout_id: CheckoutId::new(checkout_id),
-                            path: NativePath {
-                                encoding: serde_json::from_str(&encoding)?,
-                                bytes,
-                                display,
-                            },
-                            extractor,
-                            content_hash,
-                            size_bytes: stored_metric_to_u64(
-                                "extractor_batches.size_bytes",
-                                stored_size_bytes,
-                            )?,
-                        },
+        self.load_current_extractor_batches_where(workspace, maximum_payload_bytes, None)
+    }
+
+    /// Loads the current batches that can carry persisted extraction degradations: batches whose
+    /// source was decoded lossily and batches owned by `extractor`.
+    ///
+    /// Oversized rows are omitted exactly as in
+    /// [`Self::load_current_extractor_batches_with_limit`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when no current snapshot exists or stored values are invalid.
+    pub fn load_current_degradation_batches(
+        &self,
+        workspace: &str,
+        maximum_payload_bytes: u64,
+        extractor: &str,
+    ) -> Result<Vec<StoredExtractorBatch>, StoreError> {
+        self.load_current_extractor_batches_where(workspace, maximum_payload_bytes, Some(extractor))
+    }
+
+    fn load_current_extractor_batches_where(
+        &self,
+        workspace: &str,
+        maximum_payload_bytes: u64,
+        degradation_extractor: Option<&str>,
+    ) -> Result<Vec<StoredExtractorBatch>, StoreError> {
+        self.consistent_read(|| {
+            self.current_snapshot_id(workspace)?;
+            let maximum_payload_bytes = i64::try_from(maximum_payload_bytes).unwrap_or(i64::MAX);
+            let mut statement = self.connection.prepare(
+                "SELECT
+                    repo_id, checkout_id, path_encoding, relative_path, path_display,
+                    extractor, content_hash, size_bytes, extractor_version, budget_fingerprint,
+                    source_was_lossy, output_count, payload
+                 FROM extractor_batches
+                 WHERE workspace_name = ?1 AND length(payload) <= ?2
+                   AND (?3 IS NULL OR source_was_lossy = 1 OR extractor = ?3)
+                 ORDER BY repo_id, checkout_id, path_encoding, relative_path, extractor",
+            )?;
+            let rows = statement
+                .query_map(
+                    params![workspace, maximum_payload_bytes, degradation_extractor],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, Vec<u8>>(3)?,
+                            row.get::<_, String>(4)?,
+                            row.get::<_, String>(5)?,
+                            row.get::<_, String>(6)?,
+                            row.get::<_, i64>(7)?,
+                            row.get::<_, String>(8)?,
+                            row.get::<_, String>(9)?,
+                            row.get::<_, bool>(10)?,
+                            row.get::<_, i64>(11)?,
+                            row.get::<_, Vec<u8>>(12)?,
+                        ))
+                    },
+                )?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows.into_iter()
+                .map(
+                    |(
+                        repo_id,
+                        checkout_id,
+                        encoding,
+                        bytes,
+                        display,
+                        extractor,
+                        content_hash,
+                        stored_size_bytes,
                         extractor_version,
                         budget_fingerprint,
                         source_was_lossy,
-                        output_count: stored_metric_to_u64(
-                            "extractor_batches.output_count",
-                            stored_output_count,
-                        )?,
+                        stored_output_count,
                         payload,
-                    })
-                },
-            )
-            .collect()
+                    )| {
+                        Ok(StoredExtractorBatch {
+                            source: ArtifactFingerprint {
+                                repo_id: RepoId::new(repo_id),
+                                checkout_id: CheckoutId::new(checkout_id),
+                                path: NativePath {
+                                    encoding: serde_json::from_str(&encoding)?,
+                                    bytes,
+                                    display,
+                                },
+                                extractor,
+                                content_hash,
+                                size_bytes: stored_metric_to_u64(
+                                    "extractor_batches.size_bytes",
+                                    stored_size_bytes,
+                                )?,
+                            },
+                            extractor_version,
+                            budget_fingerprint,
+                            source_was_lossy,
+                            output_count: stored_metric_to_u64(
+                                "extractor_batches.output_count",
+                                stored_output_count,
+                            )?,
+                            payload,
+                        })
+                    },
+                )
+                .collect()
+        })
     }
 
     /// Loads extractor run metrics from the current snapshot.
@@ -1009,76 +1202,80 @@ impl SqliteStore {
         &self,
         workspace: &str,
     ) -> Result<Vec<ExtractorRun>, StoreError> {
-        let snapshot_id = self.current_snapshot_id(workspace)?;
-        let mut statement = self.connection.prepare(
-            "SELECT
-                id, repo_id, checkout_id, extractor, extractor_version, status,
-                discovered_files, parsed_files, skipped_files, elapsed_ms
-             FROM extractor_runs
-             WHERE snapshot_id = ?1
-             ORDER BY repo_id, checkout_id, extractor, id",
-        )?;
-        let rows = statement
-            .query_map([&snapshot_id], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, String>(5)?,
-                    row.get::<_, i64>(6)?,
-                    row.get::<_, i64>(7)?,
-                    row.get::<_, i64>(8)?,
-                    row.get::<_, i64>(9)?,
-                ))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        rows.into_iter()
-            .map(
-                |(
-                    id,
-                    repo_id,
-                    checkout_id,
-                    extractor,
-                    extractor_version,
-                    status,
-                    discovered_files,
-                    parsed_files,
-                    skipped_files,
-                    elapsed_ms,
-                )| {
-                    Ok(ExtractorRun {
+        self.consistent_read(|| {
+            let snapshot_id = self.current_snapshot_id(workspace)?;
+            let mut statement = self.connection.prepare(
+                "SELECT
+                    id, repo_id, checkout_id, extractor, extractor_version, status,
+                    discovered_files, parsed_files, skipped_files, elapsed_ms
+                 FROM extractor_runs
+                 WHERE workspace_name = ?1
+                 ORDER BY repo_id, checkout_id, extractor, id",
+            )?;
+            let rows = statement
+                .query_map([workspace], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, i64>(6)?,
+                        row.get::<_, i64>(7)?,
+                        row.get::<_, i64>(8)?,
+                        row.get::<_, i64>(9)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows.into_iter()
+                .map(
+                    |(
                         id,
-                        snapshot_id: snapshot_id.clone(),
-                        repo_id: RepoId::new(repo_id),
-                        checkout_id: CheckoutId::new(checkout_id),
+                        repo_id,
+                        checkout_id,
                         extractor,
                         extractor_version,
-                        status: serde_json::from_str(&status)?,
-                        discovered_files: stored_metric_to_u64(
-                            "extractor_runs.discovered_files",
-                            discovered_files,
-                        )?,
-                        parsed_files: stored_metric_to_u64(
-                            "extractor_runs.parsed_files",
-                            parsed_files,
-                        )?,
-                        skipped_files: stored_metric_to_u64(
-                            "extractor_runs.skipped_files",
-                            skipped_files,
-                        )?,
-                        elapsed_ms: stored_metric_to_u64("extractor_runs.elapsed_ms", elapsed_ms)?,
-                    })
-                },
-            )
-            .collect()
+                        status,
+                        discovered_files,
+                        parsed_files,
+                        skipped_files,
+                        elapsed_ms,
+                    )| {
+                        Ok(ExtractorRun {
+                            id,
+                            snapshot_id: snapshot_id.clone(),
+                            repo_id: RepoId::new(repo_id),
+                            checkout_id: CheckoutId::new(checkout_id),
+                            extractor,
+                            extractor_version,
+                            status: serde_json::from_str(&status)?,
+                            discovered_files: stored_metric_to_u64(
+                                "extractor_runs.discovered_files",
+                                discovered_files,
+                            )?,
+                            parsed_files: stored_metric_to_u64(
+                                "extractor_runs.parsed_files",
+                                parsed_files,
+                            )?,
+                            skipped_files: stored_metric_to_u64(
+                                "extractor_runs.skipped_files",
+                                skipped_files,
+                            )?,
+                            elapsed_ms: stored_metric_to_u64(
+                                "extractor_runs.elapsed_ms",
+                                elapsed_ms,
+                            )?,
+                        })
+                    },
+                )
+                .collect()
+        })
     }
 
-    /// Replaces manual link declarations for one existing snapshot in a transaction.
+    /// Replaces manual link declarations of the current snapshot in a transaction.
     ///
-    /// Records for other snapshots are retained, preserving historical declarations. Passing an
-    /// empty slice clears only the selected snapshot's declarations.
+    /// Passing an empty slice clears the declarations.
     ///
     /// # Errors
     ///
@@ -1090,7 +1287,7 @@ impl SqliteStore {
         records: &[ManualLinkRecord],
     ) -> Result<(), StoreError> {
         validate_manual_links(snapshot_id, records, None)?;
-        self.require_snapshot(snapshot_id)?;
+        let workspace = self.require_snapshot(snapshot_id)?;
         let transaction = self.connection.transaction()?;
         for record in records {
             for (field, node_id) in [
@@ -1099,9 +1296,9 @@ impl SqliteStore {
             ] {
                 let exists = transaction.query_row(
                     "SELECT EXISTS(
-                        SELECT 1 FROM nodes WHERE snapshot_id = ?1 AND id = ?2
+                        SELECT 1 FROM nodes WHERE workspace_name = ?1 AND id = ?2
                      )",
-                    params![snapshot_id, node_id],
+                    params![workspace, node_id],
                     |row| row.get::<_, bool>(0),
                 )?;
                 if !exists {
@@ -1113,16 +1310,12 @@ impl SqliteStore {
                 }
             }
         }
-        transaction.execute(
-            "DELETE FROM manual_links WHERE snapshot_id = ?1",
-            [snapshot_id],
-        )?;
-        insert_manual_links(&transaction, records)?;
+        replace_manual_links(&transaction, &workspace, records)?;
         transaction.commit()?;
         Ok(())
     }
 
-    /// Loads manual link declarations for one immutable snapshot in stable identifier order.
+    /// Loads manual link declarations of the current snapshot in stable identifier order.
     ///
     /// # Errors
     ///
@@ -1132,72 +1325,74 @@ impl SqliteStore {
         &self,
         snapshot_id: &str,
     ) -> Result<Vec<ManualLinkRecord>, StoreError> {
-        self.require_snapshot(snapshot_id)?;
-        let mut statement = self.connection.prepare(
-            "SELECT id, source_node_id, target_node_id, kind, disposition, reason, decision_json,
-                    config_version
-             FROM manual_links
-             WHERE snapshot_id = ?1
-             ORDER BY id",
-        )?;
-        let rows = statement
-            .query_map([snapshot_id], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, String>(5)?,
-                    row.get::<_, Vec<u8>>(6)?,
-                    row.get::<_, i64>(7)?,
-                ))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        let records = rows
-            .into_iter()
-            .map(
-                |(id, source, target, kind, disposition, reason, decision_json, config_version)| {
-                    let disposition =
-                        ManualLinkDisposition::from_stored(&disposition).ok_or_else(|| {
+        self.consistent_read(|| {
+            let workspace = self.require_snapshot(snapshot_id)?;
+            let mut statement = self.connection.prepare(
+                "SELECT id, source_node_id, target_node_id, kind, disposition, reason, decision_json,
+                        config_version
+                 FROM manual_links
+                 WHERE workspace_name = ?1
+                 ORDER BY id",
+            )?;
+            let rows = statement
+                .query_map([workspace], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, Vec<u8>>(6)?,
+                        row.get::<_, i64>(7)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            let records = rows
+                .into_iter()
+                .map(
+                    |(id, source, target, kind, disposition, reason, decision_json, config_version)| {
+                        let disposition =
+                            ManualLinkDisposition::from_stored(&disposition).ok_or_else(|| {
+                                malformed_stored_data(
+                                    format!("manual link `{id}` in snapshot `{snapshot_id}`"),
+                                    format!("unknown disposition `{disposition}`"),
+                                )
+                            })?;
+                        let config_version = u32::try_from(config_version).map_err(|_| {
+                            StoreError::IntegerOutOfRange {
+                                field: "manual_links.config_version",
+                                value: i128::from(config_version),
+                            }
+                        })?;
+                        let decision = serde_json::from_slice(&decision_json).map_err(|error| {
                             malformed_stored_data(
-                                format!("manual link `{id}` in snapshot `{snapshot_id}`"),
-                                format!("unknown disposition `{disposition}`"),
+                                format!("manual link `{id}` decision in snapshot `{snapshot_id}`"),
+                                error.to_string(),
                             )
                         })?;
-                    let config_version = u32::try_from(config_version).map_err(|_| {
-                        StoreError::IntegerOutOfRange {
-                            field: "manual_links.config_version",
-                            value: i128::from(config_version),
-                        }
-                    })?;
-                    let decision = serde_json::from_slice(&decision_json).map_err(|error| {
-                        malformed_stored_data(
-                            format!("manual link `{id}` decision in snapshot `{snapshot_id}`"),
-                            error.to_string(),
-                        )
-                    })?;
-                    Ok(ManualLinkRecord {
-                        id,
-                        snapshot_id: snapshot_id.to_owned(),
-                        source_node_id: NodeId::new(source),
-                        target_node_id: NodeId::new(target),
-                        kind,
-                        disposition,
-                        reason,
-                        decision,
-                        config_version,
-                    })
-                },
-            )
-            .collect::<Result<Vec<_>, StoreError>>()?;
-        validate_manual_links(snapshot_id, &records, None).map_err(|error| {
-            malformed_stored_data(
-                format!("manual links in snapshot `{snapshot_id}`"),
-                error.to_string(),
-            )
-        })?;
-        Ok(records)
+                        Ok(ManualLinkRecord {
+                            id,
+                            snapshot_id: snapshot_id.to_owned(),
+                            source_node_id: NodeId::new(source),
+                            target_node_id: NodeId::new(target),
+                            kind,
+                            disposition,
+                            reason,
+                            decision,
+                            config_version,
+                        })
+                    },
+                )
+                .collect::<Result<Vec<_>, StoreError>>()?;
+            validate_manual_links(snapshot_id, &records, None).map_err(|error| {
+                malformed_stored_data(
+                    format!("manual links in snapshot `{snapshot_id}`"),
+                    error.to_string(),
+                )
+            })?;
+            Ok(records)
+        })
     }
 
     /// Inserts or replaces one source-free provider capability report.
@@ -1459,26 +1654,28 @@ impl SqliteStore {
         &self,
         workspace: &str,
     ) -> Result<StoredSnapshotSummary, StoreError> {
-        let snapshot_id = self.current_snapshot_id(workspace)?;
-        let (node_count, edge_count, evidence_count) = self.connection.query_row(
-            "SELECT
-                (SELECT COUNT(*) FROM nodes WHERE snapshot_id = ?1),
-                (SELECT COUNT(*) FROM edges WHERE snapshot_id = ?1),
-                (SELECT COUNT(*) FROM evidence WHERE snapshot_id = ?1)",
-            [&snapshot_id],
-            |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, i64>(2)?,
-                ))
-            },
-        )?;
-        Ok(StoredSnapshotSummary {
-            snapshot_id,
-            node_count: count_to_usize("nodes", node_count)?,
-            edge_count: count_to_usize("edges", edge_count)?,
-            evidence_count: count_to_usize("evidence", evidence_count)?,
+        self.consistent_read(|| {
+            let snapshot_id = self.current_snapshot_id(workspace)?;
+            let (node_count, edge_count, evidence_count) = self.connection.query_row(
+                "SELECT
+                    (SELECT COUNT(*) FROM nodes WHERE workspace_name = ?1),
+                    (SELECT COUNT(*) FROM edges WHERE workspace_name = ?1),
+                    (SELECT COUNT(*) FROM evidence WHERE workspace_name = ?1)",
+                [workspace],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )?;
+            Ok(StoredSnapshotSummary {
+                snapshot_id,
+                node_count: count_to_usize("nodes", node_count)?,
+                edge_count: count_to_usize("edges", edge_count)?,
+                evidence_count: count_to_usize("evidence", evidence_count)?,
+            })
         })
     }
 
@@ -1508,10 +1705,20 @@ impl SqliteStore {
     where
         F: FnMut(u64),
     {
-        self.publish_snapshot_with_progress_and_coverage(batch, &[], progress)
+        self.publish_snapshot_with_progress_and_coverage(
+            batch,
+            None,
+            &[],
+            &HttpLinkReport::default(),
+            progress,
+        )
     }
 
-    /// Publishes one atomic snapshot with repository-scoped coverage gaps.
+    /// Publishes one atomic snapshot with repository-scoped coverage gaps and the HTTP link
+    /// coverage of its graph.
+    ///
+    /// With `artifact_delta`, only the listed artifact rows are written; without it, every
+    /// stored fingerprint and extractor batch is compared with the candidate.
     ///
     /// # Errors
     ///
@@ -1519,7 +1726,9 @@ impl SqliteStore {
     pub fn publish_snapshot_with_progress_and_coverage<F>(
         &mut self,
         batch: SnapshotBatch<'_>,
+        artifact_delta: Option<ArtifactDelta<'_>>,
         coverage_gaps: &[RepositoryCoverageGap],
+        http_links: &HttpLinkReport,
         mut progress: F,
     ) -> Result<(), StoreError>
     where
@@ -1543,51 +1752,24 @@ impl SqliteStore {
         validate_community_snapshot(snapshot_id, nodes, community_snapshot)?;
         let transaction = self.connection.transaction()?;
         upsert_registry(&transaction, workspace)?;
-        transaction.execute(
-            "DELETE FROM query_cache WHERE workspace_name = ?1",
-            [&workspace.name],
-        )?;
-        transaction.execute(
-            "UPDATE repo_snapshots SET is_current = 0 WHERE workspace_name = ?1",
-            [&workspace.name],
-        )?;
-        transaction.execute("DELETE FROM repo_snapshots WHERE id = ?1", [snapshot_id])?;
-        transaction.execute(
-            "INSERT INTO repo_snapshots(id, workspace_name, is_current) VALUES (?1, ?2, 0)",
-            params![snapshot_id, workspace.name],
-        )?;
-
-        insert_graph(
+        publish_current_graph(
             &transaction,
-            snapshot_id,
-            nodes,
-            edges,
-            evidence,
+            &PublicationInput {
+                workspace,
+                snapshot_id,
+                nodes,
+                edges,
+                evidence,
+                fingerprints,
+                extractor_batches,
+                artifact_delta,
+                extractor_runs,
+                manual_links,
+                community_snapshot,
+                coverage_gaps,
+                http_links,
+            },
             &mut progress,
-        )?;
-        insert_manual_links(&transaction, manual_links)?;
-        progress(u64::try_from(manual_links.len()).unwrap_or(u64::MAX));
-        insert_incremental_state(
-            &transaction,
-            snapshot_id,
-            fingerprints,
-            extractor_runs,
-            &mut progress,
-        )?;
-        insert_extractor_batches(&transaction, snapshot_id, extractor_batches, &mut progress)?;
-        insert_freshness(
-            &transaction,
-            snapshot_id,
-            workspace,
-            extractor_batches,
-            coverage_gaps,
-        )?;
-        if let Some(community_snapshot) = community_snapshot {
-            insert_community_snapshot(&transaction, community_snapshot, &mut progress)?;
-        }
-        transaction.execute(
-            "UPDATE repo_snapshots SET is_current = 1 WHERE id = ?1",
-            [snapshot_id],
         )?;
         transaction.commit()?;
         Ok(())
@@ -1602,8 +1784,10 @@ impl SqliteStore {
         &self,
         workspace: &str,
     ) -> Result<(Vec<Node>, Vec<Edge>), StoreError> {
-        let snapshot_id = self.current_snapshot_id(workspace)?;
-        self.load_graph_snapshot(&snapshot_id)
+        self.consistent_read(|| {
+            let snapshot_id = self.current_snapshot_id(workspace)?;
+            self.load_graph_snapshot(&snapshot_id)
+        })
     }
 
     /// Loads nodes and edges from one immutable graph snapshot.
@@ -1618,79 +1802,81 @@ impl SqliteStore {
         &self,
         snapshot_id: &str,
     ) -> Result<(Vec<Node>, Vec<Edge>), StoreError> {
-        self.require_snapshot(snapshot_id)?;
-        let mut node_statement = self.connection.prepare(
-            "SELECT id, kind, repo_id, stable_key, label
-             FROM nodes WHERE snapshot_id = ?1 ORDER BY id",
-        )?;
-        let node_rows = node_statement
-            .query_map([&snapshot_id], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                ))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        let nodes = node_rows
-            .into_iter()
-            .map(|(id, kind, repo_id, stable_key, label)| {
-                Ok(Node {
-                    id: NodeId::new(id),
-                    kind: serde_json::from_str::<NodeKind>(&kind)?,
-                    repo_id: repo_id.map(RepoId::new),
-                    stable_key,
-                    label,
+        self.consistent_read(|| {
+            let workspace = self.require_snapshot(snapshot_id)?;
+            let mut node_statement = self.connection.prepare(
+                "SELECT id, kind, repo_id, stable_key, label
+                 FROM nodes WHERE workspace_name = ?1 ORDER BY id",
+            )?;
+            let node_rows = node_statement
+                .query_map([&workspace], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            let nodes = node_rows
+                .into_iter()
+                .map(|(id, kind, repo_id, stable_key, label)| {
+                    Ok(Node {
+                        id: NodeId::new(id),
+                        kind: serde_json::from_str::<NodeKind>(&kind)?,
+                        repo_id: repo_id.map(RepoId::new),
+                        stable_key,
+                        label,
+                    })
                 })
-            })
-            .collect::<Result<Vec<_>, StoreError>>()?;
+                .collect::<Result<Vec<_>, StoreError>>()?;
 
-        let mut edge_statement = self.connection.prepare(
-            "SELECT id, source_node_id, target_node_id, kind, confidence, epistemic_status
-             FROM edges WHERE snapshot_id = ?1 ORDER BY id",
-        )?;
-        let edge_rows = edge_statement
-            .query_map([&snapshot_id], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, f32>(4)?,
-                    row.get::<_, String>(5)?,
-                ))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        let mut evidence_statement = self.connection.prepare(
-            "SELECT edge_id, evidence_id FROM edge_evidence
-             WHERE snapshot_id = ?1 ORDER BY edge_id, evidence_id",
-        )?;
-        let mut evidence_by_edge = BTreeMap::<String, Vec<EvidenceId>>::new();
-        for result in evidence_statement.query_map([&snapshot_id], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })? {
-            let (edge_id, evidence_id) = result?;
-            evidence_by_edge
-                .entry(edge_id)
-                .or_default()
-                .push(EvidenceId::new(evidence_id));
-        }
-        let mut edges = Vec::with_capacity(edge_rows.len());
-        for (id, source, target, kind, confidence, status) in edge_rows {
-            let evidence = evidence_by_edge.remove(&id).unwrap_or_default();
-            edges.push(Edge {
-                id: EdgeId::new(id),
-                source: NodeId::new(source),
-                target: NodeId::new(target),
-                kind: serde_json::from_str::<EdgeKind>(&kind)?,
-                confidence,
-                status: serde_json::from_str::<EpistemicStatus>(&status)?,
-                evidence,
-            });
-        }
-        Ok((nodes, edges))
+            let mut edge_statement = self.connection.prepare(
+                "SELECT id, source_node_id, target_node_id, kind, confidence, epistemic_status
+                 FROM edges WHERE workspace_name = ?1 ORDER BY id",
+            )?;
+            let edge_rows = edge_statement
+                .query_map([&workspace], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, f32>(4)?,
+                        row.get::<_, String>(5)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut evidence_statement = self.connection.prepare(
+                "SELECT edge_id, evidence_id FROM edge_evidence
+                 WHERE workspace_name = ?1 ORDER BY edge_id, evidence_id",
+            )?;
+            let mut evidence_by_edge = BTreeMap::<String, Vec<EvidenceId>>::new();
+            for result in evidence_statement.query_map([&workspace], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })? {
+                let (edge_id, evidence_id) = result?;
+                evidence_by_edge
+                    .entry(edge_id)
+                    .or_default()
+                    .push(EvidenceId::new(evidence_id));
+            }
+            let mut edges = Vec::with_capacity(edge_rows.len());
+            for (id, source, target, kind, confidence, status) in edge_rows {
+                let evidence = evidence_by_edge.remove(&id).unwrap_or_default();
+                edges.push(Edge {
+                    id: EdgeId::new(id),
+                    source: NodeId::new(source),
+                    target: NodeId::new(target),
+                    kind: serde_json::from_str::<EdgeKind>(&kind)?,
+                    confidence,
+                    status: serde_json::from_str::<EpistemicStatus>(&status)?,
+                    evidence,
+                });
+            }
+            Ok((nodes, edges))
+        })
     }
 
     /// Loads a bounded, ordered page of current nodes for exact kinds and returns the exact total.
@@ -1705,8 +1891,10 @@ impl SqliteStore {
         kinds: &[NodeKind],
         limit: usize,
     ) -> Result<(usize, Vec<Node>), StoreError> {
-        let snapshot_id = self.current_snapshot_id(workspace)?;
-        self.load_nodes_by_kinds_snapshot(&snapshot_id, kinds, limit)
+        self.consistent_read(|| {
+            let snapshot_id = self.current_snapshot_id(workspace)?;
+            self.load_nodes_by_kinds_snapshot(&snapshot_id, kinds, limit)
+        })
     }
 
     /// Loads a bounded, ordered page of nodes for exact kinds from one immutable snapshot.
@@ -1721,66 +1909,69 @@ impl SqliteStore {
         kinds: &[NodeKind],
         limit: usize,
     ) -> Result<(usize, Vec<Node>), StoreError> {
-        if kinds.is_empty() || limit == 0 {
-            return Ok((0, Vec::new()));
-        }
-        self.require_snapshot(snapshot_id)?;
-        let kind_values = kinds
-            .iter()
-            .map(serde_json::to_string)
-            .collect::<Result<Vec<_>, _>>()?;
-        let placeholders = (2..=kind_values.len() + 1)
-            .map(|index| format!("?{index}"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let mut parameters = Vec::<rusqlite::types::Value>::with_capacity(kind_values.len() + 2);
-        parameters.push(snapshot_id.to_owned().into());
-        parameters.extend(kind_values.into_iter().map(rusqlite::types::Value::Text));
-        let count_sql = format!(
-            "SELECT COUNT(*) FROM nodes WHERE snapshot_id = ?1 AND kind IN ({placeholders})"
-        );
-        let count = self.connection.query_row(
-            &count_sql,
-            rusqlite::params_from_iter(parameters.iter()),
-            |row| row.get::<_, i64>(0),
-        )?;
-        let total = count_to_usize("nodes", count)?;
-        let limit = i64::try_from(limit).map_err(|_| StoreError::IntegerOutOfRange {
-            field: "nodes.limit",
-            value: i128::try_from(limit).unwrap_or(i128::MAX),
-        })?;
-        let limit_parameter = parameters.len() + 1;
-        parameters.push(rusqlite::types::Value::Integer(limit));
-        let select_sql = format!(
-            "SELECT id, kind, repo_id, stable_key, label FROM nodes
-             WHERE snapshot_id = ?1 AND kind IN ({placeholders})
-             ORDER BY id LIMIT ?{limit_parameter}"
-        );
-        let mut statement = self.connection.prepare(&select_sql)?;
-        let rows = statement
-            .query_map(rusqlite::params_from_iter(parameters.iter()), |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                ))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        let nodes = rows
-            .into_iter()
-            .map(|(id, kind, repo_id, stable_key, label)| {
-                Ok(Node {
-                    id: NodeId::new(id),
-                    kind: serde_json::from_str::<NodeKind>(&kind)?,
-                    repo_id: repo_id.map(RepoId::new),
-                    stable_key,
-                    label,
+        self.consistent_read(|| {
+            if kinds.is_empty() || limit == 0 {
+                return Ok((0, Vec::new()));
+            }
+            let workspace = self.require_snapshot(snapshot_id)?;
+            let kind_values = kinds
+                .iter()
+                .map(serde_json::to_string)
+                .collect::<Result<Vec<_>, _>>()?;
+            let placeholders = (2..=kind_values.len() + 1)
+                .map(|index| format!("?{index}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let mut parameters =
+                Vec::<rusqlite::types::Value>::with_capacity(kind_values.len() + 2);
+            parameters.push(workspace.into());
+            parameters.extend(kind_values.into_iter().map(rusqlite::types::Value::Text));
+            let count_sql = format!(
+                "SELECT COUNT(*) FROM nodes WHERE workspace_name = ?1 AND kind IN ({placeholders})"
+            );
+            let count = self.connection.query_row(
+                &count_sql,
+                rusqlite::params_from_iter(parameters.iter()),
+                |row| row.get::<_, i64>(0),
+            )?;
+            let total = count_to_usize("nodes", count)?;
+            let limit = i64::try_from(limit).map_err(|_| StoreError::IntegerOutOfRange {
+                field: "nodes.limit",
+                value: i128::try_from(limit).unwrap_or(i128::MAX),
+            })?;
+            let limit_parameter = parameters.len() + 1;
+            parameters.push(rusqlite::types::Value::Integer(limit));
+            let select_sql = format!(
+                "SELECT id, kind, repo_id, stable_key, label FROM nodes
+                 WHERE workspace_name = ?1 AND kind IN ({placeholders})
+                 ORDER BY id LIMIT ?{limit_parameter}"
+            );
+            let mut statement = self.connection.prepare(&select_sql)?;
+            let rows = statement
+                .query_map(rusqlite::params_from_iter(parameters.iter()), |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            let nodes = rows
+                .into_iter()
+                .map(|(id, kind, repo_id, stable_key, label)| {
+                    Ok(Node {
+                        id: NodeId::new(id),
+                        kind: serde_json::from_str::<NodeKind>(&kind)?,
+                        repo_id: repo_id.map(RepoId::new),
+                        stable_key,
+                        label,
+                    })
                 })
-            })
-            .collect::<Result<Vec<_>, StoreError>>()?;
-        Ok((total, nodes))
+                .collect::<Result<Vec<_>, StoreError>>()?;
+            Ok((total, nodes))
+        })
     }
 
     /// Loads evidence metadata for the current workspace snapshot.
@@ -1789,8 +1980,10 @@ impl SqliteStore {
     ///
     /// Returns [`StoreError`] when the current snapshot is absent or stored tags are malformed.
     pub fn load_current_evidence(&self, workspace: &str) -> Result<Vec<Evidence>, StoreError> {
-        let snapshot_id = self.current_snapshot_id(workspace)?;
-        self.load_evidence_snapshot(&snapshot_id)
+        self.consistent_read(|| {
+            let snapshot_id = self.current_snapshot_id(workspace)?;
+            self.load_evidence_snapshot(&snapshot_id)
+        })
     }
 
     /// Loads one exact evidence record from the current workspace snapshot without scanning the
@@ -1804,102 +1997,33 @@ impl SqliteStore {
         workspace: &str,
         evidence_id: &str,
     ) -> Result<Option<Evidence>, StoreError> {
-        let snapshot_id = self.current_snapshot_id(workspace)?;
-        let row = self
-            .connection
-            .query_row(
-                "SELECT id, repo_id, file_path, start_line, end_line, extractor, extractor_version,
-                        provenance, confidence, observed_at_commit, content_hash
-                 FROM evidence WHERE snapshot_id = ?1 AND id = ?2",
-                params![snapshot_id, evidence_id],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, Option<String>>(1)?,
-                        row.get::<_, Option<String>>(2)?,
-                        row.get::<_, Option<u32>>(3)?,
-                        row.get::<_, Option<u32>>(4)?,
-                        row.get::<_, String>(5)?,
-                        row.get::<_, String>(6)?,
-                        row.get::<_, String>(7)?,
-                        row.get::<_, f32>(8)?,
-                        row.get::<_, Option<String>>(9)?,
-                        row.get::<_, Option<String>>(10)?,
-                    ))
-                },
-            )
-            .optional()?;
-        row.map(
-            |(
-                id,
-                repo_id,
-                file_path,
-                start_line,
-                end_line,
-                extractor,
-                extractor_version,
-                provenance,
-                confidence,
-                observed_at_commit,
-                content_hash,
-            )| {
-                let provenance = serde_json::from_str(&provenance).map_err(|error| {
-                    malformed_stored_data(format!("evidence `{id}`"), error.to_string())
-                })?;
-                Ok(Evidence {
-                    id: EvidenceId::new(id),
-                    repo_id: repo_id.map(RepoId::new),
-                    file_path,
-                    start_line,
-                    end_line,
-                    extractor,
-                    extractor_version,
-                    provenance,
-                    confidence,
-                    observed_at_commit,
-                    content_hash,
-                    note: None,
-                })
-            },
-        )
-        .transpose()
-    }
-
-    /// Loads evidence metadata for one immutable graph snapshot.
-    ///
-    /// Line ranges, extractor versions, commits, and notes predate their normalized storage
-    /// columns and therefore remain absent in this projection.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`StoreError::SnapshotMissing`] when the snapshot is absent or
-    /// [`StoreError::MalformedStoredData`] when a stored provenance tag is invalid.
-    pub fn load_evidence_snapshot(&self, snapshot_id: &str) -> Result<Vec<Evidence>, StoreError> {
-        self.require_snapshot(snapshot_id)?;
-        let mut statement = self.connection.prepare(
-            "SELECT id, repo_id, file_path, start_line, end_line, extractor, extractor_version,
-                    provenance, confidence, observed_at_commit, content_hash
-             FROM evidence WHERE snapshot_id = ?1 ORDER BY id",
-        )?;
-        let rows = statement
-            .query_map([snapshot_id], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                    row.get::<_, Option<u32>>(3)?,
-                    row.get::<_, Option<u32>>(4)?,
-                    row.get::<_, String>(5)?,
-                    row.get::<_, String>(6)?,
-                    row.get::<_, String>(7)?,
-                    row.get::<_, f32>(8)?,
-                    row.get::<_, Option<String>>(9)?,
-                    row.get::<_, Option<String>>(10)?,
-                ))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        rows.into_iter()
-            .map(
+        self.consistent_read(|| {
+            self.current_snapshot_id(workspace)?;
+            let row = self
+                .connection
+                .query_row(
+                    "SELECT id, repo_id, file_path, start_line, end_line, extractor, extractor_version,
+                            provenance, confidence, observed_at_commit, content_hash
+                     FROM evidence WHERE workspace_name = ?1 AND id = ?2",
+                    params![workspace, evidence_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                            row.get::<_, Option<u32>>(3)?,
+                            row.get::<_, Option<u32>>(4)?,
+                            row.get::<_, String>(5)?,
+                            row.get::<_, String>(6)?,
+                            row.get::<_, String>(7)?,
+                            row.get::<_, f32>(8)?,
+                            row.get::<_, Option<String>>(9)?,
+                            row.get::<_, Option<String>>(10)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            row.map(
                 |(
                     id,
                     repo_id,
@@ -1932,7 +2056,79 @@ impl SqliteStore {
                     })
                 },
             )
-            .collect()
+            .transpose()
+        })
+    }
+
+    /// Loads evidence metadata for one current graph snapshot.
+    ///
+    /// Evidence notes are not persisted and remain absent in this projection.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::SnapshotMissing`] when the snapshot is absent or
+    /// [`StoreError::MalformedStoredData`] when a stored provenance tag is invalid.
+    pub fn load_evidence_snapshot(&self, snapshot_id: &str) -> Result<Vec<Evidence>, StoreError> {
+        self.consistent_read(|| {
+            let workspace = self.require_snapshot(snapshot_id)?;
+            let mut statement = self.connection.prepare(
+                "SELECT id, repo_id, file_path, start_line, end_line, extractor, extractor_version,
+                        provenance, confidence, observed_at_commit, content_hash
+                 FROM evidence WHERE workspace_name = ?1 ORDER BY id",
+            )?;
+            let rows = statement
+                .query_map([workspace], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<u32>>(3)?,
+                        row.get::<_, Option<u32>>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, String>(7)?,
+                        row.get::<_, f32>(8)?,
+                        row.get::<_, Option<String>>(9)?,
+                        row.get::<_, Option<String>>(10)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows.into_iter()
+                .map(
+                    |(
+                        id,
+                        repo_id,
+                        file_path,
+                        start_line,
+                        end_line,
+                        extractor,
+                        extractor_version,
+                        provenance,
+                        confidence,
+                        observed_at_commit,
+                        content_hash,
+                    )| {
+                        let provenance = serde_json::from_str(&provenance).map_err(|error| {
+                            malformed_stored_data(format!("evidence `{id}`"), error.to_string())
+                        })?;
+                        Ok(Evidence {
+                            id: EvidenceId::new(id),
+                            repo_id: repo_id.map(RepoId::new),
+                            file_path,
+                            start_line,
+                            end_line,
+                            extractor,
+                            extractor_version,
+                            provenance,
+                            confidence,
+                            observed_at_commit,
+                            content_hash,
+                            note: None,
+                        })
+                    },
+                )
+                .collect()
+        })
     }
 
     /// Searches current snapshot node labels and stable keys using bounded FTS5.
@@ -1975,8 +2171,10 @@ impl SqliteStore {
         query: &str,
         limit: usize,
     ) -> Result<Vec<StoredNodeSearchHit>, StoreError> {
-        let snapshot_id = self.current_snapshot_id(workspace)?;
-        self.search_snapshot_nodes_ranked(&snapshot_id, query, limit)
+        self.consistent_read(|| {
+            let snapshot_id = self.current_snapshot_id(workspace)?;
+            self.search_snapshot_nodes_ranked(&snapshot_id, query, limit)
+        })
     }
 
     /// Searches nodes in one immutable snapshot and includes the native FTS5 relevance score.
@@ -1991,73 +2189,119 @@ impl SqliteStore {
         query: &str,
         limit: usize,
     ) -> Result<Vec<StoredNodeSearchHit>, StoreError> {
-        self.require_snapshot(snapshot_id)?;
-        let query = query.trim();
-        if query.is_empty() {
-            return Err(StoreError::InvalidSearchQuery(
-                "query must not be empty".to_owned(),
-            ));
-        }
-        if query.len() > NODE_SEARCH_QUERY_MAX_BYTES {
-            return Err(StoreError::InvalidSearchQuery(format!(
-                "query must not exceed {NODE_SEARCH_QUERY_MAX_BYTES} UTF-8 bytes"
-            )));
-        }
-        if !(1..=500).contains(&limit) {
-            return Err(StoreError::InvalidSearchQuery(
-                "limit must be between 1 and 500".to_owned(),
-            ));
-        }
-        let phrase = bounded_fts_disjunction(query);
-        let limit = i64::try_from(limit).map_err(|_| StoreError::IntegerOutOfRange {
-            field: "search.limit",
-            value: i128::try_from(limit).unwrap_or(i128::MAX),
-        })?;
-        let mut statement = self.connection.prepare(
-            "SELECT n.id, n.kind, n.repo_id, n.stable_key, n.label, bm25(nodes_fts)
-             FROM nodes_fts
-             JOIN nodes n
-               ON n.snapshot_id = nodes_fts.snapshot_id AND n.id = nodes_fts.node_id
-             WHERE nodes_fts.snapshot_id = ?1
-               AND nodes_fts MATCH ?2
-             ORDER BY bm25(nodes_fts), n.id
-             LIMIT ?3",
-        )?;
-        let rows = statement
-            .query_map(params![snapshot_id, phrase, limit], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, f64>(5)?,
-                ))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        rows.into_iter()
-            .map(|(id, kind, repo_id, stable_key, label, fts_rank)| {
-                if !fts_rank.is_finite() {
-                    return Err(malformed_stored_data(
-                        format!("FTS hit `{id}`"),
-                        "rank is not finite",
-                    ));
-                }
-                let kind = serde_json::from_str(&kind).map_err(|error| {
-                    malformed_stored_data(format!("node `{id}`"), error.to_string())
-                })?;
-                Ok(StoredNodeSearchHit {
-                    node: Node {
-                        id: NodeId::new(id),
-                        kind,
-                        repo_id: repo_id.map(RepoId::new),
-                        stable_key,
-                        label,
-                    },
-                    fts_rank,
+        self.consistent_read(|| {
+            let workspace = self.require_snapshot(snapshot_id)?;
+            let query = query.trim();
+            if query.is_empty() {
+                return Err(StoreError::InvalidSearchQuery(
+                    "query must not be empty".to_owned(),
+                ));
+            }
+            if query.len() > NODE_SEARCH_QUERY_MAX_BYTES {
+                return Err(StoreError::InvalidSearchQuery(format!(
+                    "query must not exceed {NODE_SEARCH_QUERY_MAX_BYTES} UTF-8 bytes"
+                )));
+            }
+            if !(1..=500).contains(&limit) {
+                return Err(StoreError::InvalidSearchQuery(
+                    "limit must be between 1 and 500".to_owned(),
+                ));
+            }
+            let phrase = bounded_fts_disjunction(query);
+            let limit = i64::try_from(limit).map_err(|_| StoreError::IntegerOutOfRange {
+                field: "search.limit",
+                value: i128::try_from(limit).unwrap_or(i128::MAX),
+            })?;
+            let mut statement = self.connection.prepare(
+                "SELECT n.id, n.kind, n.repo_id, n.stable_key, n.label, bm25(nodes_fts)
+                 FROM nodes_fts
+                 JOIN nodes n ON n.node_rowid = nodes_fts.rowid
+                 WHERE n.workspace_name = ?1
+                   AND nodes_fts MATCH ?2
+                 ORDER BY bm25(nodes_fts), n.id
+                 LIMIT ?3",
+            )?;
+            let rows = statement
+                .query_map(params![workspace, phrase, limit], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, f64>(5)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows.into_iter()
+                .map(|(id, kind, repo_id, stable_key, label, fts_rank)| {
+                    if !fts_rank.is_finite() {
+                        return Err(malformed_stored_data(
+                            format!("FTS hit `{id}`"),
+                            "rank is not finite",
+                        ));
+                    }
+                    let kind = serde_json::from_str(&kind).map_err(|error| {
+                        malformed_stored_data(format!("node `{id}`"), error.to_string())
+                    })?;
+                    Ok(StoredNodeSearchHit {
+                        node: Node {
+                            id: NodeId::new(id),
+                            kind,
+                            repo_id: repo_id.map(RepoId::new),
+                            stable_key,
+                            label,
+                        },
+                        fts_rank,
+                    })
                 })
-            })
-            .collect()
+                .collect()
+        })
+    }
+
+    /// Returns the current snapshot identifier, or `None` before the first publication.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when the query fails.
+    pub fn find_current_snapshot_id(&self, workspace: &str) -> Result<Option<String>, StoreError> {
+        match self.current_snapshot_id(workspace) {
+            Ok(snapshot_id) => Ok(Some(snapshot_id)),
+            Err(StoreError::CurrentSnapshotMissing(_)) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Counts the communities of the current snapshot without loading their memberships.
+    ///
+    /// Returns `None` when no current snapshot or community analysis exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when the query fails or the count is out of range.
+    pub fn current_community_count(&self, workspace: &str) -> Result<Option<usize>, StoreError> {
+        self.consistent_read(|| {
+            let Some(snapshot_id) = self.find_current_snapshot_id(workspace)? else {
+                return Ok(None);
+            };
+            let count = self
+                .connection
+                .query_row(
+                    "SELECT (SELECT COUNT(*) FROM communities WHERE snapshot_id = ?1)
+                     FROM community_snapshots WHERE snapshot_id = ?1",
+                    [&snapshot_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()?;
+            count
+                .map(|count| {
+                    usize::try_from(count).map_err(|_| StoreError::IntegerOutOfRange {
+                        field: "communities.count",
+                        value: i128::from(count),
+                    })
+                })
+                .transpose()
+        })
     }
 
     /// Loads the community analysis associated with the current workspace snapshot.
@@ -2070,30 +2314,46 @@ impl SqliteStore {
         &self,
         workspace: &str,
     ) -> Result<CommunitySnapshot, StoreError> {
-        let snapshot_id = self.current_snapshot_id(workspace)?;
-        self.load_community_snapshot(&snapshot_id)
+        self.consistent_read(|| {
+            let snapshot_id = self.current_snapshot_id(workspace)?;
+            self.load_community_snapshot(&snapshot_id)
+        })
     }
 
-    /// Loads one immutable community analysis in deterministic identifier order.
+    /// Loads one retained community analysis in deterministic identifier order.
+    ///
+    /// The analyses of the current and the previous snapshot of each workspace are retained.
     ///
     /// # Errors
     ///
-    /// Returns [`StoreError::SnapshotMissing`] when the graph snapshot does not exist,
-    /// [`StoreError::CommunitySnapshotMissing`] when it has no analysis, or
-    /// [`StoreError::MalformedStoredData`] when persisted rows violate domain invariants.
+    /// Returns [`StoreError::SnapshotMissing`] when neither a graph nor an analysis exists for the
+    /// snapshot, [`StoreError::CommunitySnapshotMissing`] when the current graph has no analysis,
+    /// or [`StoreError::MalformedStoredData`] when persisted rows violate domain invariants.
     pub fn load_community_snapshot(
         &self,
         snapshot_id: &str,
     ) -> Result<CommunitySnapshot, StoreError> {
-        self.require_snapshot(snapshot_id)?;
-        load_community_snapshot(&self.connection, snapshot_id)
+        self.consistent_read(|| {
+            let retained = self
+                .connection
+                .query_row(
+                    "SELECT 1 FROM community_snapshots WHERE snapshot_id = ?1",
+                    [snapshot_id],
+                    |_| Ok(()),
+                )
+                .optional()?;
+            if retained.is_none() {
+                self.require_snapshot(snapshot_id)?;
+            }
+            load_community_snapshot(&self.connection, snapshot_id)
+        })
     }
 
-    /// Loads an immutable community analysis only when it belongs to the requested workspace.
+    /// Loads a retained community analysis only when it belongs to the requested workspace.
     ///
     /// # Errors
     ///
-    /// Returns [`StoreError::SnapshotMissing`] when the snapshot is absent or belongs to another
+    /// Returns [`StoreError::SnapshotMissing`] when the analysis is absent or belongs to another
     /// workspace, preserving workspace isolation at read-only delivery boundaries.
     pub fn load_workspace_community_snapshot(
         &self,
@@ -2103,7 +2363,7 @@ impl SqliteStore {
         let belongs = self
             .connection
             .query_row(
-                "SELECT 1 FROM repo_snapshots WHERE id = ?1 AND workspace_name = ?2",
+                "SELECT 1 FROM community_snapshots WHERE snapshot_id = ?1 AND workspace_name = ?2",
                 params![snapshot_id, workspace],
                 |_| Ok(()),
             )
@@ -2112,11 +2372,36 @@ impl SqliteStore {
         load_community_snapshot(&self.connection, snapshot_id)
     }
 
+    /// Runs related reads in one deferred transaction so they observe the same publication.
+    ///
+    /// Include snapshot selection and all dependent reads in the callback: a concurrent writer
+    /// can replace the current snapshot after this transaction ends. Nested calls reuse the
+    /// existing transaction. The callback must only perform reads on this connection.
+    ///
+    /// # Errors
+    ///
+    /// Returns errors from the callback or transaction setup/commit. A failed callback rolls back
+    /// a transaction started here; an existing transaction remains owned by its caller.
+    pub fn consistent_read<T, E>(&self, read: impl FnOnce() -> Result<T, E>) -> Result<T, E>
+    where
+        E: From<StoreError>,
+    {
+        if !self.connection.is_autocommit() {
+            return read();
+        }
+        let transaction = self
+            .connection
+            .unchecked_transaction()
+            .map_err(StoreError::from)?;
+        let value = read()?;
+        transaction.commit().map_err(StoreError::from)?;
+        Ok(value)
+    }
+
     fn current_snapshot_id(&self, workspace: &str) -> Result<String, StoreError> {
         self.connection
             .query_row(
-                "SELECT id FROM repo_snapshots
-                 WHERE workspace_name = ?1 AND is_current = 1",
+                "SELECT id FROM repo_snapshots WHERE workspace_name = ?1",
                 [workspace],
                 |row| row.get::<_, String>(0),
             )
@@ -2124,16 +2409,16 @@ impl SqliteStore {
             .ok_or_else(|| StoreError::CurrentSnapshotMissing(workspace.to_owned()))
     }
 
-    fn require_snapshot(&self, snapshot_id: &str) -> Result<(), StoreError> {
-        let exists = self
-            .connection
+    /// Resolves a current snapshot identifier to the workspace that owns it.
+    fn require_snapshot(&self, snapshot_id: &str) -> Result<String, StoreError> {
+        self.connection
             .query_row(
-                "SELECT 1 FROM repo_snapshots WHERE id = ?1",
+                "SELECT workspace_name FROM repo_snapshots WHERE id = ?1",
                 [snapshot_id],
-                |_| Ok(()),
+                |row| row.get::<_, String>(0),
             )
-            .optional()?;
-        exists.ok_or_else(|| StoreError::SnapshotMissing(snapshot_id.to_owned()))
+            .optional()?
+            .ok_or_else(|| StoreError::SnapshotMissing(snapshot_id.to_owned()))
     }
 
     /// Runs `SQLite`'s quick integrity check.
@@ -2145,7 +2430,7 @@ impl SqliteStore {
         let result = self
             .connection
             .query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0))?;
-        if result != "ok" || self.schema_version()? != LATEST_SCHEMA_VERSION {
+        if result != "ok" || self.schema_id()? != schema_identity() {
             return Ok(false);
         }
         let foreign_key_violation = self
@@ -2598,6 +2883,7 @@ fn validate_community_snapshot(
 
 fn insert_community_snapshot<F>(
     transaction: &rusqlite::Transaction<'_>,
+    workspace: &str,
     snapshot: &CommunitySnapshot,
     progress: &mut F,
 ) -> Result<(), StoreError>
@@ -2617,10 +2903,12 @@ where
         COMMUNITY_CONFIG_JSON_MAX_BYTES,
     )?;
     transaction.execute(
-        "INSERT INTO community_snapshots(snapshot_id, engine_version, algorithm, config_json)
-         VALUES (?1, ?2, ?3, ?4)",
+        "INSERT INTO community_snapshots(
+            snapshot_id, workspace_name, engine_version, algorithm, config_json
+         ) VALUES (?1, ?2, ?3, ?4, ?5)",
         params![
             snapshot.snapshot_id,
+            workspace,
             snapshot.engine_version,
             algorithm,
             config_json
@@ -2893,20 +3181,6 @@ fn load_community_members(
                 "membership order is not contiguous",
             ));
         }
-        let node_exists = connection
-            .query_row(
-                "SELECT 1 FROM nodes WHERE snapshot_id = ?1 AND id = ?2",
-                params![snapshot_id, node_id],
-                |_| Ok(()),
-            )
-            .optional()?
-            .is_some();
-        if !node_exists {
-            return Err(malformed_stored_data(
-                entity,
-                format!("membership references missing node `{node_id}`"),
-            ));
-        }
         members.push(NodeId::new(node_id));
     }
     Ok(members)
@@ -3170,334 +3444,6 @@ fn validate_query_cache_record(record: &QueryCacheRecord) -> Result<(), StoreErr
     Ok(())
 }
 
-fn insert_manual_links(
-    transaction: &rusqlite::Transaction<'_>,
-    records: &[ManualLinkRecord],
-) -> Result<(), StoreError> {
-    for record in records {
-        transaction.execute(
-            "INSERT INTO manual_links(
-                snapshot_id, id, source_node_id, target_node_id, kind, disposition, reason,
-                decision_json, config_version
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![
-                record.snapshot_id,
-                record.id,
-                record.source_node_id.as_str(),
-                record.target_node_id.as_str(),
-                record.kind,
-                record.disposition.as_str(),
-                record.reason,
-                serde_json::to_vec(&record.decision)?,
-                i64::from(record.config_version),
-            ],
-        )?;
-    }
-    Ok(())
-}
-
-fn insert_graph<F>(
-    transaction: &rusqlite::Transaction<'_>,
-    snapshot_id: &str,
-    nodes: &[Node],
-    edges: &[Edge],
-    evidence: &[Evidence],
-    progress: &mut F,
-) -> Result<(), StoreError>
-where
-    F: FnMut(u64),
-{
-    for node in nodes {
-        transaction.execute(
-            "INSERT INTO nodes(
-                snapshot_id, id, kind, repo_id, stable_key, label
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                snapshot_id,
-                node.id.as_str(),
-                serde_json::to_string(&node.kind)?,
-                node.repo_id.as_ref().map(RepoId::as_str),
-                node.stable_key,
-                node.label,
-            ],
-        )?;
-        progress(1);
-        transaction.execute(
-            "INSERT INTO nodes_fts(snapshot_id, node_id, label, stable_key)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![snapshot_id, node.id.as_str(), node.label, node.stable_key],
-        )?;
-        progress(1);
-    }
-    for item in evidence {
-        transaction.execute(
-            "INSERT INTO evidence(
-                snapshot_id, id, repo_id, file_path, start_line, end_line, extractor,
-                extractor_version, provenance, confidence, observed_at_commit, content_hash
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-            params![
-                snapshot_id,
-                item.id.as_str(),
-                item.repo_id.as_ref().map(RepoId::as_str),
-                item.file_path,
-                item.start_line,
-                item.end_line,
-                item.extractor,
-                item.extractor_version,
-                serde_json::to_string(&item.provenance)?,
-                item.confidence,
-                item.observed_at_commit,
-                item.content_hash,
-            ],
-        )?;
-    }
-    for edge in edges {
-        transaction.execute(
-            "INSERT INTO edges(
-                snapshot_id, id, source_node_id, target_node_id, kind, confidence,
-                epistemic_status
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
-                snapshot_id,
-                edge.id.as_str(),
-                edge.source.as_str(),
-                edge.target.as_str(),
-                serde_json::to_string(&edge.kind)?,
-                edge.confidence,
-                serde_json::to_string(&edge.status)?,
-            ],
-        )?;
-        progress(1);
-        for evidence_id in &edge.evidence {
-            transaction.execute(
-                "INSERT INTO edge_evidence(snapshot_id, edge_id, evidence_id)
-                 VALUES (?1, ?2, ?3)",
-                params![snapshot_id, edge.id.as_str(), evidence_id.as_str()],
-            )?;
-            progress(1);
-        }
-    }
-    Ok(())
-}
-
-fn insert_extractor_batches<F>(
-    transaction: &rusqlite::Transaction<'_>,
-    snapshot_id: &str,
-    batches: &[StoredExtractorBatch],
-    progress: &mut F,
-) -> Result<(), StoreError>
-where
-    F: FnMut(u64),
-{
-    for batch in batches {
-        transaction.execute(
-            "INSERT INTO extractor_batches(
-                snapshot_id, repo_id, checkout_id, path_encoding, relative_path, path_display,
-                extractor, content_hash, size_bytes, extractor_version, budget_fingerprint,
-                source_was_lossy, output_count, payload
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
-            params![
-                snapshot_id,
-                batch.source.repo_id.as_str(),
-                batch.source.checkout_id.as_str(),
-                serde_json::to_string(&batch.source.path.encoding)?,
-                batch.source.path.bytes,
-                batch.source.path.display,
-                batch.source.extractor,
-                batch.source.content_hash,
-                metric_to_i64("extractor_batches.size_bytes", batch.source.size_bytes)?,
-                batch.extractor_version,
-                batch.budget_fingerprint,
-                batch.source_was_lossy,
-                metric_to_i64("extractor_batches.output_count", batch.output_count)?,
-                batch.payload,
-            ],
-        )?;
-        progress(1);
-    }
-    Ok(())
-}
-
-fn insert_incremental_state<F>(
-    transaction: &rusqlite::Transaction<'_>,
-    snapshot_id: &str,
-    fingerprints: &[ArtifactFingerprint],
-    extractor_runs: &[ExtractorRun],
-    progress: &mut F,
-) -> Result<(), StoreError>
-where
-    F: FnMut(u64),
-{
-    for fingerprint in fingerprints {
-        let size_bytes = metric_to_i64("artifact_fingerprints.size_bytes", fingerprint.size_bytes)?;
-        transaction.execute(
-            "INSERT INTO artifact_fingerprints(
-                snapshot_id, repo_id, checkout_id, path_encoding, relative_path,
-                path_display, extractor, content_hash, size_bytes
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![
-                snapshot_id,
-                fingerprint.repo_id.as_str(),
-                fingerprint.checkout_id.as_str(),
-                serde_json::to_string(&fingerprint.path.encoding)?,
-                fingerprint.path.bytes,
-                fingerprint.path.display,
-                fingerprint.extractor,
-                fingerprint.content_hash,
-                size_bytes,
-            ],
-        )?;
-        progress(1);
-    }
-    for run in extractor_runs {
-        insert_extractor_run(transaction, snapshot_id, run, fingerprints)?;
-        progress(1);
-    }
-    Ok(())
-}
-
-fn insert_extractor_run(
-    transaction: &rusqlite::Transaction<'_>,
-    snapshot_id: &str,
-    run: &ExtractorRun,
-    fingerprints: &[ArtifactFingerprint],
-) -> Result<(), StoreError> {
-    transaction.execute(
-        "INSERT INTO extractor_runs(
-            id, snapshot_id, repo_id, extractor, extractor_version, status,
-            discovered_files, parsed_files, skipped_files, elapsed_ms, checkout_id
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-        params![
-            run.id,
-            snapshot_id,
-            run.repo_id.as_str(),
-            run.extractor,
-            run.extractor_version,
-            serde_json::to_string(&run.status)?,
-            metric_to_i64("extractor_runs.discovered_files", run.discovered_files)?,
-            metric_to_i64("extractor_runs.parsed_files", run.parsed_files)?,
-            metric_to_i64("extractor_runs.skipped_files", run.skipped_files)?,
-            metric_to_i64("extractor_runs.elapsed_ms", run.elapsed_ms)?,
-            run.checkout_id.as_str(),
-        ],
-    )?;
-    for fingerprint in fingerprints.iter().filter(|fingerprint| {
-        fingerprint.repo_id == run.repo_id
-            && fingerprint.checkout_id == run.checkout_id
-            && fingerprint.extractor == run.extractor
-    }) {
-        transaction.execute(
-            "INSERT INTO extractor_run_inputs(
-                run_id, repo_id, checkout_id, path_encoding, relative_path,
-                extractor, content_hash
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
-                run.id,
-                fingerprint.repo_id.as_str(),
-                fingerprint.checkout_id.as_str(),
-                serde_json::to_string(&fingerprint.path.encoding)?,
-                fingerprint.path.bytes,
-                fingerprint.extractor,
-                fingerprint.content_hash,
-            ],
-        )?;
-    }
-    Ok(())
-}
-
-fn insert_freshness(
-    transaction: &rusqlite::Transaction<'_>,
-    snapshot_id: &str,
-    workspace: &WorkspaceRecord,
-    extractor_batches: &[StoredExtractorBatch],
-    coverage_gaps: &[RepositoryCoverageGap],
-) -> Result<(), StoreError> {
-    let mut unmapped_authorities = BTreeMap::<&RepoId, usize>::new();
-    for batch in extractor_batches.iter().filter(|batch| {
-        batch
-            .source
-            .extractor
-            .starts_with("code-system-graph.source.")
-    }) {
-        let count = source_warning_count(&batch.payload, "unmapped_authority")?;
-        if count > 0 {
-            *unmapped_authorities
-                .entry(&batch.source.repo_id)
-                .or_default() += count;
-        }
-    }
-    for repository in &workspace.repositories {
-        let unmapped_count = unmapped_authorities
-            .get(&repository.id)
-            .copied()
-            .unwrap_or_default();
-        let mut coverage_reasons = coverage_gaps
-            .iter()
-            .filter(|gap| gap.repo_id == repository.id)
-            .map(|gap| gap.reason.clone())
-            .collect::<Vec<_>>();
-        if unmapped_count > 0 {
-            coverage_reasons.push(format!(
-                "{unmapped_count} absolute HTTP consumer URL{} lacked an explicit workspace authority mapping and {} not linked.",
-                if unmapped_count == 1 { "" } else { "s" },
-                if unmapped_count == 1 { "was" } else { "were" }
-            ));
-        }
-        coverage_reasons.sort();
-        coverage_reasons.dedup();
-        let (freshness_state, reason) = if !coverage_reasons.is_empty() {
-            if repository.working_tree_dirty {
-                coverage_reasons.push(
-                    "The repository working tree differed from HEAD when scanned.".to_owned(),
-                );
-            }
-            (
-                RepoFreshnessState::Partial,
-                Some(coverage_reasons.join(" ")),
-            )
-        } else if repository.working_tree_dirty {
-            (RepoFreshnessState::WorkingTreeChanged, None)
-        } else {
-            (RepoFreshnessState::Fresh, None)
-        };
-        transaction.execute(
-            "INSERT INTO repository_snapshot_freshness(
-                snapshot_id, repo_id, checkout_id, head_commit, manifest_hash, state, reason
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
-                snapshot_id,
-                repository.id.as_str(),
-                repository.checkout_id.as_str(),
-                repository.head_commit,
-                workspace.manifest_hash,
-                serde_json::to_string(&freshness_state)?,
-                reason,
-            ],
-        )?;
-    }
-    transaction.execute(
-        "DELETE FROM provider_capabilities
-         WHERE workspace_name = ?1
-           AND NOT EXISTS (
-                SELECT 1 FROM workspace_repositories
-                WHERE workspace_name = ?1
-                  AND repo_id = provider_capabilities.repo_id
-           )",
-        [&workspace.name],
-    )?;
-    Ok(())
-}
-
-fn source_warning_count(payload: &[u8], warning: &str) -> Result<usize, StoreError> {
-    let observations = serde_json::from_slice::<Vec<serde_json::Value>>(payload)?;
-    Ok(observations
-        .iter()
-        .filter_map(|observation| observation.get("warnings")?.as_array())
-        .flatten()
-        .filter(|value| value.as_str() == Some(warning))
-        .count())
-}
-
 fn metric_to_i64(field: &'static str, value: u64) -> Result<i64, StoreError> {
     i64::try_from(value).map_err(|_| StoreError::IntegerOutOfRange {
         field,
@@ -3523,26 +3469,26 @@ fn initialize_empty_schema(connection: &mut Connection) -> Result<(), StoreError
     let transaction = connection.transaction()?;
     transaction.execute_batch(INITIAL_SCHEMA)?;
     transaction.execute(
-        "INSERT INTO schema_metadata(version, instance_id)
+        "INSERT INTO schema_metadata(schema_id, instance_id)
          VALUES (?1, lower(hex(randomblob(32))))",
-        [LATEST_SCHEMA_VERSION],
+        [schema_identity()],
     )?;
     transaction.commit()?;
     Ok(())
 }
 
-fn schema_version(connection: &Connection) -> Result<i64, StoreError> {
-    Ok(connection.query_row(
-        "SELECT COALESCE(MAX(version), 0) FROM schema_metadata",
-        [],
-        |row| row.get(0),
-    )?)
+fn stored_schema_id(connection: &Connection) -> Result<String, StoreError> {
+    Ok(
+        connection.query_row("SELECT schema_id FROM schema_metadata", [], |row| {
+            row.get(0)
+        })?,
+    )
 }
 
 fn database_instance_id(connection: &Connection) -> Result<String, StoreError> {
     Ok(connection.query_row(
-        "SELECT instance_id FROM schema_metadata WHERE version = ?1",
-        [LATEST_SCHEMA_VERSION],
+        "SELECT instance_id FROM schema_metadata WHERE schema_id = ?1",
+        [schema_identity()],
         |row| row.get(0),
     )?)
 }
@@ -3752,7 +3698,7 @@ mod tests {
     use std::time::Duration;
 
     use code_system_graph_model::{
-        ArtifactFingerprint, CheckoutId, Community, CommunityAlgorithm, CommunityConfig, CommunityId, CommunityMetrics, CommunityScope, CommunitySnapshot, Edge, EdgeId, EdgeKind, EpistemicStatus, Evidence, EvidenceId, ExtractorRun, ExtractorRunStatus, NativePath, NativePathEncoding, Node, NodeId, NodeKind, Provenance, RepoFreshnessState, RepoId, RepositoryCoverageGap, RepositoryRecord, StoredExtractorBatch, WorkspaceId, WorkspaceRecord
+        ArtifactFingerprint, CheckoutId, Community, CommunityAlgorithm, CommunityConfig, CommunityId, CommunityMetrics, CommunityScope, CommunitySnapshot, Edge, EdgeId, EdgeKind, EpistemicStatus, Evidence, EvidenceId, ExtractorRun, ExtractorRunStatus, HttpLinkCoverage, HttpLinkGap, HttpLinkGapReason, HttpLinkReport, NativePath, NativePathEncoding, Node, NodeId, NodeKind, Provenance, RepoFreshnessState, RepoId, RepositoryCoverageGap, RepositoryRecord, StoredExtractorBatch, WorkspaceId, WorkspaceRecord
     };
     use rusqlite::params;
 
@@ -4085,13 +4031,20 @@ mod tests {
                 community_snapshot: None,
             })
             .expect("initial publication");
+        let relabeled = nodes
+            .iter()
+            .map(|node| Node {
+                label: format!("{} renamed", node.label),
+                ..node.clone()
+            })
+            .collect::<Vec<_>>();
         let mut rows = 0_u64;
         let interrupted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _ = store.publish_snapshot_with_progress(
                 SnapshotBatch {
                     workspace: &workspace,
                     snapshot_id: "snapshot:interrupted",
-                    nodes: &nodes,
+                    nodes: &relabeled,
                     edges: &edges,
                     evidence: &evidence,
                     fingerprints: &[],
@@ -4115,6 +4068,57 @@ mod tests {
                 .snapshot_id,
             "snapshot:previous"
         );
+        let mut expected_nodes = nodes;
+        expected_nodes.sort_by(|left, right| left.id.cmp(&right.id));
+        assert_eq!(
+            store
+                .load_current_graph("commerce")
+                .expect("previous graph")
+                .0,
+            expected_nodes
+        );
+    }
+
+    #[test]
+    fn republication_should_write_only_changed_rows_and_keep_fts_current()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut store = SqliteStore::in_memory()?;
+        let workspace = workspace();
+        let (nodes, edges, evidence) = fixture();
+        let batch = |snapshot_id, nodes| SnapshotBatch {
+            workspace: &workspace,
+            snapshot_id,
+            nodes,
+            edges: &edges,
+            evidence: &evidence,
+            fingerprints: &[],
+            extractor_batches: &[],
+            extractor_runs: &[],
+            manual_links: &[],
+            community_snapshot: None,
+        };
+        store.publish_snapshot(batch("snapshot:first", &nodes))?;
+        let mut unchanged_rows = 0_u64;
+        store.publish_snapshot_with_progress(batch("snapshot:second", &nodes), |rows| {
+            unchanged_rows += rows;
+        })?;
+        let mut relabeled = nodes.clone();
+        relabeled[0].label = "Checkout gateway".to_owned();
+        let mut changed_rows = 0_u64;
+        store.publish_snapshot_with_progress(batch("snapshot:third", &relabeled), |rows| {
+            changed_rows += rows;
+        })?;
+        let hits = store.search_current_nodes("commerce", "gateway", 10)?;
+        let fts_rows = store
+            .connection
+            .query_row("SELECT COUNT(*) FROM nodes_fts", [], |row| {
+                row.get::<_, i64>(0)
+            })?;
+
+        assert_eq!((unchanged_rows, changed_rows), (0, 1));
+        assert_eq!(hits.len(), 1);
+        assert_eq!(fts_rows, 2);
+        Ok(())
     }
 
     #[test]
@@ -4314,7 +4318,7 @@ mod tests {
     }
 
     #[test]
-    fn historical_graph_and_community_snapshots_should_remain_loadable() {
+    fn previous_community_snapshot_should_remain_loadable_until_next_publication() {
         let mut store = match SqliteStore::in_memory() {
             Ok(store) => store,
             Err(error) => panic!("test store must initialize: {error}"),
@@ -4322,6 +4326,7 @@ mod tests {
         let workspace = workspace();
         let (nodes, edges, evidence) = fixture();
         let historical_communities = community_fixture("snapshot:historical");
+        let current_communities = community_fixture("snapshot:current");
         let first = store.publish_snapshot(SnapshotBatch {
             workspace: &workspace,
             snapshot_id: "snapshot:historical",
@@ -4345,19 +4350,39 @@ mod tests {
             extractor_batches: &[],
             extractor_runs: &[],
             manual_links: &[],
-            community_snapshot: None,
+            community_snapshot: Some(&current_communities),
         });
         assert!(second.is_ok(), "current fixture failed: {second:?}");
-        let result = store
-            .load_graph_snapshot("snapshot:historical")
-            .and_then(|graph| Ok((graph, store.load_community_snapshot("snapshot:historical")?)));
 
         assert!(matches!(
-            result,
-            Ok(((stored_nodes, stored_edges), stored_communities))
-                if stored_nodes.len() == 2
-                    && stored_edges.len() == 1
-                    && stored_communities == historical_communities
+            store.load_graph_snapshot("snapshot:historical"),
+            Err(StoreError::SnapshotMissing(_))
+        ));
+        assert!(matches!(
+            store.load_workspace_community_snapshot("commerce", "snapshot:historical"),
+            Ok(stored) if stored == historical_communities
+        ));
+        let third_communities = community_fixture("snapshot:third");
+        let third = store.publish_snapshot(SnapshotBatch {
+            workspace: &workspace,
+            snapshot_id: "snapshot:third",
+            nodes: &nodes,
+            edges: &edges,
+            evidence: &evidence,
+            fingerprints: &[],
+            extractor_batches: &[],
+            extractor_runs: &[],
+            manual_links: &[],
+            community_snapshot: Some(&third_communities),
+        });
+        assert!(third.is_ok(), "third fixture failed: {third:?}");
+        assert!(matches!(
+            store.load_community_snapshot("snapshot:historical"),
+            Err(StoreError::SnapshotMissing(_))
+        ));
+        assert!(matches!(
+            store.load_community_snapshot("snapshot:current"),
+            Ok(stored) if stored == current_communities
         ));
     }
 
@@ -4419,13 +4444,13 @@ mod tests {
             "PRAGMA foreign_keys = OFF;
              INSERT INTO workspaces(name, manifest_hash, id)
              VALUES ('corrupt', 'hash', 'workspace:corrupt');
-             INSERT INTO repo_snapshots(id, workspace_name, is_current)
-             VALUES ('snapshot:corrupt', 'corrupt', 1);
+             INSERT INTO repo_snapshots(id, workspace_name)
+             VALUES ('snapshot:corrupt', 'corrupt');
              INSERT INTO edges(
-                snapshot_id, id, source_node_id, target_node_id, kind, confidence,
+                workspace_name, id, source_node_id, target_node_id, kind, confidence,
                 epistemic_status
              ) VALUES (
-                'snapshot:corrupt', 'edge:corrupt', 'missing:a', 'missing:b',
+                'corrupt', 'edge:corrupt', 'missing:a', 'missing:b',
                 '\"calls_remote\"', 1.0, '\"confirmed\"'
              );
              PRAGMA foreign_keys = ON;",
@@ -4438,9 +4463,9 @@ mod tests {
 
     #[test]
     fn fresh_database_should_apply_initial_schema() {
-        let result = SqliteStore::in_memory().and_then(|store| store.schema_version());
+        let result = SqliteStore::in_memory().and_then(|store| store.schema_id());
 
-        assert!(matches!(result, Ok(2)));
+        assert!(matches!(result, Ok(schema_id) if schema_id == super::schema_identity()));
     }
 
     #[test]
@@ -4462,13 +4487,18 @@ mod tests {
                     'community_snapshots',
                     'manual_links',
                     'provider_capabilities',
-                    'query_cache'
+                    'query_cache',
+                    'http_link_coverage',
+                    'http_link_gaps'
                )",
             [],
             |row| row.get::<_, i64>(0),
         )?;
 
-        assert_eq!((store.schema_version()?, table_count), (2, 12));
+        assert_eq!(
+            (store.schema_id()?.as_str(), table_count),
+            (super::schema_identity(), 14)
+        );
         Ok(())
     }
 
@@ -4480,7 +4510,10 @@ mod tests {
         super::validate_exact_schema(&connection)?;
         super::validate_exact_schema(&connection)?;
 
-        assert_eq!(super::schema_version(&connection)?, 2);
+        assert_eq!(
+            super::stored_schema_id(&connection)?,
+            super::schema_identity()
+        );
         Ok(())
     }
 
@@ -4500,9 +4533,6 @@ mod tests {
              WHERE type = 'index'
                AND name IN (
                     'repo_snapshots_id_workspace_idx',
-                    'manual_links_source_idx',
-                    'manual_links_target_idx',
-                    'manual_links_disposition_idx',
                     'provider_capabilities_repo_provider_idx',
                     'query_cache_snapshot_idx',
                     'query_cache_workspace_expiry_idx',
@@ -4517,7 +4547,10 @@ mod tests {
                AND name IN (
                     'provider_capabilities_require_registration',
                     'provider_capabilities_update_require_registration',
-                    'query_cache_bound_workspace_entries'
+                    'query_cache_bound_workspace_entries',
+                    'nodes_fts_insert',
+                    'nodes_fts_update',
+                    'nodes_fts_delete'
                )",
             [],
             |row| row.get::<_, i64>(0),
@@ -4537,23 +4570,23 @@ mod tests {
 
         assert_eq!(
             (strict_tables, indexes, triggers, foreign_keys),
-            ((3, 3), 8, 3, 9)
+            ((3, 3), 5, 6, 8)
         );
         Ok(())
     }
 
     #[test]
-    fn exact_schema_should_reject_unknown_version() {
+    fn exact_schema_should_reject_unknown_schema_identity() {
         let connection = match rusqlite::Connection::open_in_memory() {
             Ok(connection) => connection,
             Err(error) => panic!("test connection must initialize: {error}"),
         };
         let setup = connection.execute_batch(
             "CREATE TABLE schema_metadata (
-                version INTEGER PRIMARY KEY,
+                schema_id TEXT PRIMARY KEY,
                 applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
              );
-             INSERT INTO schema_metadata(version) VALUES (999);",
+             INSERT INTO schema_metadata(schema_id) VALUES ('schema:unknown');",
         );
         assert!(setup.is_ok(), "newer schema fixture failed: {setup:?}");
         let result = SqliteStore::from_connection(connection);
@@ -4562,13 +4595,13 @@ mod tests {
     }
 
     #[test]
-    fn exact_schema_should_reject_structurally_current_v1_database()
+    fn exact_schema_should_reject_structurally_identical_database_with_other_identity()
     -> Result<(), Box<dyn std::error::Error>> {
         let mut connection = rusqlite::Connection::open_in_memory()?;
         super::initialize_empty_schema(&mut connection)?;
         connection.execute(
-            "UPDATE schema_metadata SET version = 1 WHERE version = ?1",
-            [super::LATEST_SCHEMA_VERSION],
+            "UPDATE schema_metadata SET schema_id = 'schema:other' WHERE schema_id = ?1",
+            [super::schema_identity()],
         )?;
 
         let result = SqliteStore::from_connection(connection);
@@ -4631,7 +4664,7 @@ mod tests {
         let connection = rusqlite::Connection::open(&database)?;
         connection.execute_batch(
             "CREATE TABLE schema_metadata (
-                version INTEGER PRIMARY KEY,
+                schema_id TEXT PRIMARY KEY,
                 applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
              );",
         )?;
@@ -4751,10 +4784,74 @@ mod tests {
         let database = temporary.path().join("store.db");
 
         let initial = SqliteStore::open(&database)?;
-        assert_eq!(initial.schema_version()?, 2);
+        assert_eq!(initial.schema_id()?, super::schema_identity());
         drop(initial);
         let repeated = SqliteStore::open(&database)?;
-        assert_eq!(repeated.schema_version()?, 2);
+        assert_eq!(repeated.schema_id()?, super::schema_identity());
+        Ok(())
+    }
+
+    #[test]
+    fn composite_reads_should_keep_graph_and_evidence_during_publication()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temporary = tempfile::tempdir()?;
+        let database = temporary.path().join("composite.db");
+        let workspace = workspace();
+        let (mut nodes, edges, evidence) = fixture();
+        nodes.sort_by(|left, right| left.id.cmp(&right.id));
+        let mut writer = SqliteStore::open(&database)?;
+        writer.publish_snapshot(SnapshotBatch {
+            workspace: &workspace,
+            snapshot_id: "snapshot:before",
+            nodes: &nodes,
+            edges: &edges,
+            evidence: &evidence,
+            fingerprints: &[],
+            extractor_batches: &[],
+            extractor_runs: &[],
+            manual_links: &[],
+            community_snapshot: None,
+        })?;
+        let reader = SqliteStore::open_read_only(&database)?;
+        let mut next_nodes = nodes.clone();
+        next_nodes[0].label = "POST /updated".to_owned();
+        let mut next_evidence = evidence.clone();
+        next_evidence[0].content_hash = Some("updated".to_owned());
+
+        let (read_nodes, read_edges, read_evidence) = reader.consistent_read(|| {
+            let snapshot = reader.current_snapshot_summary("commerce")?;
+            let (read_nodes, read_edges) = reader.load_graph_snapshot(&snapshot.snapshot_id)?;
+            // Publish through a separate connection after the graph read has finished.
+            writer.publish_snapshot(SnapshotBatch {
+                workspace: &workspace,
+                snapshot_id: "snapshot:after",
+                nodes: &next_nodes,
+                edges: &edges,
+                evidence: &next_evidence,
+                fingerprints: &[],
+                extractor_batches: &[],
+                extractor_runs: &[],
+                manual_links: &[],
+                community_snapshot: None,
+            })?;
+            let read_evidence = reader.load_evidence_snapshot(&snapshot.snapshot_id)?;
+            Ok::<_, StoreError>((read_nodes, read_edges, read_evidence))
+        })?;
+        assert_eq!(read_nodes, nodes);
+        assert_eq!(read_edges, edges);
+        assert_eq!(read_evidence, evidence);
+        assert!(reader.connection.is_autocommit());
+        assert_eq!(reader.load_current_graph("commerce")?.0, next_nodes);
+        assert_eq!(reader.load_current_evidence("commerce")?, next_evidence);
+        assert!(matches!(
+            reader.load_evidence_snapshot("snapshot:before"),
+            Err(StoreError::SnapshotMissing(_))
+        ));
+
+        let failed = reader.consistent_read(|| reader.load_graph_snapshot("snapshot:missing"));
+        assert!(matches!(failed, Err(StoreError::SnapshotMissing(_))));
+        assert!(reader.connection.is_autocommit());
+        assert_eq!(reader.load_current_graph("commerce")?.0, next_nodes);
         Ok(())
     }
 
@@ -4810,7 +4907,7 @@ mod tests {
                 .and_then(|result| result)
         });
 
-        assert!(reader_results.into_iter().all(|result| result.is_ok()));
+        assert_eq!(reader_results, [Ok(()), Ok(())]);
         Ok(())
     }
 
@@ -4943,65 +5040,6 @@ mod tests {
     }
 
     #[test]
-    fn published_freshness_preserves_dirty_and_unmapped_authority_coverage() {
-        let mut store = SqliteStore::in_memory().expect("test store");
-        let mut workspace = workspace();
-        workspace.repositories[0].working_tree_dirty = true;
-        let (nodes, edges, evidence) = fixture();
-        let batch = StoredExtractorBatch {
-            source: ArtifactFingerprint {
-                repo_id: RepoId::new("repo:web"),
-                checkout_id: CheckoutId::new("checkout:web"),
-                path: NativePath {
-                    encoding: NativePathEncoding::Utf8,
-                    bytes: b"src/client.rs".to_vec(),
-                    display: "src/client.rs".to_owned(),
-                },
-                extractor: "code-system-graph.source.rust".to_owned(),
-                content_hash: "content:http".to_owned(),
-                size_bytes: 1,
-            },
-            extractor_version: "1.1.0".to_owned(),
-            budget_fingerprint: "budget".to_owned(),
-            source_was_lossy: false,
-            output_count: 1,
-            payload: br#"[{"warnings":["unmapped_authority"]}]"#.to_vec(),
-        };
-
-        store
-            .publish_snapshot(SnapshotBatch {
-                workspace: &workspace,
-                snapshot_id: "snapshot:coverage",
-                nodes: &nodes,
-                edges: &edges,
-                evidence: &evidence,
-                fingerprints: &[],
-                extractor_batches: &[batch],
-                extractor_runs: &[],
-                manual_links: &[],
-                community_snapshot: None,
-            })
-            .expect("publish");
-        let freshness = store.load_current_freshness("commerce").expect("freshness");
-
-        assert_eq!(freshness[0].state, RepoFreshnessState::Partial);
-        assert!(freshness[0].reason.as_deref().is_some_and(|reason| {
-            reason.contains("authority mapping") && reason.contains("working tree")
-        }));
-    }
-
-    #[test]
-    fn source_warning_count_should_ignore_matching_symbol_text() {
-        let payload = br#"[{"symbol_name":"unmapped_authority","warnings":[]}]"#;
-
-        assert_eq!(
-            super::source_warning_count(payload, "unmapped_authority")
-                .expect("valid source payload"),
-            0
-        );
-    }
-
-    #[test]
     fn unresolved_repository_dependency_gap_should_persist_as_partial_freshness() {
         let mut store = SqliteStore::in_memory().expect("test store");
         let workspace = workspace();
@@ -5010,6 +5048,30 @@ mod tests {
             repo_id: RepoId::new("repo:web"),
             reason: "An explicit repository dependency could not be matched exactly.".to_owned(),
         }];
+        let http_links = HttpLinkReport {
+            coverage: HttpLinkCoverage {
+                linked: 3,
+                no_provider: 1,
+                ambiguous: 1,
+                external: 0,
+            },
+            gaps: vec![
+                HttpLinkGap {
+                    caller: NodeId::new("test:orders"),
+                    method: "GET".to_owned(),
+                    path: "/missing".to_owned(),
+                    reason: HttpLinkGapReason::NoProvider,
+                    candidates: Vec::new(),
+                },
+                HttpLinkGap {
+                    caller: NodeId::new("consumer:web"),
+                    method: "GET".to_owned(),
+                    path: "/orders/{id}".to_owned(),
+                    reason: HttpLinkGapReason::Ambiguous,
+                    candidates: vec![NodeId::new("provider:a"), NodeId::new("provider:b")],
+                },
+            ],
+        };
 
         store
             .publish_snapshot_with_progress_and_coverage(
@@ -5025,12 +5087,23 @@ mod tests {
                     manual_links: &[],
                     community_snapshot: None,
                 },
+                None,
                 &gaps,
+                &http_links,
                 |_| {},
             )
             .expect("publish");
         let freshness = store.load_current_freshness("commerce").expect("freshness");
+        let stored_links = store
+            .load_http_link_report("commerce", 10)
+            .expect("HTTP link report");
 
+        let caller_gaps = store
+            .load_http_link_gaps_for_callers("commerce", &[NodeId::new("consumer:web")])
+            .expect("caller gaps");
+
+        assert_eq!(caller_gaps, http_links.gaps[1..]);
+        assert_eq!(stored_links, (http_links, 2));
         assert_eq!(freshness[0].state, RepoFreshnessState::Partial);
         assert!(
             freshness[0]
@@ -5095,7 +5168,7 @@ mod tests {
     }
 
     #[test]
-    fn manual_links_should_round_trip_and_preserve_snapshot_history()
+    fn manual_links_should_round_trip_with_the_current_snapshot()
     -> Result<(), Box<dyn std::error::Error>> {
         let mut store = SqliteStore::in_memory()?;
         let workspace = workspace();
@@ -5129,13 +5202,13 @@ mod tests {
         current_links.truncate(1);
         store.persist_manual_links("snapshot:current-links", &current_links)?;
 
-        let stored_historical = store.load_manual_links("snapshot:historical-links")?;
         let stored_current = store.load_manual_links("snapshot:current-links")?;
 
-        assert_eq!(
-            (stored_historical, stored_current),
-            (historical_links, current_links)
-        );
+        assert!(matches!(
+            store.load_manual_links("snapshot:historical-links"),
+            Err(StoreError::SnapshotMissing(_))
+        ));
+        assert_eq!(stored_current, current_links);
         Ok(())
     }
 

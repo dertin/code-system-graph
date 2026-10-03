@@ -19,7 +19,10 @@ pub(crate) fn artifact_path(database_path: &Path, suffix: &str) -> PathBuf {
 }
 
 pub(crate) fn prepare_database_file(path: &Path) -> Result<(), StoreError> {
-    if let Some(parent) = path.parent() {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
         fs::create_dir_all(parent).map_err(|source| StoreError::Io {
             path: parent.to_path_buf(),
             source,

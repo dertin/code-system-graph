@@ -35,8 +35,8 @@ upgrade commands.
 
 ## Implementation evidence
 
-The provider contract is validated against CodeGraph 1.5.0. The official Rust MCP client
-negotiates initialization and discovers tools dynamically; 1.5.0 exposes `codegraph_explore`
+The provider contract is validated against CodeGraph 1.6.1. The official Rust MCP client
+negotiates initialization and discovers tools dynamically; 1.6.1 exposes `codegraph_explore`
 with explicit `projectPath`.
 Structured symbol, neighbor, impact, and affected-test operations use versioned CLI JSON
 contracts. MCP starts with `--no-watch`, timeout opens a per-repository MCP circuit, and CLI

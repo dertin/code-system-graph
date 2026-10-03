@@ -16,7 +16,7 @@ have the right to provide it under the project's Apache-2.0 license.
 ## Development workflow
 
 Formatting and Clippy use the latest nightly Rust toolchain. Compilation, tests, documentation,
-and release builds use the latest stable toolchain. The workspace MSRV is 1.97.1, declared by
+and release builds use the latest stable toolchain. The workspace MSRV is 1.96.0, declared by
 every crate through the workspace package metadata and checked separately in CI.
 
 Install the additional quality toolchain once:
@@ -46,7 +46,7 @@ cargo deny check
 Changes must also compile with the MSRV:
 
 ```text
-cargo +1.97.1 check --workspace --exclude code-system-graph-fuzz --all-targets --all-features --locked
+cargo +1.96.0 check --workspace --exclude code-system-graph-fuzz --all-targets --all-features --locked
 ```
 
 ## Dependency updates

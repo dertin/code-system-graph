@@ -238,7 +238,7 @@ fn healthy_status_is_under_750_bytes_and_uses_aliases() {
         status: ToolStatus::Ok,
         data: Some(GraphStatusReport {
             workspace: "hugint".to_owned(),
-            schema_version: 5,
+            schema_id: "schema:test".to_owned(),
             integrity_ok: true,
             snapshot: SnapshotMetrics {
                 snapshot_id: "snapshot:current".to_owned(),

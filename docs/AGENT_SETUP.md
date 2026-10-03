@@ -44,7 +44,7 @@ csgraph plugin create \
 Omit `--codegraph` to keep `explore` unavailable, or add
 `--codegraph-binary /absolute/path/to/codegraph` with the opt-in flag. Generation requires a valid
 manifest and an existing matching snapshot. Stale snapshots are allowed and reported. `csgraph
-1.1.0` must be in the client's `PATH`, and no platform binary is bundled. Repeating the command is a
+1.2.0` must be in the client's `PATH`, and no platform binary is bundled. Repeating the command is a
 no-op only for an exactly identical directory; conflicts, additional files, and symlinks fail
 without partial writes.
 

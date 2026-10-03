@@ -1,13 +1,8 @@
-use std::collections::BTreeMap;
-
 use code_system_graph_model::{
-    Edge, EdgeId, EdgeKind, EpistemicStatus, Evidence, EvidenceId, Node, NodeId, NodeKind, Provenance, RepoId, stable_id
+    Evidence, EvidenceId, Node, NodeId, NodeKind, Provenance, RepoId, stable_id
 };
 
-use crate::linker::{http_link_ambiguity, sort_http_ambiguities};
-use crate::{
-    BoundaryRole, ContractImplementationConfig, HttpBoundary, HttpLinkResolution, IntegrationTestConfig, LinkError, normalize_http_path
-};
+use crate::{CallScope, ContractImplementationConfig, IntegrationTestConfig, normalize_http_path};
 
 /// Declared cross-language test case and its validated HTTP target.
 #[derive(Debug, Clone, PartialEq)]
@@ -18,6 +13,8 @@ pub struct DeclaredTestCase {
     pub method: String,
     /// Canonical target HTTP path.
     pub path: String,
+    /// Repositories allowed to provide the validated operation.
+    pub scope: CallScope,
     /// Evidence from the test source declaration.
     pub evidence: Evidence,
 }
@@ -63,6 +60,7 @@ pub fn declared_test_case(
         },
         method,
         path,
+        scope: CallScope::Workspace,
         evidence: Evidence {
             id: EvidenceId::new(stable_id("evidence", &evidence_key)),
             repo_id: Some(repo_id),
@@ -124,200 +122,14 @@ pub fn declared_implementation(
     }
 }
 
-/// Links declared tests to exact HTTP providers with bilateral evidence.
-///
-/// Tests with no observed provider remain unlinked instead of inventing a target.
-///
-/// Duplicate providers remain fail-closed for compatibility. Use
-/// [`link_declared_tests_with_ambiguities`] to preserve ambiguities as data while continuing with
-/// unrelated contracts.
-///
-/// # Errors
-///
-/// Returns [`LinkError::AmbiguousProvider`] instead of silently omitting an ambiguous relationship.
-pub fn link_declared_tests(
-    tests: &[DeclaredTestCase],
-    boundaries: &[HttpBoundary],
-) -> Result<Vec<Edge>, LinkError> {
-    link_declared_tests_with_ambiguities(tests, boundaries).into_legacy_result()
-}
-
-/// Links declared tests while preserving duplicate-provider decisions.
-#[must_use]
-pub fn link_declared_tests_with_ambiguities(
-    tests: &[DeclaredTestCase],
-    boundaries: &[HttpBoundary],
-) -> HttpLinkResolution {
-    let mut providers: BTreeMap<(&str, &str), Vec<&HttpBoundary>> = BTreeMap::new();
-    for provider in boundaries
-        .iter()
-        .filter(|boundary| boundary.role == BoundaryRole::Provider)
-    {
-        let candidates = providers
-            .entry((&provider.method, &provider.path))
-            .or_default();
-        if let Some(existing) = candidates
-            .iter()
-            .position(|candidate| candidate.node.id == provider.node.id)
-        {
-            if provider.evidence.confidence > candidates[existing].evidence.confidence {
-                candidates[existing] = provider;
-            }
-        } else {
-            candidates.push(provider);
-        }
-    }
-    let mut edges = Vec::new();
-    let mut ambiguities = Vec::new();
-    for test in tests {
-        let Some(candidates) = providers.get(&(test.method.as_str(), test.path.as_str())) else {
-            continue;
-        };
-        if candidates.len() > 1 {
-            ambiguities.push(http_link_ambiguity(
-                &test.method,
-                &test.path,
-                candidates.iter().map(|candidate| &candidate.node.id),
-            ));
-            continue;
-        }
-        let provider = candidates[0];
-        let edge_key = format!(
-            "{}:validates:{}",
-            test.node.id.as_str(),
-            provider.node.id.as_str()
-        );
-        edges.push(Edge {
-            id: EdgeId::new(stable_id("edge", &edge_key)),
-            source: test.node.id.clone(),
-            target: provider.node.id.clone(),
-            kind: EdgeKind::Validates,
-            confidence: test.evidence.confidence.min(provider.evidence.confidence),
-            status: consensus_status(test.evidence.confidence.min(provider.evidence.confidence)),
-            evidence: vec![test.evidence.id.clone(), provider.evidence.id.clone()],
-        });
-    }
-    edges.sort_by(|left, right| left.id.cmp(&right.id));
-    sort_http_ambiguities(&mut ambiguities);
-    HttpLinkResolution { edges, ambiguities }
-}
-
-/// Links HTTP provider contracts to declared source implementations.
-///
-/// Duplicate providers remain fail-closed for compatibility. Use
-/// [`link_declared_implementations_with_ambiguities`] to preserve ambiguities as data while
-/// continuing with unrelated contracts.
-///
-/// # Errors
-///
-/// Returns [`LinkError::AmbiguousProvider`] instead of silently omitting an ambiguous relationship.
-pub fn link_declared_implementations(
-    implementations: &[DeclaredImplementation],
-    boundaries: &[HttpBoundary],
-) -> Result<Vec<Edge>, LinkError> {
-    link_declared_implementations_with_ambiguities(implementations, boundaries).into_legacy_result()
-}
-
-/// Links declared implementations while preserving duplicate-provider decisions.
-#[must_use]
-pub fn link_declared_implementations_with_ambiguities(
-    implementations: &[DeclaredImplementation],
-    boundaries: &[HttpBoundary],
-) -> HttpLinkResolution {
-    let mut edges = BTreeMap::<EdgeId, Edge>::new();
-    let mut ambiguities = Vec::new();
-    for implementation in implementations {
-        let candidates = boundaries
-            .iter()
-            .filter(|boundary| {
-                boundary.role == BoundaryRole::Provider
-                    && boundary.node.repo_id == implementation.node.repo_id
-                    && boundary.method == implementation.method
-                    && boundary.path == implementation.path
-            })
-            .fold(
-                BTreeMap::<NodeId, &HttpBoundary>::new(),
-                |mut candidates, boundary| {
-                    candidates
-                        .entry(boundary.node.id.clone())
-                        .and_modify(|existing| {
-                            if boundary.evidence.confidence > existing.evidence.confidence {
-                                *existing = boundary;
-                            }
-                        })
-                        .or_insert(boundary);
-                    candidates
-                },
-            )
-            .into_values()
-            .collect::<Vec<_>>();
-        if candidates.len() > 1 {
-            ambiguities.push(http_link_ambiguity(
-                &implementation.method,
-                &implementation.path,
-                candidates.iter().map(|candidate| &candidate.node.id),
-            ));
-            continue;
-        }
-        let Some(provider) = candidates.first() else {
-            continue;
-        };
-        let edge_key = format!(
-            "{}:implemented_by:{}",
-            provider.node.id.as_str(),
-            implementation.node.id.as_str()
-        );
-        let confidence = provider
-            .evidence
-            .confidence
-            .min(implementation.evidence.confidence);
-        let edge = Edge {
-            id: EdgeId::new(stable_id("edge", &edge_key)),
-            source: provider.node.id.clone(),
-            target: implementation.node.id.clone(),
-            kind: EdgeKind::ImplementedBy,
-            confidence,
-            status: consensus_status(confidence),
-            evidence: vec![
-                provider.evidence.id.clone(),
-                implementation.evidence.id.clone(),
-            ],
-        };
-        edges
-            .entry(edge.id.clone())
-            .and_modify(|existing| merge_equivalent_implementation_edge(existing, &edge))
-            .or_insert(edge);
-    }
-    sort_http_ambiguities(&mut ambiguities);
-    HttpLinkResolution {
-        edges: edges.into_values().collect(),
-        ambiguities,
-    }
-}
-
-fn merge_equivalent_implementation_edge(existing: &mut Edge, candidate: &Edge) {
-    existing.confidence = existing.confidence.max(candidate.confidence);
-    existing.status = consensus_status(existing.confidence);
-    existing.evidence.extend(candidate.evidence.iter().cloned());
-    existing.evidence.sort();
-    existing.evidence.dedup();
-}
-
-fn consensus_status(confidence: f32) -> EpistemicStatus {
-    if confidence >= 1.0 {
-        EpistemicStatus::Confirmed
-    } else {
-        EpistemicStatus::Inferred
-    }
-}
-
 #[cfg(test)]
 mod tests {
+
     use code_system_graph_model::{EdgeKind, EpistemicStatus, RepoId};
 
-    use super::{declared_test_case, link_declared_implementations, link_declared_tests};
+    use super::declared_test_case;
     use crate::{
-        HttpContractConfig, IntegrationTestConfig, extract_openapi, parse_rust_source, source_observations_to_graph
+        AuthorityMap, HttpContractConfig, IntegrationTestConfig, extract_openapi, link_http_routes, parse_rust_source, source_observations_to_graph
     };
 
     #[test]
@@ -343,8 +155,8 @@ mod tests {
         );
         let result = providers
             .map_err(|error| error.to_string())
-            .and_then(|providers| {
-                link_declared_tests(&[test], &providers).map_err(|error| error.to_string())
+            .map(|providers| {
+                link_http_routes(&providers, &[test], &[], &AuthorityMap::new()).edges
             });
 
         assert!(matches!(
@@ -370,8 +182,16 @@ async fn handler() {}
         );
         let facts =
             source_observations_to_graph(&repo, "src/routes.rs", "content:routes", &observations);
-        let edges = link_declared_implementations(&facts.implementations, &facts.boundaries)
-            .expect("both exact declarations should remain linkable");
+        let edges = link_http_routes(
+            &facts.boundaries,
+            &[],
+            &facts.implementations,
+            &AuthorityMap::new(),
+        )
+        .edges
+        .into_iter()
+        .filter(|edge| edge.kind == EdgeKind::ImplementedBy)
+        .collect::<Vec<_>>();
         let mut consensus = edges
             .iter()
             .filter_map(|edge| {
@@ -409,8 +229,16 @@ async fn handler() {}
         );
         let facts =
             source_observations_to_graph(&repo, "src/routes.rs", "content:routes", &observations);
-        let edges = link_declared_implementations(&facts.implementations, &facts.boundaries)
-            .expect("matching declarations should merge into one implementation edge");
+        let edges = link_http_routes(
+            &facts.boundaries,
+            &[],
+            &facts.implementations,
+            &AuthorityMap::new(),
+        )
+        .edges
+        .into_iter()
+        .filter(|edge| edge.kind == EdgeKind::ImplementedBy)
+        .collect::<Vec<_>>();
 
         assert!(matches!(
             edges.as_slice(),

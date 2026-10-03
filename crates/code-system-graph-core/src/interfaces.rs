@@ -177,10 +177,10 @@ pub enum DoctorStatus {
 pub struct SchemaDoctorInput {
     /// Stable store or component name.
     pub name: String,
-    /// Schema version expected by this binary.
-    pub expected_version: u32,
-    /// Observed schema version, or `None` when unavailable.
-    pub actual_version: Option<u32>,
+    /// Schema identity expected by this binary.
+    pub expected_schema: String,
+    /// Observed schema identity, or `None` when unavailable.
+    pub actual_schema: Option<String>,
     /// Whether the exact schema metadata is internally consistent.
     pub metadata_consistent: Option<bool>,
 }
@@ -991,32 +991,32 @@ fn append_schema_checks(inputs: &[SchemaDoctorInput], checks: &mut Vec<DoctorChe
         checks.push(missing_doctor_category(DoctorCategory::Schema));
     }
     for input in inputs {
-        let (status, summary, remediation) = match (input.actual_version, input.metadata_consistent)
-        {
-            (Some(actual), Some(true)) if actual == input.expected_version => (
-                DoctorStatus::Healthy,
-                format!("Schema version {actual} and metadata are consistent."),
-                None,
-            ),
-            (Some(actual), _) if actual != input.expected_version => (
-                DoctorStatus::Failed,
-                format!(
-                    "Schema version {actual} does not match expected version {}.",
-                    input.expected_version
+        let (status, summary, remediation) =
+            match (input.actual_schema.as_deref(), input.metadata_consistent) {
+                (Some(actual), Some(true)) if actual == input.expected_schema => (
+                    DoctorStatus::Healthy,
+                    "Schema identity matches this binary and metadata is consistent.".to_owned(),
+                    None,
                 ),
-                Some("Remove the incompatible local database and run a full scan.".to_owned()),
-            ),
-            (Some(_), Some(false)) => (
-                DoctorStatus::Failed,
-                "Schema metadata is inconsistent.".to_owned(),
-                Some("Restore an exact 1.0.0 backup or rebuild the local database.".to_owned()),
-            ),
-            _ => (
-                DoctorStatus::Unknown,
-                "Schema state was not fully observed.".to_owned(),
-                Some("Open the store and validate its exact schema metadata.".to_owned()),
-            ),
-        };
+                (Some(actual), _) if actual != input.expected_schema => (
+                    DoctorStatus::Failed,
+                    format!(
+                        "Schema identity `{actual}` does not match `{}`.",
+                        input.expected_schema
+                    ),
+                    Some("Remove the local database and run a full scan.".to_owned()),
+                ),
+                (Some(_), Some(false)) => (
+                    DoctorStatus::Failed,
+                    "Schema metadata is inconsistent.".to_owned(),
+                    Some("Remove the local database and run a full scan.".to_owned()),
+                ),
+                _ => (
+                    DoctorStatus::Unknown,
+                    "Schema state was not fully observed.".to_owned(),
+                    Some("Open the store and validate its exact schema metadata.".to_owned()),
+                ),
+            };
         checks.push(DoctorCheck {
             category: DoctorCategory::Schema,
             name: input.name.clone(),
@@ -1285,8 +1285,8 @@ mod tests {
         DoctorRequest {
             schema: vec![SchemaDoctorInput {
                 name: "store".to_owned(),
-                expected_version: 8,
-                actual_version: Some(8),
+                expected_schema: "schema:test".to_owned(),
+                actual_schema: Some("schema:test".to_owned()),
                 metadata_consistent: Some(true),
             }],
             integrity: vec![IntegrityDoctorInput {

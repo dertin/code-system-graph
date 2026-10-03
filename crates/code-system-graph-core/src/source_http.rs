@@ -10,9 +10,23 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
+use crate::router_mounts::mount_observation;
 use crate::{ExtractionLimitExceeded, ExtractionTracker};
 
+mod brace_clients;
+mod brace_flows;
+mod brace_lexer;
+mod brace_tests;
+mod python_flows;
 mod rust_bindings;
+mod rust_flows;
+mod rust_routers;
+mod rust_test_clients;
+
+pub(crate) use brace_clients::{BraceClients, collect_brace_clients, java_method_lines};
+use python_flows::{PythonScopes, keyword_argument, record_fixture_requests};
+use rust_flows::RustScopes;
+use rust_routers::{RustRouters, join_prefixes};
 
 const HTTP_METHODS: [&str; 8] = [
     "DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT", "TRACE",
@@ -98,6 +112,61 @@ pub enum SourceFramework {
     WebClient,
     /// Feign client declarations.
     Feign,
+    /// Spring `RestTemplate` calls.
+    RestTemplate,
+    /// Starlette and `FastAPI` `TestClient`, and HTTPX clients bound to an ASGI or WSGI app.
+    TestClient,
+    /// Flask `app.test_client()` requests.
+    FlaskTestClient,
+    /// Jest tests.
+    Jest,
+    /// Vitest tests.
+    Vitest,
+    /// Mocha tests.
+    Mocha,
+    /// Playwright tests and `APIRequestContext` requests.
+    Playwright,
+    /// Supertest `request(app)` requests.
+    Supertest,
+    /// Go `testing` test functions.
+    GoTest,
+    /// Go `net/http/httptest` requests and servers.
+    Httptest,
+    /// `JUnit` `@Test` methods.
+    JUnit,
+    /// Spring `MockMvc` requests.
+    MockMvc,
+    /// REST Assured requests.
+    RestAssured,
+    /// Spring `WebTestClient` requests.
+    WebTestClient,
+    /// Spring Boot `TestRestTemplate` requests.
+    TestRestTemplate,
+    /// Axum `Router` requests sent with `tower::ServiceExt::oneshot`.
+    AxumOneshot,
+    /// Actix Web `test::TestRequest` requests.
+    ActixTest,
+}
+
+impl SourceFramework {
+    /// Whether requests of this client run in-process against the application of their own
+    /// repository.
+    #[must_use]
+    pub fn is_in_process_client(self) -> bool {
+        matches!(
+            self,
+            Self::TestClient
+                | Self::FlaskTestClient
+                | Self::Supertest
+                | Self::Httptest
+                | Self::MockMvc
+                | Self::RestAssured
+                | Self::WebTestClient
+                | Self::TestRestTemplate
+                | Self::AxumOneshot
+                | Self::ActixTest
+        )
+    }
 }
 
 /// Repository-boundary role represented by an observation.
@@ -112,6 +181,86 @@ pub enum SourceRole {
     Test,
     /// A data factory with one statically declared model target.
     Factory,
+    /// A router mounted under a path prefix on another router or on the application root.
+    Mount,
+    /// A call from the enclosing function to another function of the repository.
+    Call,
+    /// A function, such as a pytest fixture, that returns an in-process test client.
+    Client,
+}
+
+/// Source-level reference to a router or function, resolved per repository.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SymbolRef {
+    /// A router bound to a name in the declaring file; `default` names a default export.
+    Local(String),
+    /// A router imported from another module, with the module specifier as written.
+    Import {
+        /// Module specifier, such as `./routes/users` or `app.api.users`.
+        module: String,
+        /// Imported name; `default` for default exports.
+        name: String,
+    },
+    /// The router built, returned, or configured by a function defined in the declaring file.
+    Function(String),
+    /// A function referenced by its path as written, such as `users::routes` or `routes.Register`.
+    Call(String),
+    /// A pytest fixture injected by parameter name, declared in the same file or in the nearest
+    /// enclosing `conftest.py`.
+    Fixture(String),
+    /// A parameter of the enclosing function, by name and zero-based position after receivers.
+    Parameter {
+        /// Declared parameter name.
+        name: String,
+        /// Position among the parameters a caller passes.
+        index: usize,
+    },
+}
+
+/// Client URL assembled from literal text and runtime values.
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct UrlTemplate {
+    /// Parts in source order; adjacent text parts are merged.
+    pub parts: Vec<UrlPart>,
+}
+
+/// One part of a [`UrlTemplate`].
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UrlPart {
+    /// Literal text.
+    Text(String),
+    /// A parameter of the enclosing function, by name and zero-based position after receivers.
+    Parameter {
+        /// Declared parameter name.
+        name: String,
+        /// Position among the parameters a caller passes.
+        index: usize,
+    },
+    /// Any other runtime value, named when it is a plain identifier.
+    Value(Option<String>),
+}
+
+/// Call recorded for repository-level client-wrapper and test-helper correlation.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct CallSite {
+    /// Called function.
+    pub callee: SymbolRef,
+    /// Arguments in source order, up to the last string expression.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub arguments: Vec<CallArgument>,
+}
+
+/// One argument of a [`CallSite`].
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct CallArgument {
+    /// Keyword under which the argument is passed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keyword: Option<String>,
+    /// String value; `None` when the argument is not a string expression.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<UrlTemplate>,
 }
 
 /// Epistemic state of a source observation.
@@ -145,8 +294,6 @@ pub enum SourceWarning {
     DynamicPath,
     /// A literal URL is not an absolute URL or root-relative path.
     UnsupportedLiteralPath,
-    /// An absolute consumer URL names an authority with no explicit workspace mapping.
-    UnmappedAuthority,
     /// The framework declaration did not expose an implementation symbol.
     MissingSymbol,
     /// Tree-sitter recovered from at least one syntax error in the source artifact.
@@ -179,6 +326,22 @@ pub struct SourceObservation {
     pub related_symbol: Option<String>,
     /// Repository-relative module path that declares `related_symbol`, when statically imported.
     pub related_path: Option<String>,
+    /// Lower-case `host[:port]` named by an absolute consumer URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority: Option<String>,
+    /// Router a provider route is registered on, the router mounted by a mount observation, or
+    /// the parameter through which a consumer receives its client.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub router: Option<SymbolRef>,
+    /// Router receiving a mount observation; `None` mounts at the application root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mount_parent: Option<SymbolRef>,
+    /// Consumer URL that depends on parameters of the enclosing function.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<UrlTemplate>,
+    /// Called function and arguments of a call observation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call: Option<CallSite>,
     /// Inclusive source range containing the direct evidence.
     pub lines: SourceLineRange,
     /// Epistemic state of this observation.
@@ -237,6 +400,12 @@ impl<'a> SourceObservationCollector<'a> {
     pub(crate) fn into_unbounded(self) -> Vec<SourceObservation> {
         self.observations
     }
+
+    pub(crate) fn has_role(&self, role: SourceRole) -> bool {
+        self.observations
+            .iter()
+            .any(|observation| observation.role == role)
+    }
 }
 
 pub(crate) fn charge_source_observation_values(
@@ -261,6 +430,22 @@ pub(crate) fn charge_source_observation_values(
     if let Some(path) = &observation.related_path {
         tracker.charge_portable_path(path)?;
     }
+    let call_values = observation
+        .call
+        .iter()
+        .flat_map(|call| &call.arguments)
+        .filter_map(|argument| argument.value.as_ref());
+    for template in observation.url.iter().chain(call_values) {
+        for part in &template.parts {
+            match part {
+                UrlPart::Text(text) => tracker.charge_string(text)?,
+                UrlPart::Parameter { name, .. } | UrlPart::Value(Some(name)) => {
+                    tracker.charge_identifier(name)?;
+                }
+                UrlPart::Value(None) => {}
+            }
+        }
+    }
     Ok(())
 }
 
@@ -281,16 +466,31 @@ fn collect_rust_source<'a>(
 ) -> SourceObservationCollector<'a> {
     let tokens = lex_rust(source);
     let functions = rust_functions(&tokens);
+    let routers = RustRouters::new(&tokens, &functions);
     parse_rust_attributes(&tokens, &mut observations);
     if has_ident(&tokens, "axum") {
-        parse_axum_routes(&tokens, &mut observations);
+        parse_axum_routes(&tokens, &routers, &mut observations);
+        for mount in routers.mounts(false) {
+            observations.push(mount);
+        }
     }
     if has_ident(&tokens, "actix_web") {
-        parse_actix_builder_routes(&tokens, &mut observations);
+        parse_actix_builder_routes(&tokens, &routers, &mut observations);
+        for mount in routers.mounts(true) {
+            observations.push(mount);
+        }
     }
-    if has_ident(&tokens, "reqwest") {
-        parse_reqwest_calls(&tokens, &functions, &mut observations);
-    }
+    let scopes = RustScopes::new(&tokens, &functions);
+    rust_test_clients::parse_rust_test_requests(&tokens, &functions, &scopes, &mut observations);
+    let clients = if has_ident(&tokens, "reqwest") {
+        let receivers = rust_bindings::reqwest_receiver_tokens(&tokens, &functions);
+        parse_reqwest_calls(&tokens, &functions, &receivers, &scopes, &mut observations);
+        receivers
+    } else {
+        BTreeSet::new()
+    };
+    let declares_tests = observations.has_role(SourceRole::Test) || has_ident(&tokens, "test");
+    scopes.record_calls(&clients, declares_tests, &mut observations);
     observations
 }
 
@@ -328,11 +528,39 @@ fn collect_python_source<'a>(
     let tokens = lex_python(source);
     let functions = python_functions(source, &tokens);
     let contexts = PythonContexts::discover(&tokens);
+    let scopes = PythonScopes::new(&tokens, &functions);
     parse_python_routes(&tokens, &contexts, &mut observations);
+    parse_python_router_mounts(&tokens, &contexts, &mut observations);
     parse_python_http_registries(&tokens, &mut observations);
-    parse_python_http_calls(&tokens, &functions, &contexts, &mut observations);
+    parse_python_route_calls(&tokens, &contexts, &mut observations);
+    parse_python_http_calls(&tokens, &functions, &contexts, &scopes, &mut observations);
+    parse_python_client_fixtures(&tokens, &functions, &contexts, &mut observations);
     parse_python_factories(source, &tokens, &mut observations);
     parse_python_tests(source, &tokens, &mut observations);
+    let clients = contexts
+        .request_modules
+        .iter()
+        .chain(&contexts.request_clients)
+        .chain(&contexts.httpx_modules)
+        .chain(&contexts.httpx_clients)
+        .chain(&contexts.aiohttp_modules)
+        .chain(&contexts.aiohttp_clients)
+        .chain(contexts.direct_calls.keys())
+        .chain(contexts.test_clients.keys())
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let declares_tests = has_ident(&tokens, "pytest")
+        || has_ident(&tokens, "unittest")
+        || functions
+            .iter()
+            .any(|function| function.name.starts_with("test_"));
+    scopes.record_calls(
+        &python_router_imports(&tokens),
+        &clients,
+        declares_tests,
+        &mut observations,
+    );
+    record_fixture_requests(&scopes, &mut observations);
     observations
 }
 
@@ -385,6 +613,8 @@ pub fn normalize_source_http_path(path: &str) -> String {
 enum TokenKind {
     Ident(String),
     Literal(Option<String>),
+    /// Raw body of a JavaScript template literal, including `${...}` substitutions.
+    Template(String),
     Punct(char),
 }
 
@@ -743,6 +973,41 @@ fn rust_functions(tokens: &[Token]) -> Vec<FunctionSpan> {
     functions
 }
 
+/// Position of the smallest function span containing token `index`.
+fn innermost_function(functions: &[FunctionSpan], index: usize) -> Option<usize> {
+    functions
+        .iter()
+        .enumerate()
+        .filter(|(_, function)| function.start_token <= index && index <= function.end_token)
+        .min_by_key(|(_, function)| function.end_token - function.start_token)
+        .map(|(position, _)| position)
+}
+
+/// Splits `start..end` at top-level `separator` punctuation.
+fn split_operands(
+    tokens: &[Token],
+    start: usize,
+    end: usize,
+    separator: char,
+) -> Vec<(usize, usize)> {
+    let mut operands = Vec::new();
+    let mut depth = 0_i32;
+    let mut operand_start = start;
+    for (index, token) in tokens.iter().enumerate().take(end).skip(start) {
+        match token.kind {
+            TokenKind::Punct('(' | '[' | '{') => depth += 1,
+            TokenKind::Punct(')' | ']' | '}') => depth -= 1,
+            TokenKind::Punct(character) if character == separator && depth == 0 => {
+                operands.push((operand_start, index));
+                operand_start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    operands.push((operand_start, end));
+    operands
+}
+
 fn enclosing_symbol(functions: &[FunctionSpan], token_index: usize) -> Option<String> {
     functions
         .iter()
@@ -770,6 +1035,11 @@ fn parse_rust_attributes(tokens: &[Token], observations: &mut SourceObservationC
             [name] if name == "test" => Some(SourceFramework::RustTest),
             [first, second] if first == "tokio" && second == "test" => {
                 Some(SourceFramework::TokioTest)
+            }
+            [first, second]
+                if (first == "actix_web" || first == "actix_rt") && second == "test" =>
+            {
+                Some(SourceFramework::RustTest)
             }
             [name] if name == "rstest" => Some(SourceFramework::Rstest),
             _ => None,
@@ -988,7 +1258,7 @@ fn parse_actix_attribute(
         return;
     }
     for method in methods {
-        observations.push(http_from_literal(
+        let mut observation = http_from_literal(
             SourceLanguage::Rust,
             SourceFramework::ActixWeb,
             SourceRole::Provider,
@@ -1000,11 +1270,17 @@ fn parse_actix_attribute(
                 end: tokens[signature_end].end_line,
             },
             true,
-        ));
+        );
+        observation.router = Some(SymbolRef::Function(symbol.clone()));
+        observations.push(observation);
     }
 }
 
-fn parse_axum_routes(tokens: &[Token], observations: &mut SourceObservationCollector<'_>) {
+fn parse_axum_routes(
+    tokens: &[Token],
+    routers: &RustRouters<'_>,
+    observations: &mut SourceObservationCollector<'_>,
+) {
     for (index, token) in tokens.iter().enumerate() {
         if !token.is_ident("route")
             || !tokens
@@ -1024,9 +1300,10 @@ fn parse_axum_routes(tokens: &[Token], observations: &mut SourceObservationColle
             continue;
         }
         let literal = tokens.get(arguments[0]).and_then(Token::literal);
+        let router = routers.chain_owner(index - 1).router;
         let methods = method_calls(tokens, arguments[1], close);
         for (method, handler) in methods {
-            observations.push(http_from_literal(
+            let mut observation = http_from_literal(
                 SourceLanguage::Rust,
                 SourceFramework::Axum,
                 SourceRole::Provider,
@@ -1038,12 +1315,18 @@ fn parse_axum_routes(tokens: &[Token], observations: &mut SourceObservationColle
                     end: tokens[close].end_line,
                 },
                 true,
-            ));
+            );
+            observation.router = Some(router.clone());
+            observations.push(observation);
         }
     }
 }
 
-fn parse_actix_builder_routes(tokens: &[Token], observations: &mut SourceObservationCollector<'_>) {
+fn parse_actix_builder_routes(
+    tokens: &[Token],
+    routers: &RustRouters<'_>,
+    observations: &mut SourceObservationCollector<'_>,
+) {
     for (index, token) in tokens.iter().enumerate() {
         if !token.is_ident("route")
             || !tokens
@@ -1059,21 +1342,29 @@ fn parse_actix_builder_routes(tokens: &[Token], observations: &mut SourceObserva
         if arguments.len() < 2 || !contains_ident(tokens, arguments[1], close, "web") {
             continue;
         }
+        let owner =
+            (index > 0 && tokens[index - 1].is_punct('.')).then(|| routers.chain_owner(index - 1));
         let literal = tokens.get(arguments[0]).and_then(Token::literal);
+        let literal = match owner.as_ref().and_then(|owner| owner.prefix.as_deref()) {
+            Some(prefix) => join_prefixes(Some(prefix), literal),
+            None => literal.map(str::to_owned),
+        };
         for (method, handler) in method_calls(tokens, arguments[1], close) {
-            observations.push(http_from_literal(
+            let mut observation = http_from_literal(
                 SourceLanguage::Rust,
                 SourceFramework::ActixWeb,
                 SourceRole::Provider,
                 Some(method),
-                literal,
+                literal.as_deref(),
                 handler,
                 SourceLineRange {
                     start: token.line,
                     end: tokens[close].end_line,
                 },
                 true,
-            ));
+            );
+            observation.router = owner.as_ref().map(|owner| owner.router.clone());
+            observations.push(observation);
         }
     }
     for (index, token) in tokens.iter().enumerate() {
@@ -1097,8 +1388,12 @@ fn parse_actix_builder_routes(tokens: &[Token], observations: &mut SourceObserva
             continue;
         }
         let literal = tokens.get(index + 2).and_then(Token::literal);
+        let router = tokens
+            .get(resource_close + 1)
+            .is_some_and(|token| token.is_punct('.'))
+            .then(|| routers.chain_owner(resource_close + 1).router);
         for (method, handler) in method_calls(tokens, resource_close + 1, end) {
-            observations.push(http_from_literal(
+            let mut observation = http_from_literal(
                 SourceLanguage::Rust,
                 SourceFramework::ActixWeb,
                 SourceRole::Provider,
@@ -1110,7 +1405,9 @@ fn parse_actix_builder_routes(tokens: &[Token], observations: &mut SourceObserva
                     end: tokens[end].end_line,
                 },
                 true,
-            ));
+            );
+            observation.router.clone_from(&router);
+            observations.push(observation);
         }
     }
 }
@@ -1118,45 +1415,12 @@ fn parse_actix_builder_routes(tokens: &[Token], observations: &mut SourceObserva
 fn parse_reqwest_calls(
     tokens: &[Token],
     functions: &[FunctionSpan],
+    reqwest_receivers: &BTreeSet<usize>,
+    scopes: &RustScopes<'_>,
     observations: &mut SourceObservationCollector<'_>,
 ) {
-    let reqwest_receivers = rust_bindings::reqwest_receiver_tokens(tokens, functions);
     for index in 0..tokens.len() {
-        let explicit = tokens[index].is_ident("reqwest")
-            && tokens
-                .get(index + 1)
-                .is_some_and(|token| token.is_punct(':'))
-            && tokens
-                .get(index + 2)
-                .is_some_and(|token| token.is_punct(':'));
-        let (receiver, method_index) = if explicit {
-            let direct = index + 3;
-            let method_index = if tokens
-                .get(direct)
-                .is_some_and(|token| token.is_ident("blocking"))
-                && tokens
-                    .get(direct + 1)
-                    .is_some_and(|token| token.is_punct(':'))
-                && tokens
-                    .get(direct + 2)
-                    .is_some_and(|token| token.is_punct(':'))
-            {
-                direct + 3
-            } else {
-                direct
-            };
-            ("reqwest", method_index)
-        } else if let Some(receiver) = tokens[index].ident() {
-            if reqwest_receivers.contains(&index)
-                && tokens
-                    .get(index + 1)
-                    .is_some_and(|token| token.is_punct('.'))
-            {
-                (receiver, index + 2)
-            } else {
-                continue;
-            }
-        } else {
+        let Some(method_index) = reqwest_method_index(tokens, index, reqwest_receivers) else {
             continue;
         };
         let Some(method_name) = tokens.get(method_index).and_then(Token::ident) else {
@@ -1191,15 +1455,20 @@ fn parse_reqwest_calls(
         if method.is_none() && method_name != "request" {
             continue;
         }
-        let literal = path_argument
-            .and_then(|argument| tokens.get(argument))
-            .and_then(Token::literal);
+        let template = path_argument.map(|argument| {
+            let end = arguments
+                .iter()
+                .find(|start| **start > argument)
+                .map_or(close, |next| next - 1);
+            scopes.template(argument, end, index)
+        });
+        let literal = template.as_ref().and_then(UrlTemplate::client_literal);
         let mut observation = http_from_literal(
             SourceLanguage::Rust,
             SourceFramework::Reqwest,
             SourceRole::Consumer,
             method,
-            literal,
+            literal.as_deref(),
             enclosing_symbol(functions, index),
             SourceLineRange {
                 start: tokens[index].line,
@@ -1214,9 +1483,35 @@ fn parse_reqwest_calls(
             observation.warnings.sort();
             observation.warnings.dedup();
         }
-        let _ = receiver;
+        observation.url = template.filter(UrlTemplate::has_parameters);
         observations.push(observation);
     }
+}
+
+/// Index of the method name called at token `index` on the `reqwest` or `reqwest::blocking`
+/// module, or on a Reqwest client receiver.
+fn reqwest_method_index(
+    tokens: &[Token],
+    index: usize,
+    reqwest_receivers: &BTreeSet<usize>,
+) -> Option<usize> {
+    let path_separator = |at: usize| {
+        tokens.get(at).is_some_and(|token| token.is_punct(':'))
+            && tokens.get(at + 1).is_some_and(|token| token.is_punct(':'))
+    };
+    if tokens[index].is_ident("reqwest") && path_separator(index + 1) {
+        let direct = index + 3;
+        let blocking = tokens
+            .get(direct)
+            .is_some_and(|token| token.is_ident("blocking"))
+            && path_separator(direct + 1);
+        return Some(if blocking { direct + 3 } else { direct });
+    }
+    (reqwest_receivers.contains(&index)
+        && tokens
+            .get(index + 1)
+            .is_some_and(|token| token.is_punct('.')))
+    .then_some(index + 2)
 }
 
 fn rust_method_expression(tokens: &[Token], start: usize, end: usize) -> Option<String> {
@@ -1341,6 +1636,64 @@ fn canonical_method(name: &str) -> Option<&'static str> {
         .find(|method| method.eq_ignore_ascii_case(name))
 }
 
+/// Call from function `function` recorded for repository-level flow composition.
+pub(crate) fn call_observation(
+    language: SourceLanguage,
+    callee: SymbolRef,
+    arguments: Vec<CallArgument>,
+    function: String,
+    lines: SourceLineRange,
+) -> SourceObservation {
+    let framework = match language {
+        SourceLanguage::Python => SourceFramework::PythonTest,
+        SourceLanguage::Rust => SourceFramework::RustTest,
+        SourceLanguage::TypeScript | SourceLanguage::JavaScript => SourceFramework::Fetch,
+        SourceLanguage::Go => SourceFramework::GoNetHttp,
+        SourceLanguage::Java => SourceFramework::SpringMvc,
+    };
+    SourceObservation {
+        language,
+        framework,
+        role: SourceRole::Call,
+        method: None,
+        path: None,
+        symbol_name: Some(function),
+        related_symbol: None,
+        related_path: None,
+        authority: None,
+        router: None,
+        mount_parent: None,
+        url: None,
+        call: Some(CallSite { callee, arguments }),
+        lines,
+        status: SourceEpistemicStatus::Confirmed,
+        confidence: 1.0,
+        warnings: Vec::new(),
+    }
+}
+
+/// Confirmed consumer of `template` issued from `caller`, with the client coordinates of
+/// `origin`; `None` when the template does not yield an exact method and path.
+pub(crate) fn instantiated_consumer(
+    origin: &SourceObservation,
+    template: &UrlTemplate,
+    caller: &str,
+    lines: SourceLineRange,
+) -> Option<SourceObservation> {
+    let literal = template.client_literal()?;
+    let observation = http_from_literal(
+        origin.language,
+        origin.framework,
+        SourceRole::Consumer,
+        origin.method.clone(),
+        Some(&literal),
+        Some(caller.to_owned()),
+        lines,
+        false,
+    );
+    (observation.status == SourceEpistemicStatus::Confirmed).then_some(observation)
+}
+
 fn confirmed_test(
     language: SourceLanguage,
     framework: SourceFramework,
@@ -1357,6 +1710,11 @@ fn confirmed_test(
         symbol_name: Some(name),
         related_symbol: None,
         related_path: None,
+        authority: None,
+        router: None,
+        mount_parent: None,
+        url: None,
+        call: None,
         lines: SourceLineRange { start, end },
         status: SourceEpistemicStatus::Confirmed,
         confidence: 1.0,
@@ -1385,16 +1743,14 @@ fn http_from_literal(
             client_literal_identity(value)
         }
     });
-    let warning = if authority.is_some() {
-        Some(SourceWarning::UnmappedAuthority)
-    } else if literal.is_none() {
+    let warning = if literal.is_none() {
         Some(SourceWarning::DynamicPath)
     } else if path.is_none() {
         Some(SourceWarning::UnsupportedLiteralPath)
     } else {
         None
     };
-    let status = if path.is_some() && method.is_some() && authority.is_none() {
+    let status = if path.is_some() && method.is_some() {
         SourceEpistemicStatus::Confirmed
     } else {
         SourceEpistemicStatus::Ambiguous
@@ -1408,6 +1764,11 @@ fn http_from_literal(
         symbol_name,
         related_symbol: None,
         related_path: None,
+        authority,
+        router: None,
+        mount_parent: None,
+        url: None,
+        call: None,
         lines,
         status,
         confidence: if status == SourceEpistemicStatus::Confirmed {
@@ -1448,6 +1809,11 @@ fn inexact_http(
         symbol_name,
         related_symbol: None,
         related_path: None,
+        authority: None,
+        router: None,
+        mount_parent: None,
+        url: None,
+        call: None,
         lines,
         status: SourceEpistemicStatus::Incomplete,
         confidence: 0.0,
@@ -1479,13 +1845,12 @@ fn client_literal_identity(value: &str) -> (Option<String>, Option<String>) {
         return (None, None);
     }
     let separator = after_authority.find('/');
-    let authority = separator.map_or(after_authority, |index| &after_authority[..index]);
     let path = separator.map_or("/", |index| &after_authority[index..]);
     (
         Some(normalize_source_http_path(
             path.split(['?', '#']).next().unwrap_or(path),
         )),
-        Some(authority.to_ascii_lowercase()),
+        crate::routes::url_authority(value),
     )
 }
 
@@ -1502,6 +1867,7 @@ struct PythonContexts {
     aiohttp_clients: BTreeSet<String>,
     direct_calls: BTreeMap<String, (SourceFramework, String)>,
     string_constants: BTreeMap<String, String>,
+    test_clients: BTreeMap<String, SourceFramework>,
 }
 
 impl PythonContexts {
@@ -1545,27 +1911,31 @@ impl PythonContexts {
             {
                 contexts.string_constants.insert(name.to_owned(), value);
             }
+            if let Some(framework) = python_test_client(tokens, index + 2, end) {
+                contexts.test_clients.insert(name.to_owned(), framework);
+                continue;
+            }
             if contains_ident(tokens, index + 2, end, "FastAPI")
                 || contains_ident(tokens, index + 2, end, "APIRouter")
             {
                 contexts.fastapi_apps.insert(name.to_owned());
                 if contains_ident(tokens, index + 2, end, "APIRouter")
-                    && let Some(open) =
-                        (index + 2..end).find(|candidate| tokens[*candidate].is_punct('('))
-                    && let Some(close) = matching(tokens, open, '(', ')')
-                    && let Some(prefix) = parse_keyword_string_values(tokens, open, close, "prefix")
-                        .into_iter()
-                        .next()
+                    && let Some(prefix) =
+                        python_constructor_prefix(tokens, index + 2, end, "prefix")
                 {
-                    contexts
-                        .route_prefixes
-                        .insert(name.to_owned(), normalize_source_http_path(&prefix));
+                    contexts.route_prefixes.insert(name.to_owned(), prefix);
                 }
             }
             if contains_ident(tokens, index + 2, end, "Flask")
                 || contains_ident(tokens, index + 2, end, "Blueprint")
             {
                 contexts.flask_apps.insert(name.to_owned());
+                if contains_ident(tokens, index + 2, end, "Blueprint")
+                    && let Some(prefix) =
+                        python_constructor_prefix(tokens, index + 2, end, "url_prefix")
+                {
+                    contexts.route_prefixes.insert(name.to_owned(), prefix);
+                }
             }
             if contains_ident(tokens, index + 2, end, "Session")
                 && (contains_any(tokens, index + 2, end, &contexts.request_modules)
@@ -1587,25 +1957,139 @@ impl PythonContexts {
                 contexts.aiohttp_clients.insert(name.to_owned());
             }
         }
-        if aiohttp_client_imported {
-            for index in 0..tokens.len() {
-                if !tokens[index].is_ident("as") {
-                    continue;
-                }
-                let Some(name) = tokens.get(index + 1).and_then(Token::ident) else {
-                    continue;
-                };
-                let start = index.saturating_sub(32);
-                if tokens[start..index]
-                    .iter()
-                    .any(|token| token.is_ident("ClientSession"))
-                {
-                    contexts.aiohttp_clients.insert(name.to_owned());
-                }
-            }
-        }
+        contexts.discover_with_targets(tokens, aiohttp_client_imported);
         contexts
     }
+
+    /// Clients bound by `with ... as NAME`.
+    fn discover_with_targets(&mut self, tokens: &[Token], aiohttp_client_imported: bool) {
+        for index in 0..tokens.len() {
+            if !tokens[index].is_ident("as") {
+                continue;
+            }
+            let Some(name) = tokens.get(index + 1).and_then(Token::ident) else {
+                continue;
+            };
+            let start = index.saturating_sub(32);
+            let with = (start..index)
+                .rev()
+                .find(|candidate| tokens[*candidate].is_ident("with"))
+                .unwrap_or(start);
+            if let Some(framework) = python_test_client(tokens, with, index) {
+                self.test_clients.insert(name.to_owned(), framework);
+            } else if aiohttp_client_imported
+                && tokens[start..index]
+                    .iter()
+                    .any(|token| token.is_ident("ClientSession"))
+            {
+                self.aiohttp_clients.insert(name.to_owned());
+            }
+        }
+    }
+
+    /// Client receivers and the framework of each.
+    fn http_receivers(&self) -> BTreeMap<&str, SourceFramework> {
+        self.request_modules
+            .iter()
+            .chain(&self.request_clients)
+            .map(|name| (name.as_str(), SourceFramework::Requests))
+            .chain(
+                self.httpx_modules
+                    .iter()
+                    .chain(&self.httpx_clients)
+                    .map(|name| (name.as_str(), SourceFramework::Httpx)),
+            )
+            .chain(
+                self.aiohttp_clients
+                    .iter()
+                    .map(|name| (name.as_str(), SourceFramework::AioHttp)),
+            )
+            .chain(
+                self.test_clients
+                    .iter()
+                    .map(|(name, framework)| (name.as_str(), *framework)),
+            )
+            .collect()
+    }
+}
+
+/// In-process test client constructed by the expression in `start..end`.
+fn python_test_client(tokens: &[Token], start: usize, end: usize) -> Option<SourceFramework> {
+    if contains_ident(tokens, start, end, "TestClient") {
+        return Some(SourceFramework::TestClient);
+    }
+    let flask = (start.max(1)..end).any(|index| {
+        tokens[index].is_ident("test_client")
+            && tokens[index - 1].is_punct('.')
+            && tokens
+                .get(index + 1)
+                .is_some_and(|token| token.is_punct('('))
+    });
+    if flask {
+        return Some(SourceFramework::FlaskTestClient);
+    }
+    let httpx = contains_ident(tokens, start, end, "AsyncClient")
+        || contains_ident(tokens, start, end, "Client");
+    let in_process = contains_ident(tokens, start, end, "ASGITransport")
+        || contains_ident(tokens, start, end, "WSGITransport")
+        || (start.max(1)..end).any(|index| {
+            tokens[index].is_ident("app")
+                && (tokens[index - 1].is_punct('(') || tokens[index - 1].is_punct(','))
+                && tokens
+                    .get(index + 1)
+                    .is_some_and(|token| token.is_punct('='))
+        });
+    (httpx && in_process).then_some(SourceFramework::TestClient)
+}
+
+/// Functions, such as pytest fixtures, that return or yield an in-process test client.
+fn parse_python_client_fixtures(
+    tokens: &[Token],
+    functions: &[FunctionSpan],
+    contexts: &PythonContexts,
+    observations: &mut SourceObservationCollector<'_>,
+) {
+    for index in 0..tokens.len() {
+        if !tokens[index].is_ident("return") && !tokens[index].is_ident("yield") {
+            continue;
+        }
+        let Some(function) = innermost_function(functions, index) else {
+            continue;
+        };
+        let end = python_expression_end(tokens, index + 1);
+        let named = tokens
+            .get(index + 1)
+            .and_then(Token::ident)
+            .filter(|_| end == index + 2)
+            .and_then(|name| contexts.test_clients.get(name).copied());
+        let Some(framework) = named.or_else(|| python_test_client(tokens, index + 1, end)) else {
+            continue;
+        };
+        let mut observation = confirmed_test(
+            SourceLanguage::Python,
+            framework,
+            functions[function].name.clone(),
+            tokens[index].line,
+            tokens[index].end_line,
+        );
+        observation.role = SourceRole::Client;
+        observations.push(observation);
+    }
+}
+
+/// Normalized `keyword=` string of the first call between `start` and `end`.
+fn python_constructor_prefix(
+    tokens: &[Token],
+    start: usize,
+    end: usize,
+    keyword: &str,
+) -> Option<String> {
+    let open = (start..end).find(|candidate| tokens[*candidate].is_punct('('))?;
+    let close = matching(tokens, open, '(', ')')?;
+    let prefix = parse_keyword_string_values(tokens, open, close, keyword)
+        .into_iter()
+        .next()?;
+    Some(normalize_source_http_path(&prefix))
 }
 
 fn python_imports_item(tokens: &[Token], module: &str, item: &str) -> bool {
@@ -1849,8 +2333,9 @@ fn parse_python_routes(
         });
         let literal = prefixed_path.as_deref();
         let methods = python_route_methods(tokens, open, close, decorator, framework);
+        let router = Some(SymbolRef::Local(receiver.to_owned()));
         if methods.is_empty() {
-            observations.push(inexact_http(
+            let mut observation = inexact_http(
                 SourceLanguage::Python,
                 framework,
                 SourceRole::Provider,
@@ -1862,10 +2347,12 @@ fn parse_python_routes(
                     end: tokens[signature_end].end_line,
                 },
                 SourceWarning::DynamicMethod,
-            ));
+            );
+            observation.router = router;
+            observations.push(observation);
         } else {
             for method in methods {
-                observations.push(http_from_literal(
+                let mut observation = http_from_literal(
                     SourceLanguage::Python,
                     framework,
                     SourceRole::Provider,
@@ -1877,10 +2364,257 @@ fn parse_python_routes(
                         end: tokens[signature_end].end_line,
                     },
                     true,
-                ));
+                );
+                observation.router.clone_from(&router);
+                observations.push(observation);
             }
         }
     }
+}
+
+/// Records `include_router` and `register_blueprint` mounts on known applications and routers.
+fn parse_python_router_mounts(
+    tokens: &[Token],
+    contexts: &PythonContexts,
+    observations: &mut SourceObservationCollector<'_>,
+) {
+    let imports = python_router_imports(tokens);
+    for index in 0..tokens.len().saturating_sub(3) {
+        let Some(receiver) = tokens[index].ident() else {
+            continue;
+        };
+        let (framework, keyword) = match tokens[index + 2].ident() {
+            Some("include_router") if contexts.fastapi_apps.contains(receiver) => {
+                (SourceFramework::FastApi, "prefix")
+            }
+            Some("register_blueprint") if contexts.flask_apps.contains(receiver) => {
+                (SourceFramework::Flask, "url_prefix")
+            }
+            _ => continue,
+        };
+        if !tokens[index + 1].is_punct('.') || !tokens[index + 3].is_punct('(') {
+            continue;
+        }
+        let open = index + 3;
+        let Some(close) = matching(tokens, open, '(', ')') else {
+            continue;
+        };
+        let Some(&first) = top_level_arguments(tokens, open, close).first() else {
+            continue;
+        };
+        let mut dotted = Vec::new();
+        let mut cursor = first;
+        while let Some(name) = tokens.get(cursor).and_then(Token::ident) {
+            dotted.push(name);
+            if !tokens
+                .get(cursor + 1)
+                .is_some_and(|token| token.is_punct('.'))
+            {
+                break;
+            }
+            cursor += 2;
+        }
+        let Some(child) = python_router_reference(&dotted, contexts, &imports) else {
+            continue;
+        };
+        let prefix = parse_keyword_string_values(tokens, open, close, keyword)
+            .into_iter()
+            .next();
+        observations.push(mount_observation(
+            SourceLanguage::Python,
+            framework,
+            child,
+            Some(SymbolRef::Local(receiver.to_owned())),
+            prefix.as_deref(),
+            SourceLineRange {
+                start: tokens[index].line,
+                end: tokens[close].end_line,
+            },
+        ));
+    }
+}
+
+/// Routes registered by `FastAPI` `add_api_route(path, endpoint)` and Flask
+/// `add_url_rule(rule, endpoint, view_func)` calls.
+fn parse_python_route_calls(
+    tokens: &[Token],
+    contexts: &PythonContexts,
+    observations: &mut SourceObservationCollector<'_>,
+) {
+    for index in 0..tokens.len().saturating_sub(3) {
+        let Some(receiver) = tokens[index].ident() else {
+            continue;
+        };
+        if !tokens[index + 1].is_punct('.') || !tokens[index + 3].is_punct('(') {
+            continue;
+        }
+        let (framework, path_keyword, handler_keyword, handler_position) =
+            match tokens[index + 2].ident() {
+                Some("add_api_route") if contexts.fastapi_apps.contains(receiver) => {
+                    (SourceFramework::FastApi, "path", "endpoint", 1)
+                }
+                Some("add_url_rule") if contexts.flask_apps.contains(receiver) => {
+                    (SourceFramework::Flask, "rule", "view_func", 2)
+                }
+                _ => continue,
+            };
+        let open = index + 3;
+        let Some(close) = matching(tokens, open, '(', ')') else {
+            continue;
+        };
+        let arguments = top_level_arguments(tokens, open, close)
+            .into_iter()
+            .map(|start| {
+                let end = python_argument_end(tokens, start, close);
+                match keyword_argument(tokens, start, end) {
+                    Some((keyword, value)) => (Some(keyword), value, end),
+                    None => (None, start, end),
+                }
+            })
+            .collect::<Vec<_>>();
+        let positional = arguments
+            .iter()
+            .filter(|(keyword, ..)| keyword.is_none())
+            .collect::<Vec<_>>();
+        let path = arguments
+            .iter()
+            .find(|(keyword, ..)| keyword.as_deref() == Some(path_keyword))
+            .or_else(|| positional.first().copied())
+            .and_then(|(_, start, end)| {
+                python_static_string_expression(tokens, *start, *end, &contexts.string_constants)
+            });
+        let handler = arguments
+            .iter()
+            .find(|(keyword, ..)| keyword.as_deref() == Some(handler_keyword))
+            .or_else(|| positional.get(handler_position).copied())
+            .and_then(|(_, start, end)| {
+                (*start..*end)
+                    .map(|token| {
+                        tokens[token]
+                            .ident()
+                            .or_else(|| tokens[token].is_punct('.').then_some("."))
+                    })
+                    .collect::<Option<String>>()
+            });
+        let mut methods =
+            python_route_methods(tokens, open, close, "route", SourceFramework::Flask);
+        if methods.is_empty() {
+            methods.insert("GET".to_owned());
+        }
+        for method in methods {
+            let mut observation = http_from_literal(
+                SourceLanguage::Python,
+                framework,
+                SourceRole::Provider,
+                Some(method),
+                path.as_deref(),
+                handler.clone(),
+                SourceLineRange {
+                    start: tokens[index].line,
+                    end: tokens[close].end_line,
+                },
+                true,
+            );
+            observation.router = Some(SymbolRef::Local(receiver.to_owned()));
+            observations.push(observation);
+        }
+    }
+}
+
+fn python_router_reference(
+    dotted: &[&str],
+    contexts: &PythonContexts,
+    imports: &BTreeMap<String, (String, String)>,
+) -> Option<SymbolRef> {
+    let (head, rest) = dotted.split_first()?;
+    if let Some((module, name)) = imports.get(*head) {
+        let name = std::iter::once(name.as_str())
+            .filter(|name| !name.is_empty())
+            .chain(rest.iter().copied())
+            .collect::<Vec<_>>()
+            .join(".");
+        return (!name.is_empty()).then(|| SymbolRef::Import {
+            module: module.clone(),
+            name,
+        });
+    }
+    (rest.is_empty()
+        && (contexts.fastapi_apps.contains(*head) || contexts.flask_apps.contains(*head)))
+    .then(|| SymbolRef::Local((*head).to_owned()))
+}
+
+/// Maps local names to `(module, imported name)`; `import a.b as c` binds `c` to `(a.b, "")`.
+fn python_router_imports(tokens: &[Token]) -> BTreeMap<String, (String, String)> {
+    let mut imports = BTreeMap::new();
+    for index in 0..tokens.len() {
+        if tokens[index].is_ident("import")
+            && (index == 0 || tokens[index - 1].line != tokens[index].line)
+        {
+            let mut cursor = index + 1;
+            let mut module = String::new();
+            while let Some(token) = tokens
+                .get(cursor)
+                .filter(|token| token.line == tokens[index].line)
+            {
+                match (token.ident(), token.is_punct('.')) {
+                    (Some(name), _) if name != "as" => module.push_str(name),
+                    (None, true) => module.push('.'),
+                    _ => break,
+                }
+                cursor += 1;
+            }
+            if tokens.get(cursor).is_some_and(|token| token.is_ident("as"))
+                && let Some(alias) = tokens.get(cursor + 1).and_then(Token::ident)
+            {
+                imports.insert(alias.to_owned(), (module, String::new()));
+            }
+            continue;
+        }
+        if !tokens[index].is_ident("from") {
+            continue;
+        }
+        let Some(import_index) = (index + 1..tokens.len())
+            .take_while(|candidate| tokens[*candidate].line == tokens[index].line)
+            .find(|candidate| tokens[*candidate].is_ident("import"))
+        else {
+            continue;
+        };
+        let module = tokens[index + 1..import_index]
+            .iter()
+            .map(|token| token.ident().unwrap_or("."))
+            .collect::<String>();
+        let parenthesized = tokens
+            .get(import_index + 1)
+            .is_some_and(|token| token.is_punct('('));
+        let end = if parenthesized {
+            matching(tokens, import_index + 1, '(', ')').unwrap_or(import_index + 1)
+        } else {
+            (import_index + 1..tokens.len())
+                .find(|candidate| tokens[*candidate].line != tokens[index].line)
+                .unwrap_or(tokens.len())
+        };
+        let mut cursor = import_index + 1;
+        while cursor < end {
+            let Some(imported) = tokens[cursor].ident() else {
+                cursor += 1;
+                continue;
+            };
+            let aliased = tokens
+                .get(cursor + 1)
+                .is_some_and(|token| token.is_ident("as"));
+            let local = if aliased {
+                tokens
+                    .get(cursor + 2)
+                    .and_then(Token::ident)
+                    .unwrap_or(imported)
+            } else {
+                imported
+            };
+            imports.insert(local.to_owned(), (module.clone(), imported.to_owned()));
+            cursor += if aliased { 3 } else { 1 };
+        }
+    }
+    imports
 }
 
 fn python_decorator_call(tokens: &[Token], at: usize) -> Option<(&str, &str, usize)> {
@@ -2185,6 +2919,11 @@ fn parse_python_factories(
             symbol_name: Some(factory_name.to_owned()),
             related_symbol: Some(model_name.to_owned()),
             related_path: imported_paths.get(model_name).cloned(),
+            authority: None,
+            router: None,
+            mount_parent: None,
+            url: None,
+            call: None,
             lines: SourceLineRange {
                 start: start_line,
                 end: model_line,
@@ -2248,44 +2987,34 @@ fn parse_python_http_calls(
     tokens: &[Token],
     functions: &[FunctionSpan],
     contexts: &PythonContexts,
+    scopes: &PythonScopes<'_>,
     observations: &mut SourceObservationCollector<'_>,
 ) {
-    let receivers = contexts
-        .request_modules
-        .iter()
-        .chain(&contexts.request_clients)
-        .map(|name| (name.as_str(), SourceFramework::Requests))
-        .chain(
-            contexts
-                .httpx_modules
-                .iter()
-                .chain(&contexts.httpx_clients)
-                .map(|name| (name.as_str(), SourceFramework::Httpx)),
-        )
-        .chain(
-            contexts
-                .aiohttp_clients
-                .iter()
-                .map(|name| (name.as_str(), SourceFramework::AioHttp)),
-        )
-        .collect::<BTreeMap<_, _>>();
+    let receivers = contexts.http_receivers();
     for index in 0..tokens.len() {
         let Some(receiver) = tokens[index].ident() else {
             continue;
         };
-        let (framework, call, open) = if let Some(framework) = receivers.get(receiver).copied() {
-            if !tokens
+        let member = || {
+            tokens
                 .get(index + 1)
                 .is_some_and(|token| token.is_punct('.'))
-            {
-                continue;
-            }
-            let Some(call) = tokens.get(index + 2).and_then(Token::ident) else {
+                .then(|| tokens.get(index + 2).and_then(Token::ident))
+                .flatten()
+        };
+        let mut parameter = None;
+        let (framework, call, open) = if let Some(framework) = receivers.get(receiver).copied() {
+            let Some(call) = member() else {
                 continue;
             };
             (framework, call, index + 3)
         } else if let Some((framework, call)) = contexts.direct_calls.get(receiver) {
             (*framework, call.as_str(), index + 1)
+        } else if let Some(call) = member().filter(|call| canonical_method(call).is_some())
+            && let Some(received) = python_received_client(tokens, index, scopes)
+        {
+            parameter = Some(received);
+            (SourceFramework::TestClient, call, index + 3)
         } else {
             continue;
         };
@@ -2315,25 +3044,20 @@ fn parse_python_http_calls(
         if method.is_none() && call != "request" {
             continue;
         }
-        let resolved_path = path_argument.and_then(|argument| {
-            python_static_string_expression(
-                tokens,
-                argument,
-                python_argument_end(tokens, argument, close),
-                &contexts.string_constants,
-            )
+        let template = path_argument.map(|argument| {
+            let end = python_argument_end(tokens, argument, close);
+            let start = keyword_argument(tokens, argument, end)
+                .filter(|(keyword, _)| keyword == "url")
+                .map_or(argument, |(_, value)| value);
+            scopes.template(start, end, index)
         });
-        let literal = resolved_path.as_deref().or_else(|| {
-            path_argument
-                .and_then(|argument| tokens.get(argument))
-                .and_then(Token::literal)
-        });
+        let literal = template.as_ref().and_then(UrlTemplate::client_literal);
         let mut observation = http_from_literal(
             SourceLanguage::Python,
             framework,
             SourceRole::Consumer,
             method,
-            literal,
+            literal.as_deref(),
             enclosing_symbol(functions, index),
             SourceLineRange {
                 start: tokens[index].line,
@@ -2341,6 +3065,15 @@ fn parse_python_http_calls(
             },
             false,
         );
+        observation.url = template.filter(UrlTemplate::has_parameters);
+        if let Some(received) = parameter {
+            if !literal.as_deref().is_some_and(|path| path.starts_with('/')) {
+                continue;
+            }
+            observation.router = Some(received);
+            observation.status = SourceEpistemicStatus::Ambiguous;
+            observation.confidence = 0.0;
+        }
         if call == "request" && observation.method.is_none() {
             observation.status = SourceEpistemicStatus::Incomplete;
             observation.confidence = 0.0;
@@ -2350,6 +3083,27 @@ fn parse_python_http_calls(
         }
         observations.push(observation);
     }
+}
+
+/// Parameter of the enclosing function through which the call at `index` receives its client.
+fn python_received_client(
+    tokens: &[Token],
+    index: usize,
+    scopes: &PythonScopes<'_>,
+) -> Option<SymbolRef> {
+    if index > 0 && tokens[index - 1].is_punct('.') {
+        return None;
+    }
+    let name = tokens[index].ident()?;
+    let function = scopes.innermost(index)?;
+    let position = scopes
+        .parameters_of(function)
+        .iter()
+        .position(|parameter| parameter == name)?;
+    Some(SymbolRef::Parameter {
+        name: name.to_owned(),
+        index: position,
+    })
 }
 
 fn parse_python_tests(
@@ -2496,13 +3250,80 @@ fn compare_observations(left: &SourceObservation, right: &SourceObservation) -> 
             right.status,
             &right.warnings,
         ))
+        .then_with(|| {
+            (
+                &left.authority,
+                &left.router,
+                &left.mount_parent,
+                &left.url,
+                &left.call,
+            )
+                .cmp(&(
+                    &right.authority,
+                    &right.router,
+                    &right.mount_parent,
+                    &right.url,
+                    &right.call,
+                ))
+        })
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        SourceEpistemicStatus, SourceFramework, SourceRole, SourceWarning, parse_python_source, parse_rust_source
+        SourceEpistemicStatus, SourceFramework, SourceObservation, SourceRole, SourceWarning, SymbolRef, UrlPart, parse_python_source
     };
+
+    /// HTTP, route, and test facts without call observations.
+    fn parse_rust_source(source: &str) -> Vec<SourceObservation> {
+        super::parse_rust_source(source)
+            .into_iter()
+            .filter(|item| item.role != SourceRole::Call)
+            .collect()
+    }
+
+    #[test]
+    fn rust_reqwest_urls_should_resolve_constants_format_strings_and_wrapper_parameters() {
+        let source = r#"
+use reqwest::Client;
+const BASE: &str = "http://orders:8080";
+async fn get_order(client: &Client, id: u64) {
+    client.get(format!("{BASE}/orders/{id}")).send().await;
+}
+async fn post_json(client: &Client, path: &str) {
+    client.post(format!("{}{}", BASE, path)).send().await;
+}
+async fn refund(client: &Client, id: &str) {
+    post_json(client, &format!("/orders/{id}/refunds")).await;
+}
+"#;
+        let result = super::parse_rust_source(source);
+        let consumers = result
+            .iter()
+            .filter(|item| item.role == SourceRole::Consumer)
+            .map(|item| {
+                (
+                    item.symbol_name.as_deref(),
+                    item.path.as_deref(),
+                    item.url.is_some(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let calls = result
+            .iter()
+            .filter_map(|item| item.call.as_ref())
+            .map(|call| (call.callee.clone(), call.arguments.len()))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            consumers,
+            [
+                (Some("get_order"), Some("/orders/{id}"), true),
+                (Some("post_json"), None, true),
+            ]
+        );
+        assert_eq!(calls, [(SymbolRef::Call("post_json".to_owned()), 2)]);
+    }
 
     #[test]
     fn axum_should_extract_multiline_route_and_handler() {
@@ -2572,6 +3393,7 @@ fn app() {
         assert_eq!(
             result
                 .iter()
+                .filter(|item| item.role == SourceRole::Provider)
                 .map(|item| (
                     item.framework,
                     item.method.as_deref(),
@@ -2702,11 +3524,11 @@ async fn synchronize<'request>(client: &'request Client) {
     }
 
     #[test]
-    fn absolute_consumer_url_should_require_an_explicit_authority_mapping() {
+    fn absolute_consumer_url_should_record_its_authority() {
         let source = r#"
 use reqwest::Client;
 async fn synchronize(client: &Client) {
-    client.get("https://third-party.example/health").send().await;
+    client.get("https://User@Third-Party.example:8443/health?probe=1").send().await;
     client.get("/internal-health").send().await;
 }
 "#;
@@ -2720,9 +3542,14 @@ async fn synchronize(client: &Client) {
             .find(|item| item.path.as_deref() == Some("/internal-health"))
             .expect("relative call");
 
-        assert_eq!(external.status, SourceEpistemicStatus::Ambiguous);
-        assert_eq!(external.warnings, [SourceWarning::UnmappedAuthority]);
+        assert_eq!(external.status, SourceEpistemicStatus::Confirmed);
+        assert_eq!(
+            external.authority.as_deref(),
+            Some("third-party.example:8443")
+        );
+        assert_eq!(external.warnings, []);
         assert_eq!(internal.status, SourceEpistemicStatus::Confirmed);
+        assert_eq!(internal.authority, None);
     }
 
     #[test]
@@ -3407,22 +4234,324 @@ def send(method, base, path):
         ));
     }
 
+    fn consumer_paths(source: &str) -> Vec<(Option<String>, Option<String>, bool)> {
+        parse_python_source(source)
+            .into_iter()
+            .filter(|item| item.role == SourceRole::Consumer)
+            .map(|item| (item.symbol_name, item.path, item.url.is_some()))
+            .collect()
+    }
+
     #[test]
-    fn python_f_strings_should_be_dynamic_not_exact() {
+    fn python_url_expressions_should_resolve_whole_segment_values_and_scoped_names() {
         let source = r#"
 import requests
+BASE_URL = "http://orders:8080"
+API = BASE_URL + "/api"
 def fetch(user_id):
     requests.get(f"https://example.test/users/{user_id}")
+def report(name):
+    requests.get(f"/reports/{name}.csv")
+def scoped(order):
+    url = f"{API}/orders/{order.id}"
+    requests.get(url)
+def formatted(sku):
+    requests.get("{}/items/{}".format(API, sku))
+    requests.delete("/items/%s" % sku)
+"#;
+
+        assert_eq!(
+            consumer_paths(source),
+            [
+                (
+                    Some("fetch".to_owned()),
+                    Some("/users/{user_id}".to_owned()),
+                    true
+                ),
+                (Some("report".to_owned()), None, true),
+                (
+                    Some("scoped".to_owned()),
+                    Some("/api/orders/{id}".to_owned()),
+                    false
+                ),
+                (
+                    Some("formatted".to_owned()),
+                    Some("/api/items/{sku}".to_owned()),
+                    true
+                ),
+                (
+                    Some("formatted".to_owned()),
+                    Some("/items/{sku}".to_owned()),
+                    true
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn python_test_clients_should_be_recognized_and_parameter_clients_left_for_composition() {
+        let source = r#"
+import httpx
+import pytest
+from fastapi.testclient import TestClient
+from app import app, flask_app
+
+client = TestClient(app)
+
+def test_direct():
+    client.get("/items")
+
+class OrdersTest(unittest.TestCase):
+    def setUp(self):
+        self.web = flask_app.test_client()
+
+    def test_flask(self):
+        self.web.post("/orders")
+
+async def test_async():
+    async with httpx.AsyncClient(app=app, base_url="http://test") as api:
+        await api.delete("/orders/1")
+
+@pytest.fixture
+def api_client():
+    return TestClient(app)
+
+def test_injected(api_client):
+    api_client.put("/orders/2")
 "#;
         let result = parse_python_source(source);
+        let consumers = result
+            .iter()
+            .filter(|item| item.role == SourceRole::Consumer)
+            .map(|item| {
+                (
+                    item.framework,
+                    item.method.clone().unwrap_or_default(),
+                    item.path.clone().unwrap_or_default(),
+                    item.status,
+                    item.router.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let clients = result
+            .iter()
+            .filter(|item| item.role == SourceRole::Client)
+            .map(|item| (item.framework, item.symbol_name.clone().unwrap_or_default()))
+            .collect::<Vec<_>>();
 
-        assert!(matches!(
-            result.as_slice(),
-            [item]
-                if item.path.is_none()
-                    && item.status == SourceEpistemicStatus::Ambiguous
-                    && item.warnings == [SourceWarning::DynamicPath]
-        ));
+        assert_eq!(
+            consumers,
+            [
+                (
+                    SourceFramework::TestClient,
+                    "GET".to_owned(),
+                    "/items".to_owned(),
+                    SourceEpistemicStatus::Confirmed,
+                    None
+                ),
+                (
+                    SourceFramework::FlaskTestClient,
+                    "POST".to_owned(),
+                    "/orders".to_owned(),
+                    SourceEpistemicStatus::Confirmed,
+                    None
+                ),
+                (
+                    SourceFramework::TestClient,
+                    "DELETE".to_owned(),
+                    "/orders/1".to_owned(),
+                    SourceEpistemicStatus::Confirmed,
+                    None
+                ),
+                (
+                    SourceFramework::TestClient,
+                    "PUT".to_owned(),
+                    "/orders/2".to_owned(),
+                    SourceEpistemicStatus::Ambiguous,
+                    Some(SymbolRef::Parameter {
+                        name: "api_client".to_owned(),
+                        index: 0
+                    })
+                ),
+            ]
+        );
+        assert_eq!(
+            clients,
+            [(SourceFramework::TestClient, "api_client".to_owned())]
+        );
+    }
+
+    #[test]
+    fn python_imperative_routes_should_name_their_handlers() {
+        let source = r#"
+from fastapi import APIRouter
+from flask import Flask
+from orders import views
+
+router = APIRouter()
+router.add_api_route("/orders", views.list_orders, methods=["GET", "POST"])
+router.add_api_route(path="/health", endpoint=health)
+app = Flask(__name__)
+app.add_url_rule("/legacy/<int:id>", "legacy", views.legacy)
+"#;
+        let providers = parse_python_source(source)
+            .into_iter()
+            .filter(|item| item.role == SourceRole::Provider)
+            .map(|item| {
+                format!(
+                    "{} {} -> {}",
+                    item.method.unwrap_or_default(),
+                    item.path.unwrap_or_default(),
+                    item.symbol_name.unwrap_or_default()
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            providers,
+            [
+                "GET /orders -> views.list_orders",
+                "POST /orders -> views.list_orders",
+                "GET /health -> health",
+                "GET /legacy/<int:id> -> views.legacy",
+            ]
+        );
+    }
+
+    #[test]
+    fn rust_test_requests_should_be_recognized_for_axum_oneshot_and_actix() {
+        let source = r#"
+use axum::http::{Method, Request};
+use tower::ServiceExt;
+
+#[tokio::test]
+async fn creates_order() {
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri("/orders")
+        .body(Body::empty())
+        .unwrap();
+    app().oneshot(request).await.unwrap();
+}
+
+#[actix_web::test]
+async fn reads_order() {
+    let id = 42;
+    let request = test::TestRequest::get().uri(&format!("/orders/{}", id)).to_request();
+}
+"#;
+        let facts = parse_rust_source(source)
+            .into_iter()
+            .map(|item| {
+                format!(
+                    "{:?} {:?} {} {} {}",
+                    item.role,
+                    item.framework,
+                    item.symbol_name.unwrap_or_default(),
+                    item.method.unwrap_or_default(),
+                    item.path.unwrap_or_default()
+                )
+            })
+            .filter(|fact| !fact.starts_with("Call"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            facts,
+            [
+                "Test TokioTest creates_order  ",
+                "Consumer AxumOneshot creates_order POST /orders",
+                "Test RustTest reads_order  ",
+                "Consumer ActixTest reads_order GET /orders/{value}",
+            ]
+        );
+    }
+
+    #[test]
+    fn python_wrappers_calls_and_fixture_requests_should_be_recorded() {
+        let source = r#"
+import pytest
+import requests
+from tests.helpers import create_order
+
+def get_json(path):
+    return requests.get(BASE + path)
+
+@pytest.fixture
+def order(client):
+    return create_order(client, "/orders")
+
+def test_reads_order(order, api):
+    api.read_order(order)
+    get_json("/orders/7")
+"#;
+        let result = parse_python_source(source);
+        let calls = result
+            .iter()
+            .filter_map(|item| {
+                let call = item.call.as_ref()?;
+                Some((
+                    item.symbol_name.clone()?,
+                    call.callee.clone(),
+                    call.arguments
+                        .iter()
+                        .filter_map(|argument| argument.value.as_ref()?.client_literal())
+                        .collect::<Vec<_>>(),
+                ))
+            })
+            .collect::<Vec<_>>();
+        let wrapper = result
+            .iter()
+            .find(|item| item.role == SourceRole::Consumer)
+            .and_then(|item| item.url.clone());
+
+        assert_eq!(
+            wrapper.map(|url| url.parts),
+            Some(vec![
+                UrlPart::Value(Some("BASE".to_owned())),
+                UrlPart::Parameter {
+                    name: "path".to_owned(),
+                    index: 0
+                },
+            ])
+        );
+        assert_eq!(
+            calls,
+            [
+                (
+                    "order".to_owned(),
+                    SymbolRef::Fixture("client".to_owned()),
+                    vec![]
+                ),
+                (
+                    "order".to_owned(),
+                    SymbolRef::Import {
+                        module: "tests.helpers".to_owned(),
+                        name: "create_order".to_owned()
+                    },
+                    vec!["/orders".to_owned()]
+                ),
+                (
+                    "test_reads_order".to_owned(),
+                    SymbolRef::Fixture("api".to_owned()),
+                    vec![]
+                ),
+                (
+                    "test_reads_order".to_owned(),
+                    SymbolRef::Fixture("order".to_owned()),
+                    vec![]
+                ),
+                (
+                    "test_reads_order".to_owned(),
+                    SymbolRef::Call("api.read_order".to_owned()),
+                    vec![]
+                ),
+                (
+                    "test_reads_order".to_owned(),
+                    SymbolRef::Local("get_json".to_owned()),
+                    vec!["/orders/7".to_owned()]
+                ),
+            ]
+        );
     }
 
     #[test]

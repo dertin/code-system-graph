@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use code_system_graph_core::parallel::map_ordered;
 use code_system_graph_core::{
     CodeGraphConfig, CodeGraphProvider, ConfigSource, EffectiveRepositoryConfig, IgnorePolicy, ProviderBudget, ProviderRequest, ProviderStatus
 };
@@ -13,11 +14,14 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
+use super::telemetry::PhaseRecorder;
 use super::{
-    ApplicationError, ScanOverrides, ScanSummary, load_workspace_context, work_database_instance_id
+    ApplicationError, ScanOverrides, ScanSummary, WorkspaceContext, load_workspace_context, work_database_instance_id
 };
 
 const MAX_PERSISTED_WATCH_TARGET_BYTES: u64 = 8 * 1024 * 1024;
+/// Upper bound on concurrent external `CodeGraph` status and sync processes.
+const MAX_CONCURRENT_CODEGRAPH_SYNCS: usize = 4;
 
 /// One registered repository that participates in synchronization.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -161,25 +165,31 @@ pub fn workspace_sync_targets(
     overrides: &ScanOverrides,
 ) -> Result<Vec<SyncTarget>, ApplicationError> {
     let context = load_workspace_context(config_path, overrides)?;
+    sync_targets(&context, overrides)
+}
+
+fn sync_targets(
+    context: &WorkspaceContext,
+    overrides: &ScanOverrides,
+) -> Result<Vec<SyncTarget>, ApplicationError> {
     if let Some(requested) = &overrides.workspace
         && requested != &context.manifest.name
     {
         return Err(ApplicationError::WorkspaceNameMismatch {
             requested: requested.clone(),
-            manifest: context.manifest.name,
+            manifest: context.manifest.name.clone(),
         });
     }
-    if let Some(selected) = &overrides.repository
-        && !context
+    let selected = overrides.selected_aliases();
+    if let Some(unknown) = selected.iter().flatten().find(|alias| {
+        !context
             .registry
             .record
             .repositories
             .iter()
-            .any(|repository| &repository.alias == selected)
-    {
-        return Err(ApplicationError::UnknownOverrideRepository(
-            selected.clone(),
-        ));
+            .any(|repository| &repository.alias == *alias)
+    }) {
+        return Err(ApplicationError::UnknownOverrideRepository(unknown.clone()));
     }
 
     context
@@ -188,10 +198,9 @@ pub fn workspace_sync_targets(
         .repositories
         .iter()
         .filter(|repository| {
-            overrides
-                .repository
+            selected
                 .as_ref()
-                .is_none_or(|selected| selected == &repository.alias)
+                .is_none_or(|selected| selected.contains(&repository.alias))
         })
         .map(|repository| {
             let path = context
@@ -258,7 +267,7 @@ pub fn sync_workspace_with_overrides(
 
 /// Synchronizes through an explicitly selected compatible worker executable.
 ///
-/// Embedding applications can pass their own executable after dispatching `__worker-v1` to
+/// Embedding applications can pass their own executable after dispatching `__worker` to
 /// [`crate::run_worker_from_stdio`].
 ///
 /// # Errors
@@ -303,24 +312,34 @@ pub(crate) fn sync_workspace_direct(
     overrides: &ScanOverrides,
     synchronize_codegraph: bool,
 ) -> Result<SyncSummary, ApplicationError> {
+    let phases = PhaseRecorder::start();
     let context = load_workspace_context(config_path, overrides)?;
-    let policy = context.execution_policy;
-    let workspace = context.manifest.name;
-    let targets = workspace_sync_targets(config_path, overrides)?;
-    persist_watch_targets(database_path, &workspace, &targets)?;
+    let targets = sync_targets(&context, overrides)?;
+    if overrides.touched_repositories.is_empty() {
+        persist_watch_targets(database_path, &context.manifest.name, &targets)?;
+    }
     let binary = codegraph_binary(overrides);
-    let codegraph_timeout = Duration::from_millis(policy.max_codegraph_sync_wall_time_ms_per_repo);
+    let codegraph_timeout = Duration::from_millis(
+        context
+            .execution_policy
+            .max_codegraph_sync_wall_time_ms_per_repo,
+    );
     let codegraph = synchronize_codegraph_targets(
         &targets,
         synchronize_codegraph,
         codegraph_timeout,
+        context
+            .execution_policy
+            .effective_extraction_workers()
+            .min(MAX_CONCURRENT_CODEGRAPH_SYNCS),
         |target, deadline| run_codegraph_status(&binary, target, deadline),
         |path, deadline| run_codegraph_sync(&binary, path, deadline),
     );
     let mut scan_overrides = overrides.clone();
     scan_overrides.codegraph = codegraph.synchronized_count > 0;
-    let scan = super::scan_workspace_direct_for_sync(
-        config_path,
+    let scan = super::scan_loaded_workspace_for_sync(
+        context,
+        phases,
         database_path,
         &scan_overrides,
         codegraph.changed_count == 0,
@@ -526,59 +545,32 @@ fn synchronize_codegraph_targets<I, S>(
     targets: &[SyncTarget],
     enabled: bool,
     timeout: Duration,
-    mut inspect: I,
-    mut synchronize: S,
+    workers: usize,
+    inspect: I,
+    synchronize: S,
 ) -> CodeGraphSyncSummary
 where
-    I: FnMut(&SyncTarget, Instant) -> Result<ProviderStatus, String>,
-    S: FnMut(&Path, Instant) -> Result<(), String>,
+    I: Fn(&SyncTarget, Instant) -> Result<ProviderStatus, String> + Sync,
+    S: Fn(&Path, Instant) -> Result<(), String> + Sync,
 {
-    let mut observations = Vec::with_capacity(targets.len());
-    let mut repositories = Vec::with_capacity(targets.len());
-    if enabled {
-        for target in targets {
-            let deadline = Instant::now() + timeout;
-            let observation = if target.path.join(".codegraph").is_dir() {
-                match inspect(target, deadline) {
-                    Ok(ProviderStatus::Available) => CodeGraphSyncObservation {
-                        state: CodeGraphSyncState::Synchronized,
-                        detail: None,
-                        index_changed: false,
-                    },
-                    Ok(ProviderStatus::Stale) => match synchronize(&target.path, deadline) {
-                        Ok(()) => CodeGraphSyncObservation {
-                            state: CodeGraphSyncState::Synchronized,
-                            detail: None,
-                            index_changed: true,
-                        },
-                        Err(detail) => failed_sync_observation(&detail),
-                    },
-                    Ok(ProviderStatus::IndexMissing) => CodeGraphSyncObservation {
-                        state: CodeGraphSyncState::SkippedNotInitialized,
-                        detail: Some("local CodeGraph index is not initialized".to_owned()),
-                        index_changed: false,
-                    },
-                    Ok(status) => failed_sync_observation(&format!(
-                        "CodeGraph status is not usable for synchronization: {status:?}"
-                    )),
-                    Err(detail) => failed_sync_observation(&detail),
-                }
-            } else {
-                CodeGraphSyncObservation {
-                    state: CodeGraphSyncState::SkippedNotInitialized,
-                    detail: Some("local CodeGraph index is not initialized".to_owned()),
-                    index_changed: false,
-                }
-            };
-            repositories.push(CodeGraphRepositorySync {
-                repository: target.alias.clone(),
-                state: observation.state,
-                detail: observation.detail.clone(),
-            });
-            observations.push(observation);
+    let observations = if enabled {
+        map_ordered(targets, workers, |target| {
+            let observation = synchronize_codegraph_target(target, timeout, &inspect, &synchronize);
             super::worker::report_progress(code_system_graph_core::JobPhase::CodeGraphSync, 1);
-        }
-    }
+            observation
+        })
+    } else {
+        Vec::new()
+    };
+    let mut repositories = targets
+        .iter()
+        .zip(&observations)
+        .map(|(target, observation)| CodeGraphRepositorySync {
+            repository: target.alias.clone(),
+            state: observation.state,
+            detail: observation.detail.clone(),
+        })
+        .collect::<Vec<_>>();
     repositories.sort_by(|left, right| left.repository.cmp(&right.repository));
     let synchronized_count = repositories
         .iter()
@@ -612,6 +604,50 @@ where
     }
 }
 
+fn synchronize_codegraph_target<I, S>(
+    target: &SyncTarget,
+    timeout: Duration,
+    inspect: &I,
+    synchronize: &S,
+) -> CodeGraphSyncObservation
+where
+    I: Fn(&SyncTarget, Instant) -> Result<ProviderStatus, String>,
+    S: Fn(&Path, Instant) -> Result<(), String>,
+{
+    let deadline = Instant::now() + timeout;
+    if !target.path.join(".codegraph").is_dir() {
+        return CodeGraphSyncObservation {
+            state: CodeGraphSyncState::SkippedNotInitialized,
+            detail: Some("local CodeGraph index is not initialized".to_owned()),
+            index_changed: false,
+        };
+    }
+    match inspect(target, deadline) {
+        Ok(ProviderStatus::Available) => CodeGraphSyncObservation {
+            state: CodeGraphSyncState::Synchronized,
+            detail: None,
+            index_changed: false,
+        },
+        Ok(ProviderStatus::Stale) => match synchronize(&target.path, deadline) {
+            Ok(()) => CodeGraphSyncObservation {
+                state: CodeGraphSyncState::Synchronized,
+                detail: None,
+                index_changed: true,
+            },
+            Err(detail) => failed_sync_observation(&detail),
+        },
+        Ok(ProviderStatus::IndexMissing) => CodeGraphSyncObservation {
+            state: CodeGraphSyncState::SkippedNotInitialized,
+            detail: Some("local CodeGraph index is not initialized".to_owned()),
+            index_changed: false,
+        },
+        Ok(status) => failed_sync_observation(&format!(
+            "CodeGraph status is not usable for synchronization: {status:?}"
+        )),
+        Err(detail) => failed_sync_observation(&detail),
+    }
+}
+
 fn failed_sync_observation(detail: &str) -> CodeGraphSyncObservation {
     CodeGraphSyncObservation {
         state: CodeGraphSyncState::Failed,
@@ -633,7 +669,7 @@ fn bounded_detail(detail: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::RefCell;
+    use std::sync::Mutex;
 
     use super::*;
 
@@ -683,21 +719,25 @@ mod tests {
         let absent = temporary.path().join("absent");
         std::fs::create_dir_all(initialized.join(".codegraph"))?;
         std::fs::create_dir(&absent)?;
-        let called = RefCell::new(Vec::new());
+        let called = Mutex::new(Vec::new());
         let targets = vec![target("zeta", initialized.clone()), target("alpha", absent)];
 
         let report = synchronize_codegraph_targets(
             &targets,
             true,
             Duration::from_secs(1),
+            2,
             |target, _| {
-                called.borrow_mut().push(target.path.clone());
+                called
+                    .lock()
+                    .map_err(|_| "poisoned".to_owned())?
+                    .push(target.path.clone());
                 Err("failure ".repeat(600))
             },
             |_, _| panic!("failed status inspection must not synchronize"),
         );
 
-        assert_eq!(called.into_inner(), vec![initialized]);
+        assert_eq!(called.into_inner()?, vec![initialized]);
         assert_eq!(report.repository_count, 2);
         assert_eq!(report.synchronized_count, 0);
         assert_eq!(report.skipped_count, 1);
@@ -723,6 +763,7 @@ mod tests {
             &[target],
             false,
             Duration::from_secs(1),
+            2,
             |_, _| panic!("disabled synchronization must not inspect CodeGraph"),
             |_, _| panic!("disabled synchronization must not invoke CodeGraph"),
         );
@@ -738,13 +779,14 @@ mod tests {
         let stale = temporary.path().join("stale");
         std::fs::create_dir_all(current.join(".codegraph"))?;
         std::fs::create_dir_all(stale.join(".codegraph"))?;
-        let synchronized = RefCell::new(Vec::new());
+        let synchronized = Mutex::new(Vec::new());
         let targets = vec![target("current", current), target("stale", stale.clone())];
 
         let report = synchronize_codegraph_targets(
             &targets,
             true,
             Duration::from_secs(1),
+            2,
             |target, _| {
                 if target.alias == "stale" {
                     Ok(ProviderStatus::Stale)
@@ -753,12 +795,15 @@ mod tests {
                 }
             },
             |path, _| {
-                synchronized.borrow_mut().push(path.to_path_buf());
+                synchronized
+                    .lock()
+                    .map_err(|_| "poisoned".to_owned())?
+                    .push(path.to_path_buf());
                 Ok(())
             },
         );
 
-        assert_eq!(synchronized.into_inner(), vec![stale]);
+        assert_eq!(synchronized.into_inner()?, vec![stale]);
         assert_eq!(report.synchronized_count, 2);
         assert_eq!(report.changed_count, 1);
         assert_eq!(report.unchanged_count, 1);
@@ -770,27 +815,32 @@ mod tests {
         let temporary = tempfile::tempdir()?;
         let repository = temporary.path().join("stale");
         std::fs::create_dir_all(repository.join(".codegraph"))?;
-        let inspected_deadline = RefCell::new(None);
-        let synchronized_deadline = RefCell::new(None);
+        let inspected_deadline = Mutex::new(None);
+        let synchronized_deadline = Mutex::new(None);
 
         let report = synchronize_codegraph_targets(
             &[target("stale", repository)],
             true,
             Duration::from_secs(1),
+            2,
             |_, deadline| {
-                inspected_deadline.replace(Some(deadline));
+                *inspected_deadline
+                    .lock()
+                    .map_err(|_| "poisoned".to_owned())? = Some(deadline);
                 Ok(ProviderStatus::Stale)
             },
             |_, deadline| {
-                synchronized_deadline.replace(Some(deadline));
+                *synchronized_deadline
+                    .lock()
+                    .map_err(|_| "poisoned".to_owned())? = Some(deadline);
                 Ok(())
             },
         );
 
         assert_eq!(report.changed_count, 1);
         assert_eq!(
-            inspected_deadline.into_inner(),
-            synchronized_deadline.into_inner()
+            inspected_deadline.into_inner()?,
+            synchronized_deadline.into_inner()?
         );
         Ok(())
     }

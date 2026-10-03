@@ -1,6 +1,8 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, SystemTime};
 
 use code_system_graph_model::{
     CheckoutId, NativePath, NativePathEncoding, RepoId, RepositoryRecord, WorkspaceId, WorkspaceRecord, stable_id, stable_id_bytes
@@ -9,6 +11,23 @@ use thiserror::Error;
 use url::Url;
 
 use crate::WorkspaceManifest;
+use crate::parallel::map_ordered;
+
+/// Upper bound on concurrent per-repository Git inspections during registration.
+const MAX_REGISTRATION_WORKERS: usize = 8;
+
+/// A cached remote is trusted only when its Git config was last written at least this long ago,
+/// so a same-timestamp rewrite after caching always changes the observed metadata.
+const REMOTE_CACHE_RACY_WINDOW: Duration = Duration::from_secs(2);
+
+/// Modification time and length of a Git config file.
+type ConfigStamp = (SystemTime, u64);
+
+/// `origin` remotes keyed by Git config path, each validated by the stamp it was read under.
+type RemoteCache = HashMap<PathBuf, (ConfigStamp, Option<String>)>;
+
+/// Process-wide remote cache shared by every registration in this process.
+static REMOTE_CACHE: LazyLock<Mutex<RemoteCache>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Validated workspace record plus native paths used by scanners.
 #[derive(Debug, Clone)]
@@ -82,75 +101,22 @@ pub fn register_workspace(
     allowed_roots.sort();
     allowed_roots.dedup();
 
-    let mut records = Vec::with_capacity(manifest.repos.len());
+    let configured = manifest
+        .repos
+        .iter()
+        .map(|(alias, repository)| (alias.as_str(), repository.path.as_str()))
+        .collect::<Vec<_>>();
+    let workers = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(MAX_REGISTRATION_WORKERS);
+    let mut records = Vec::with_capacity(configured.len());
     let mut checkout_paths = BTreeMap::new();
-    for (alias, repository) in &manifest.repos {
-        let configured_path = resolve_path(&config_directory, Path::new(&repository.path));
-        let configured_path = canonicalize(&configured_path)?;
-        let git_root = configured_path
-            .join(".git")
-            .exists()
-            .then(|| git_path(&configured_path, &["rev-parse", "--show-toplevel"]))
-            .flatten()
-            .and_then(|path| canonicalize(&path).ok())
-            .filter(|path| path == &configured_path);
-        let is_git_repository = git_root.is_some();
-        let checkout_path = git_root.unwrap_or(configured_path);
-        ensure_allowed(alias, &checkout_path, &allowed_roots)?;
-
-        let git_common_dir = is_git_repository
-            .then(|| git_common_directory(&checkout_path))
-            .flatten();
-        if let Some(common_dir) = &git_common_dir {
-            ensure_allowed(alias, common_dir, &allowed_roots)?;
-        }
-        let normalized_remote = is_git_repository
-            .then(|| git_text(&checkout_path, &["remote", "get-url", "origin"]))
-            .flatten()
-            .map(|remote| normalize_remote(&remote));
-        let head_commit = is_git_repository
-            .then(|| git_text(&checkout_path, &["rev-parse", "HEAD"]))
-            .flatten();
-        let working_tree_dirty = is_git_repository
-            && git_output(
-                &checkout_path,
-                &["status", "--porcelain", "--untracked-files=normal"],
-            )
-            .is_some_and(|output| !output.is_empty());
-        let native_checkout = encode_native_path(&checkout_path);
-        let native_common = git_common_dir.as_deref().map(encode_native_path);
-        let repository_key = normalized_remote.as_ref().map_or_else(
-            || {
-                native_common.as_ref().map_or_else(
-                    || format!("path:{}", native_path_fingerprint(&native_checkout)),
-                    |common| format!("git:{}", native_path_fingerprint(common)),
-                )
-            },
-            |remote| format!("remote:{remote}"),
-        );
-        let repo_id = RepoId::new(stable_id("repo", &repository_key));
-        let checkout_id = CheckoutId::new(stable_id(
-            "checkout",
-            &format!(
-                "{}:{}",
-                repo_id.as_str(),
-                native_path_fingerprint(&native_checkout)
-            ),
-        ));
-        let is_linked_worktree = checkout_path.join(".git").is_file();
-
-        records.push(RepositoryRecord {
-            id: repo_id,
-            checkout_id,
-            alias: alias.clone(),
-            canonical_path: native_checkout,
-            git_common_dir: native_common,
-            normalized_remote,
-            head_commit,
-            is_linked_worktree,
-            working_tree_dirty,
-        });
-        checkout_paths.insert(alias.clone(), checkout_path);
+    for registered in map_ordered(&configured, workers, |(alias, path)| {
+        register_repository(alias, path, &config_directory, &allowed_roots)
+    }) {
+        let (record, checkout_path) = registered?;
+        checkout_paths.insert(record.alias.clone(), checkout_path);
+        records.push(record);
     }
     records.sort_by(|left, right| left.alias.cmp(&right.alias));
 
@@ -173,6 +139,109 @@ pub fn register_workspace(
         },
         checkout_paths,
     })
+}
+
+fn register_repository(
+    alias: &str,
+    configured_path: &str,
+    config_directory: &Path,
+    allowed_roots: &[PathBuf],
+) -> Result<(RepositoryRecord, PathBuf), RegistryError> {
+    let configured_path = resolve_path(config_directory, Path::new(configured_path));
+    let configured_path = canonicalize(&configured_path)?;
+    let git_root = configured_path
+        .join(".git")
+        .exists()
+        .then(|| git_path(&configured_path, &["rev-parse", "--show-toplevel"]))
+        .flatten()
+        .and_then(|path| canonicalize(&path).ok())
+        .filter(|path| path == &configured_path);
+    let is_git_repository = git_root.is_some();
+    let checkout_path = git_root.unwrap_or(configured_path);
+    ensure_allowed(alias, &checkout_path, allowed_roots)?;
+
+    let git_common_dir = is_git_repository
+        .then(|| git_common_directory(&checkout_path))
+        .flatten();
+    if let Some(common_dir) = &git_common_dir {
+        ensure_allowed(alias, common_dir, allowed_roots)?;
+    }
+    let normalized_remote = is_git_repository
+        .then(|| origin_remote(&checkout_path, git_common_dir.as_deref()))
+        .flatten()
+        .map(|remote| normalize_remote(&remote));
+    let head_commit = is_git_repository
+        .then(|| git_text(&checkout_path, &["rev-parse", "HEAD"]))
+        .flatten();
+    let working_tree_dirty = is_git_repository
+        && git_output(
+            &checkout_path,
+            &["status", "--porcelain", "--untracked-files=normal"],
+        )
+        .is_some_and(|output| !output.is_empty());
+    let native_checkout = encode_native_path(&checkout_path);
+    let native_common = git_common_dir.as_deref().map(encode_native_path);
+    let repository_key = normalized_remote.as_ref().map_or_else(
+        || {
+            native_common.as_ref().map_or_else(
+                || format!("path:{}", native_path_fingerprint(&native_checkout)),
+                |common| format!("git:{}", native_path_fingerprint(common)),
+            )
+        },
+        |remote| format!("remote:{remote}"),
+    );
+    let repo_id = RepoId::new(stable_id("repo", &repository_key));
+    let checkout_id = CheckoutId::new(stable_id(
+        "checkout",
+        &format!(
+            "{}:{}",
+            repo_id.as_str(),
+            native_path_fingerprint(&native_checkout)
+        ),
+    ));
+    let is_linked_worktree = checkout_path.join(".git").is_file();
+    let record = RepositoryRecord {
+        id: repo_id,
+        checkout_id,
+        alias: alias.to_owned(),
+        canonical_path: native_checkout,
+        git_common_dir: native_common,
+        normalized_remote,
+        head_commit,
+        is_linked_worktree,
+        working_tree_dirty,
+    };
+    Ok((record, checkout_path))
+}
+
+/// Returns the raw `origin` URL, reusing the cached value while the Git config is unchanged.
+fn origin_remote(checkout_path: &Path, common_dir: Option<&Path>) -> Option<String> {
+    let config_path = common_dir.map_or_else(
+        || checkout_path.join(".git").join("config"),
+        |common| common.join("config"),
+    );
+    let stamp = std::fs::metadata(&config_path)
+        .ok()
+        .and_then(|metadata| Some((metadata.modified().ok()?, metadata.len())))
+        .filter(|(modified, _)| {
+            SystemTime::now()
+                .duration_since(*modified)
+                .is_ok_and(|age| age >= REMOTE_CACHE_RACY_WINDOW)
+        });
+    if let Some(stamp) = stamp
+        && let Ok(cache) = REMOTE_CACHE.lock()
+        && let Some((cached_stamp, remote)) = cache.get(&config_path)
+        && *cached_stamp == stamp
+    {
+        return remote.clone();
+    }
+    let remote = git_text(checkout_path, &["remote", "get-url", "origin"]);
+    if let Some(stamp) = stamp
+        && let Ok(mut cache) = REMOTE_CACHE.lock()
+    {
+        cache.insert(config_path, (stamp, remote.clone()));
+    }
+    remote
 }
 
 /// Encodes a native path without requiring UTF-8.

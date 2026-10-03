@@ -5,7 +5,7 @@ use code_system_graph_model::{
 };
 
 use crate::{
-    BoundaryRole, DeclaredImplementation, DeclaredTestCase, HttpBoundary, SourceFramework, SourceLanguage, SourceObservation, SourceRole, SourceSymbolIdentity
+    BoundaryRole, CallScope, DeclaredImplementation, DeclaredTestCase, HttpBoundary, SourceFramework, SourceLanguage, SourceObservation, SourceRole, SourceSymbolIdentity
 };
 
 /// Graph-ready facts derived from one focused Rust or Python source file.
@@ -99,7 +99,7 @@ pub fn source_observations_to_graph(
                 result.relation_edges.push(edge);
                 result.relation_evidence.push(evidence);
             }
-            SourceRole::Test => {}
+            SourceRole::Test | SourceRole::Mount | SourceRole::Call | SourceRole::Client => {}
         }
     }
 
@@ -111,12 +111,17 @@ pub fn source_observations_to_graph(
                 observation.symbol_name.as_deref()?,
                 observation.method.as_deref()?,
                 observation.path.as_deref()?,
+                observation.authority.as_deref(),
+                observation.framework.is_in_process_client(),
             ))
         })
         .fold(
-            BTreeMap::<&str, BTreeSet<(&str, &str)>>::new(),
-            |mut grouped, (symbol, method, path)| {
-                grouped.entry(symbol).or_default().insert((method, path));
+            BTreeMap::<&str, BTreeSet<(&str, &str, Option<&str>, bool)>>::new(),
+            |mut grouped, (symbol, method, path, authority, in_process)| {
+                grouped
+                    .entry(symbol)
+                    .or_default()
+                    .insert((method, path, authority, in_process));
                 grouped
             },
         );
@@ -128,17 +133,19 @@ pub fn source_observations_to_graph(
             continue;
         };
         if let Some(targets) = consumers_by_symbol.get(symbol) {
-            result.tests.extend(targets.iter().map(|(method, path)| {
-                source_test_case(
-                    repo_id,
-                    source_path,
-                    content_hash,
-                    observation,
-                    symbol,
-                    method,
-                    path,
-                )
-            }));
+            result
+                .tests
+                .extend(targets.iter().map(|(method, path, authority, in_process)| {
+                    source_test_case(
+                        repo_id,
+                        source_path,
+                        content_hash,
+                        observation,
+                        symbol,
+                        (method, path),
+                        call_scope(*authority, *in_process),
+                    )
+                }));
         } else {
             let (node, evidence) =
                 standalone_test(repo_id, source_path, content_hash, observation, symbol);
@@ -202,7 +209,11 @@ fn source_boundary(
     let role = match observation.role {
         SourceRole::Provider => BoundaryRole::Provider,
         SourceRole::Consumer => BoundaryRole::Consumer,
-        SourceRole::Test | SourceRole::Factory => {
+        SourceRole::Test
+        | SourceRole::Factory
+        | SourceRole::Mount
+        | SourceRole::Call
+        | SourceRole::Client => {
             unreachable!("test and factory observations are not HTTP boundaries")
         }
     };
@@ -210,7 +221,11 @@ fn source_boundary(
         BoundaryRole::Provider => "provider",
         BoundaryRole::Consumer => "consumer",
     };
-    let stable_key = format!("http:{}:{role_key}:{method}:{path}", repo_id.as_str());
+    let stable_key = format!(
+        "http:{}:{role_key}:{method}:{}",
+        repo_id.as_str(),
+        crate::canonical_route(path)
+    );
     let evidence = source_evidence(
         repo_id,
         source_path,
@@ -229,7 +244,21 @@ fn source_boundary(
         method: method.to_owned(),
         path: path.to_owned(),
         role,
+        scope: call_scope(
+            observation.authority.as_deref(),
+            observation.framework.is_in_process_client(),
+        ),
         evidence,
+    }
+}
+
+fn call_scope(authority: Option<&str>, in_process: bool) -> CallScope {
+    if in_process {
+        return CallScope::InProcess;
+    }
+    match authority {
+        Some(authority) => CallScope::Authority(authority.to_owned()),
+        None => CallScope::Workspace,
     }
 }
 
@@ -274,8 +303,8 @@ fn source_test_case(
     content_hash: &str,
     observation: &SourceObservation,
     symbol: &str,
-    method: &str,
-    path: &str,
+    (method, path): (&str, &str),
+    scope: CallScope,
 ) -> DeclaredTestCase {
     let stable_key = test_stable_key(repo_id, source_path, observation, symbol);
     DeclaredTestCase {
@@ -292,6 +321,7 @@ fn source_test_case(
         },
         method: method.to_owned(),
         path: path.to_owned(),
+        scope,
         evidence: source_evidence(
             repo_id,
             source_path,
@@ -451,6 +481,23 @@ fn framework_name(framework: SourceFramework) -> &'static str {
         SourceFramework::SpringMvc => "spring-mvc",
         SourceFramework::WebClient => "webclient",
         SourceFramework::Feign => "feign",
+        SourceFramework::RestTemplate => "rest-template",
+        SourceFramework::TestClient => "test-client",
+        SourceFramework::FlaskTestClient => "flask-test-client",
+        SourceFramework::Jest => "jest",
+        SourceFramework::Vitest => "vitest",
+        SourceFramework::Mocha => "mocha",
+        SourceFramework::Playwright => "playwright",
+        SourceFramework::Supertest => "supertest",
+        SourceFramework::GoTest => "go-test",
+        SourceFramework::Httptest => "httptest",
+        SourceFramework::JUnit => "junit",
+        SourceFramework::MockMvc => "mockmvc",
+        SourceFramework::RestAssured => "rest-assured",
+        SourceFramework::WebTestClient => "webtestclient",
+        SourceFramework::TestRestTemplate => "test-rest-template",
+        SourceFramework::AxumOneshot => "axum-oneshot",
+        SourceFramework::ActixTest => "actix-test",
     }
 }
 
@@ -460,17 +507,19 @@ fn role_name(role: SourceRole) -> &'static str {
         SourceRole::Consumer => "consumer",
         SourceRole::Test => "test",
         SourceRole::Factory => "factory",
+        SourceRole::Mount => "mount",
+        SourceRole::Call => "call",
+        SourceRole::Client => "client",
     }
 }
 
 #[cfg(test)]
 mod tests {
+
     use code_system_graph_model::{EdgeKind, RepoId};
 
     use super::source_observations_to_graph;
-    use crate::{
-        link_declared_implementations, link_declared_tests, parse_python_source, parse_rust_source
-    };
+    use crate::{AuthorityMap, link_http_routes, parse_python_source, parse_rust_source};
 
     #[test]
     fn source_graph_should_link_python_test_to_rust_handler() {
@@ -489,26 +538,32 @@ mod tests {
             &parse_python_source(
                 r#"import requests
 def test_create_order():
-    requests.post("https://api.test/orders")
+    requests.post("/orders")
 "#,
             ),
         );
 
-        let test_edges = link_declared_tests(&python.tests, &rust.boundaries)
-            .unwrap_or_else(|error| panic!("fixtures must link: {error}"));
-        let implementation_edges =
-            link_declared_implementations(&rust.implementations, &rust.boundaries)
-                .unwrap_or_else(|error| panic!("fixtures must link: {error}"));
+        let edges = link_http_routes(
+            &rust.boundaries,
+            &python.tests,
+            &rust.implementations,
+            &AuthorityMap::new(),
+        )
+        .edges;
+        let kinds = edges.iter().map(|edge| edge.kind).collect::<Vec<_>>();
 
-        assert!(
-            test_edges
-                .iter()
-                .all(|edge| edge.kind == EdgeKind::Validates)
-        );
-        assert!(
-            implementation_edges
-                .iter()
-                .all(|edge| edge.kind == EdgeKind::ImplementedBy)
+        assert_eq!(
+            (
+                kinds
+                    .iter()
+                    .filter(|kind| **kind == EdgeKind::Validates)
+                    .count(),
+                kinds
+                    .iter()
+                    .filter(|kind| **kind == EdgeKind::ImplementedBy)
+                    .count(),
+            ),
+            (1, 1)
         );
     }
 

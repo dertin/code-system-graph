@@ -1,0 +1,11 @@
+{
+  "protocolVersion": "2024-11-05",
+  "capabilities": {
+    "tools": {}
+  },
+  "serverInfo": {
+    "name": "codegraph",
+    "version": "1.6.1"
+  },
+  "instructions": "# Codegraph — code intelligence over an indexed knowledge graph"
+}

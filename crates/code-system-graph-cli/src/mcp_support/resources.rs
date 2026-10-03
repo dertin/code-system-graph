@@ -6,7 +6,7 @@ use code_system_graph_core::CONTRACT_NODE_KINDS;
 #[cfg(test)]
 use code_system_graph_model::RepoFreshnessState;
 use code_system_graph_model::{
-    Community, CommunityAlgorithm, CommunityConfig, CommunityEdgeWeight, CommunityId, CommunityLabelEvidence, CommunityMetrics, CommunityScope, Evidence, ExtractorRun, FreshnessSummary, Node, NodeId, NodeKind, OverallFreshness, RepoFreshness, RepoId, RepositoryRecord
+    Community, CommunityAlgorithm, CommunityConfig, CommunityEdgeWeight, CommunityId, CommunityLabelEvidence, CommunityMetrics, CommunityScope, Evidence, ExtractorRun, FreshnessSummary, HttpLinkCoverage, HttpLinkGap, HttpLinkReport, Node, NodeId, NodeKind, OverallFreshness, RepoFreshness, RepoId, RepositoryRecord
 };
 use code_system_graph_store_sqlite::{SqliteStore, StoreError};
 use serde_json::{Value, json};
@@ -155,6 +155,8 @@ struct CoverageResource {
     workspace: String,
     runs: BoundedCollection<ExtractorRun>,
     freshness: FreshnessResource,
+    http_links: HttpLinkCoverage,
+    http_link_gaps: BoundedCollection<HttpLinkGap>,
 }
 
 #[derive(Debug)]
@@ -226,7 +228,7 @@ fn render_overview(resource: &OverviewResource, maximum: usize) -> String {
 fn render_status(resource: &StatusResource, maximum: usize) -> String {
     let mut document = MarkdownDocument::resource("Workspace status", resource.schema_version);
     document.text("Workspace", &resource.status.workspace);
-    document.scalar("Database schema", resource.status.schema_version);
+    document.scalar("Database schema", &resource.status.schema_id);
     document.scalar("Integrity ok", resource.status.integrity_ok);
     document.debug("Snapshot", &resource.status.snapshot);
     render_collection(&mut document, "Repositories", &resource.repositories);
@@ -333,6 +335,8 @@ fn render_coverage(resource: &CoverageResource, maximum: usize) -> String {
     document.text("Workspace", &resource.workspace);
     render_collection(&mut document, "Extractor runs", &resource.runs);
     render_freshness(&mut document, &resource.freshness);
+    document.debug("HTTP link coverage", &resource.http_links);
+    render_collection(&mut document, "HTTP link gaps", &resource.http_link_gaps);
     document.render(maximum)
 }
 
@@ -444,7 +448,7 @@ pub(crate) fn resource_uris(workspace: &str) -> Vec<(String, String, String)> {
         (
             format!("{prefix}/coverage"),
             "workspace-coverage".to_owned(),
-            "Bounded extractor and freshness coverage metadata.".to_owned(),
+            "Bounded extractor, freshness and HTTP link coverage metadata.".to_owned(),
         ),
     ]
 }
@@ -639,10 +643,14 @@ fn workspace_coverage_resource(
     let freshness = store
         .load_current_freshness(workspace)
         .map_err(internal_store)?;
+    let http_links = store
+        .load_http_link_report(workspace, item_limit)
+        .map_err(internal_store)?;
     Ok(ResourceDocument::Coverage(coverage_resource_value(
         workspace,
         runs,
         freshness_summary(&freshness),
+        http_links,
         item_limit,
     )))
 }
@@ -651,6 +659,7 @@ fn coverage_resource_value(
     workspace: &str,
     runs: Vec<ExtractorRun>,
     freshness: FreshnessSummary,
+    (http_links, http_link_gap_total): (HttpLinkReport, usize),
     item_limit: usize,
 ) -> CoverageResource {
     let runs = bounded_collection(runs, item_limit);
@@ -659,6 +668,11 @@ fn coverage_resource_value(
         workspace: workspace.to_owned(),
         runs,
         freshness: bounded_freshness(freshness, item_limit),
+        http_links: http_links.coverage,
+        http_link_gaps: BoundedCollection {
+            total: http_link_gap_total,
+            items: http_links.gaps.into_iter().take(item_limit).collect(),
+        },
     }
 }
 

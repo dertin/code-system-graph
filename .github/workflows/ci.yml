@@ -65,13 +65,13 @@ jobs:
       - run: cargo +stable test --workspace --exclude code-system-graph-fuzz --all-targets --all-features --locked -- --test-threads=1
 
   msrv:
-    name: Rust 1.97.1 MSRV
+    name: Rust 1.96.0 MSRV
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.97.1
+          toolchain: 1.96.0
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: msrv

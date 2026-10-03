@@ -4,7 +4,9 @@ use code_system_graph_model::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{ExtractionBudgets, ExtractionLimitExceeded, ExtractionTracker, HttpConsumerConfig};
+use crate::{
+    CallScope, ExtractionBudgets, ExtractionLimitExceeded, ExtractionTracker, HttpConsumerConfig, canonical_route
+};
 
 const HTTP_METHODS: [&str; 8] = [
     "DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT", "TRACE",
@@ -31,6 +33,8 @@ pub struct HttpBoundary {
     pub path: String,
     /// Consumer or provider direction.
     pub role: BoundaryRole,
+    /// Repositories allowed to provide a consumer's operation.
+    pub scope: CallScope,
     /// Direct evidence for the boundary.
     pub evidence: Evidence,
 }
@@ -498,7 +502,11 @@ fn boundary(
             Provenance::Declared,
         ),
     };
-    let stable_key = format!("http:{}:{role_key}:{method}:{path}", repo_id.as_str());
+    let stable_key = format!(
+        "http:{}:{role_key}:{method}:{}",
+        repo_id.as_str(),
+        canonical_route(path)
+    );
     let evidence_key = format!("{stable_key}:{source_path}");
     HttpBoundary {
         node: Node {
@@ -511,6 +519,7 @@ fn boundary(
         method: method.to_owned(),
         path: path.to_owned(),
         role,
+        scope: CallScope::Workspace,
         evidence: Evidence {
             id: EvidenceId::new(stable_id("evidence", &evidence_key)),
             repo_id: Some(repo_id),

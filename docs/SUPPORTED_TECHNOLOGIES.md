@@ -25,11 +25,34 @@ guessed.
 
 | Language | HTTP clients | HTTP servers | Database access | Recognized tests |
 | --- | --- | --- | --- | --- |
-| TypeScript / JavaScript | Fetch, Axios | Express, Fastify, NestJS, Next.js App Router | Literal SQL | Not recognized |
-| Python | requests, HTTPX, aiohttp, static method registries | FastAPI, Flask | psycopg/psycopg2, PyMySQL, SQLAlchemy ORM, Alembic, literal SQL | pytest, unittest, Factory Boy model links |
-| Go | `net/http` | `net/http`, Gin, Chi | Literal SQL | Not recognized |
-| Java | WebClient, Feign | Spring MVC | Literal SQL | Not recognized |
-| Rust | Reqwest | Axum, Actix Web; advisory Utoipa/OpenAPI operations | SQLx, `mysql_async`, Diesel, literal SQL | Built-in tests, Tokio tests, rstest |
+| TypeScript / JavaScript | Fetch, Axios | Express, Fastify, NestJS, Next.js App Router | Literal SQL | Jest, Vitest, Mocha, and Playwright `describe`/`it`/`test`; supertest, Playwright `request` |
+| Python | requests, HTTPX, aiohttp, static method registries | FastAPI, Flask | psycopg/psycopg2, PyMySQL, SQLAlchemy ORM, Alembic, literal SQL | pytest, unittest, Factory Boy model links; `TestClient`, Flask `test_client()`, HTTPX with `app=` or an ASGI/WSGI transport |
+| Go | `net/http` | `net/http`, Gin, Chi | Literal SQL | `TestX(t *testing.T)`; `httptest.NewRequest`, `httptest.NewServer` with `srv.URL` |
+| Java | WebClient, Feign, RestTemplate | Spring MVC | Literal SQL | JUnit `@Test`, `@ParameterizedTest`, `@RepeatedTest`; MockMvc, RestAssured, `WebTestClient`, `TestRestTemplate` |
+| Rust | Reqwest | Axum, Actix Web; advisory Utoipa/OpenAPI operations | SQLx, `mysql_async`, Diesel, literal SQL | Built-in, Tokio, Actix, and rstest tests; Axum `Request` builders sent with `oneshot`, Actix `test::TestRequest` |
+
+Server routes carry the full path a request reaches, including router prefixes declared in other
+files of the same repository:
+
+| Framework | Composed prefixes |
+| --- | --- |
+| FastAPI | `APIRouter(prefix=)` and `include_router(router, prefix=)`, including imported routers |
+| Flask | `Blueprint(url_prefix=)` and `register_blueprint(bp, url_prefix=)` |
+| Express | `router.use(prefix, router)`, imported, default-exported, `module.exports`, and factory routers |
+| NestJS | `@Controller(path)` and `app.setGlobalPrefix(prefix)` |
+| Spring MVC and Feign | Class-level `@RequestMapping` and `@FeignClient(path=)` |
+| Gin and Chi | `Group`, `Route`, `Mount`, `http.StripPrefix`, and router functions called with a group |
+| Axum | `nest` and `merge` of local, returned, and module-path routers |
+| Actix Web | `web::scope`, `service`, and `configure` of local and module-path services |
+
+Route handlers are the function a route registration names, whatever it is called: the last
+argument of `app.get("/x", auth, orders.list)` or `r.GET("/x", handlers.Get)`, unwrapped from a
+single-argument wrapper such as `asyncHandler(orders.create)`, FastAPI `add_api_route` and Flask
+`add_url_rule` endpoints, and the Spring method declared after a mapping annotation. An inline
+handler function is identified by its method and path.
+
+Prefix chains deeper than eight mounts, mount cycles, and routers that do not resolve to exactly
+one declaration in the repository keep the route path declared next to the handler.
 
 JavaScript and TypeScript are separate parser inputs but share the same focused framework
 recognition. Each supported language is parsed structurally before framework-specific patterns are
@@ -73,8 +96,47 @@ TypeScript Fetch call
   -> implemented by a Rust Axum handler
 ```
 
-Tests with a supported, exact HTTP target can also be connected to the contract they validate.
-Dynamic URL construction, wrapper functions, and multiple providers are not guessed.
+Tests with a supported HTTP target can also be connected to the contract they validate. A concrete
+request path such as `/orders/42` reaches the `/orders/{id}` template whatever parameter syntax the
+provider framework uses; the most specific template wins, and equally specific providers are
+narrowed to the caller's repository before being reported as ambiguous.
+
+Parameters embedded in a segment retain their literal constraints: `/files/{name}.json` matches
+`/files/readme.json` and rejects `/files/readme.xml`. Static segments rank ahead of mixed segments,
+then whole-segment parameters and catch-alls. Overlapping mixed templates remain ambiguous.
+
+Client URLs are evaluated from the expression that builds them:
+
+- constants and variables bound earlier in the same function or file, including `this.` and `self.`
+  fields with one value;
+- concatenation, Python f-strings, `%` and `.format`, Rust `format!` and `concat!`, JavaScript
+  template literals, Go `fmt.Sprintf`, and Java `String.format`;
+- conversions such as `str()`, `String()`, `encodeURIComponent`, `strconv.Itoa`, and
+  `String.valueOf`.
+
+A runtime value in the scheme or authority leaves the path exact and the authority unknown. A
+runtime value that fills a whole path segment becomes a path parameter. Any other runtime value
+makes the path dynamic, and the call is reported without a path.
+
+A client call whose URL depends on a parameter of its function is a wrapper. Each call site that
+binds the parameter, in the same repository and through relative imports, package imports, or
+module paths, gains the instantiated call. Wrappers that forward the parameter to another wrapper
+are followed for up to three hops. A test is linked to every exact client call made by the
+functions it calls and the pytest fixtures it requests, including fixtures in an enclosing
+`conftest.py`, for up to three calls deep. Calls that do not resolve to exactly one function in the
+repository are not followed.
+
+A test without a named function, such as a Jest or Playwright `it`/`test` callback, is identified by
+its file, its `describe` chain, and its title, and it also reaches the `beforeEach`, `beforeAll`, and
+Mocha `before` blocks of its enclosing suites. A request made through a parameter, such as
+`client.get("/orders/42")` in a helper or a test that receives `client`, is attributed to an
+in-process test client only when that parameter is a pytest fixture returning one, or receives one
+from every caller that resolves; otherwise it is not reported.
+
+In-process test clients (`TestClient`, Flask `test_client()`, supertest, `httptest`, MockMvc,
+RestAssured, `WebTestClient`, `TestRestTemplate`, Axum `oneshot`, and Actix `test::TestRequest`)
+exercise the application of their own repository, so their requests resolve only against providers
+in that repository, even when another repository serves the same route.
 
 Rust executable-route evidence and Utoipa/OpenAPI annotations are additive, not mutually
 exclusive. An exact Actix or Axum declaration is confirmed executable evidence. A Utoipa operation
@@ -242,7 +304,7 @@ exact member manifest is independently discovered.
 | --- | --- |
 | Docker Compose | Services, images, ports, dependencies, environment key names |
 | Kubernetes | Workloads, Services, Ingresses, static resources, selectors, Secret key names |
-| Helm | Templates and values; templated identities remain incomplete |
+| Helm | `Chart.yaml`, values, and YAML or `.tpl` templates of a chart; templated identities remain incomplete |
 | Terraform / OpenTofu | Literal resources and dependency metadata |
 | Documentation | README, runbook, RFC, ADR, headings, and explicit links |
 | Ownership | Ordered CODEOWNERS rules and explicit owner identities |
@@ -278,7 +340,7 @@ See [Configuration](CONFIGURATION.md) for precedence, examples, and safety rules
 Code System Graph does not:
 
 - infer dynamic routes, topics, SQL, package coordinates, or generated-code roles;
-- choose between duplicate providers;
+- choose between equally specific providers that no scope rule separates;
 - execute application code, GraphQL schemas, Terraform, Helm, or `protoc`;
 - persist source bodies, SQL literal values, credentials, or configuration values;
 - replace a repository-local symbol and call graph.

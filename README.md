@@ -9,7 +9,7 @@ Map APIs, events, schemas, packages, databases, and ownership across repositorie
 breaks another service.
 
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-![Source version](https://img.shields.io/badge/source-v1.1.0-orange.svg)
+![Source version](https://img.shields.io/badge/source-v1.2.0-orange.svg)
 [![crates.io](https://img.shields.io/crates/v/code-system-graph.svg)](https://crates.io/crates/code-system-graph)
 ![Platforms](https://img.shields.io/badge/validated-Linux%20%7C%20macOS%20%7C%20Windows-1793d1.svg)
 ![Privacy](https://img.shields.io/badge/privacy-local%20%7C%20no%20telemetry-2ea44f.svg)
@@ -85,7 +85,8 @@ graph:
 | Literal SQL statement and one declared table | Code **reads from** or **writes to** the table |
 | Package, deployment, documentation, ownership, and config declarations | Dependency, deploys/provides, documents, owns, and config-key links |
 
-It does not guess through dynamic routes, interpolated table names, duplicate providers, or prose.
+It does not guess through dynamic routes, interpolated table names, indistinguishable providers, or
+prose.
 Those cases remain incomplete or ambiguous so an agent cannot mistake missing evidence for safety.
 
 ## Supported languages and frameworks
@@ -94,11 +95,16 @@ Source scanning currently recognizes these focused framework and language patter
 
 | Language | HTTP clients | HTTP servers | Database access | Recognized tests |
 | --- | --- | --- | --- | --- |
-| TypeScript / JavaScript | Fetch, Axios | Express, Fastify, NestJS, Next.js App Router | Literal SQL | Not recognized |
-| Python | requests, HTTPX, aiohttp, static method registries | FastAPI, Flask | psycopg/psycopg2, PyMySQL, SQLAlchemy, Alembic, literal SQL | pytest, unittest, Factory Boy model links |
-| Go | `net/http` | `net/http`, Gin, Chi | Literal SQL | Not recognized |
-| Java | WebClient, Feign | Spring MVC | Literal SQL | Not recognized |
-| Rust | Reqwest | Axum, Actix Web; advisory Utoipa/OpenAPI operations | SQLx, `mysql_async`, Diesel, literal SQL | Built-in tests, Tokio tests, rstest |
+| TypeScript / JavaScript | Fetch, Axios | Express, Fastify, NestJS, Next.js App Router | Literal SQL | Jest, Vitest, Mocha, Playwright; supertest |
+| Python | requests, HTTPX, aiohttp, static method registries | FastAPI, Flask | psycopg/psycopg2, PyMySQL, SQLAlchemy, Alembic, literal SQL | pytest, unittest, Factory Boy model links; `TestClient`, Flask `test_client()` |
+| Go | `net/http` | `net/http`, Gin, Chi | Literal SQL | `testing` functions; `httptest` |
+| Java | WebClient, Feign, RestTemplate | Spring MVC | Literal SQL | JUnit; MockMvc, RestAssured, `WebTestClient` |
+| Rust | Reqwest | Axum, Actix Web; advisory Utoipa/OpenAPI operations | SQLx, `mysql_async`, Diesel, literal SQL | Built-in tests, Tokio tests, rstest; Axum `oneshot`, Actix `test::TestRequest` |
+
+A test that calls an endpoint is linked to the contract it validates and to the handler that
+implements it in any of these languages, through base URLs, router prefixes declared in other
+files, client wrappers, test helpers, and fixtures. Every scan reports the calls it could not link
+and why.
 
 Other boundary support is shared across these languages rather than tied to one web framework:
 
@@ -141,7 +147,7 @@ installed to Cargo's binary directory, normally `$HOME/.cargo/bin`.
 The crates.io package is `code-system-graph`; the user-facing CLI command is `csgraph` (not
 `code-system-graph`). The hooks runtime installs as `code-system-graph-hooks`.
 
-**From crates.io** (builds locally; requires Rust 1.97.1 or newer):
+**From crates.io** (builds locally; requires Rust 1.96.0 or newer):
 
 ```bash
 cargo install code-system-graph code-system-graph-hooks
@@ -328,7 +334,7 @@ plugin root. Re-run with `--replace-generated` after local paths change; only a 
 Code System Graph's recognized ownership identity can be replaced. Until local binding creation
 runs, that MCP entry fails visibly while independent plugin skills and servers remain usable.
 
-The generated MCP is read-only and requires `csgraph 1.1.0` in `PATH`; it does not bundle binaries.
+The generated MCP is read-only and requires `csgraph 1.2.0` in `PATH`; it does not bundle binaries.
 Its plugin, server, and skill share a stable name derived from the declared workspace name, so
 clones produce the same versioned files. Install it project-locally for workspace-only activation;
 the generated skill also requires the nearest manifest and MCP `status` to report that workspace.

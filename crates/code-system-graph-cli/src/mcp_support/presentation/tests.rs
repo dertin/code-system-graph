@@ -160,7 +160,7 @@ fn status_markdown_has_a_semantic_summary_heading() {
         status: ToolStatus::Ok,
         data: Some(GraphStatusReport {
             workspace: "example".to_owned(),
-            schema_version: 2,
+            schema_id: "schema:test".to_owned(),
             integrity_ok: true,
             snapshot: SnapshotMetrics {
                 snapshot_id: "snapshot:example".to_owned(),
@@ -416,6 +416,7 @@ fn query_markdown_has_semantic_summary_and_no_debug_syntax() {
         schema_version: 2,
         status: ToolStatus::Ok,
         data: Some(SearchReport {
+            link_gaps: Vec::new(),
             hits: Vec::new(),
             total_matches: 0,
             offset: 0,

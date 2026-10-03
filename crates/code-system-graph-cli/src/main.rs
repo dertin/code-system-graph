@@ -58,11 +58,11 @@ enum LogFormat {
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Internal supervised worker protocol.
-    #[command(name = "__worker-v1", hide = true)]
-    WorkerV1,
+    #[command(name = "__worker", hide = true)]
+    Worker,
     /// Internal isolated filesystem-event worker protocol.
-    #[command(name = "__watch-events-v1", hide = true)]
-    WatchEventsV1 {
+    #[command(name = "__watch-events", hide = true)]
+    WatchEvents {
         #[arg(long)]
         config: PathBuf,
         #[arg(long)]
@@ -280,10 +280,6 @@ enum Command {
     },
     /// List, inspect, or compare deterministic graph communities.
     Communities {
-        /// `list`, `show`, `compare`, or `recompute`; omitted form preserves flag-based usage.
-        action: Option<String>,
-        /// Community ID for `show` or historical snapshot ID for `compare`.
-        subject: Option<String>,
         /// `SQLite` database path.
         #[arg(long)]
         database: PathBuf,
@@ -293,7 +289,7 @@ enum Command {
         /// Optional exact community identity.
         #[arg(long)]
         community_id: Option<String>,
-        /// Optional historical snapshot identity to compare.
+        /// Optional previous snapshot identity to compare.
         #[arg(long)]
         compare_snapshot: Option<String>,
         /// Zero-based result offset.
@@ -302,9 +298,6 @@ enum Command {
         /// Maximum communities.
         #[arg(long, default_value_t = 20)]
         limit: usize,
-        /// Workspace manifest used by `recompute`.
-        #[arg(long, default_value = "code-system-graph.yaml")]
-        config: PathBuf,
     },
     /// Analyze conservative cross-repository impact and risk.
     Impact {
@@ -351,7 +344,7 @@ enum Command {
         #[arg(long)]
         workspace: String,
         /// Registered repository alias.
-        #[arg(long = "repo", visible_alias = "repository")]
+        #[arg(long = "repo")]
         repository: String,
         /// `unstaged`, `staged`, `all`, `compare:<ref>`, `commit:<sha>`, or `range:<base>..<head>`.
         #[arg(long, default_value = "all", value_parser = parse_change_scope)]
@@ -542,8 +535,8 @@ enum Command {
 
 const fn command_name(command: &Command) -> &'static str {
     match command {
-        Command::WorkerV1 => "__worker-v1",
-        Command::WatchEventsV1 { .. } => "__watch-events-v1",
+        Command::Worker => "__worker",
+        Command::WatchEvents { .. } => "__watch-events",
         Command::Init { .. } => "init",
         Command::Scan { .. } => "scan",
         Command::Sync { .. } => "sync",
@@ -879,6 +872,7 @@ fn handle_scan(
             codegraph,
             codegraph_binary,
             repository,
+            touched_repositories: Vec::new(),
             force,
         },
     )?;
@@ -918,6 +912,7 @@ async fn handle_sync(
         codegraph: false,
         codegraph_binary,
         repository,
+        touched_repositories: Vec::new(),
         force,
     };
     if watch {
@@ -1378,69 +1373,6 @@ fn handle_communities(
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "Community compatibility syntax maps positional actions and existing bounded flags"
-)]
-fn handle_community_command(
-    database: &std::path::Path,
-    workspace: &str,
-    action: Option<&str>,
-    subject: Option<String>,
-    community_id: Option<String>,
-    compare_snapshot: Option<String>,
-    offset: usize,
-    limit: usize,
-    config: &std::path::Path,
-) -> anyhow::Result<()> {
-    if action == Some("recompute") {
-        if subject.is_some() || community_id.is_some() || compare_snapshot.is_some() {
-            anyhow::bail!("communities recompute does not accept selection arguments");
-        }
-        let summary = scan_workspace_with_overrides(config, database, &ScanOverrides::default())?;
-        if summary.workspace != workspace {
-            anyhow::bail!(
-                "workspace name `{workspace}` does not match manifest name `{}`",
-                summary.workspace
-            );
-        }
-        println!("{}", serde_json::to_string(&summary)?);
-        return Ok(());
-    }
-    let (community_id, compare_snapshot_id) = match action {
-        None | Some("list") => (community_id, compare_snapshot),
-        Some("show") => (
-            Some(
-                subject
-                    .ok_or_else(|| anyhow::anyhow!("communities show requires a community ID"))?,
-            ),
-            None,
-        ),
-        Some("compare") => (
-            None,
-            Some(
-                subject
-                    .ok_or_else(|| anyhow::anyhow!("communities compare requires a snapshot ID"))?,
-            ),
-        ),
-        Some(other) => {
-            anyhow::bail!(
-                "unknown communities action `{other}`; expected list, show, compare, or recompute"
-            )
-        }
-    };
-    handle_communities(
-        database,
-        workspace,
-        &CommunityInput {
-            community_id: community_id.map(code_system_graph_model::CommunityId::new),
-            compare_snapshot_id,
-            offset,
-            limit,
-        },
-    )
-}
-
-#[expect(
-    clippy::too_many_arguments,
     reason = "CLI impact controls remain explicit at the delivery boundary"
 )]
 async fn handle_impact(
@@ -1571,8 +1503,8 @@ fn log_command_event(
 )]
 async fn dispatch(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
-        Command::WorkerV1 => run_worker_from_stdio().map_err(anyhow::Error::msg)?,
-        Command::WatchEventsV1 {
+        Command::Worker => run_worker_from_stdio().map_err(anyhow::Error::msg)?,
+        Command::WatchEvents {
             config,
             database,
             workspace,
@@ -1767,25 +1699,21 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             k,
         )?,
         Command::Communities {
-            action,
-            subject,
             database,
             workspace,
             community_id,
             compare_snapshot,
             offset,
             limit,
-            config,
-        } => handle_community_command(
+        } => handle_communities(
             &database,
             &workspace,
-            action.as_deref(),
-            subject,
-            community_id,
-            compare_snapshot,
-            offset,
-            limit,
-            &config,
+            &CommunityInput {
+                community_id: community_id.map(code_system_graph_model::CommunityId::new),
+                compare_snapshot_id: compare_snapshot,
+                offset,
+                limit,
+            },
         )?,
         Command::Impact {
             database,

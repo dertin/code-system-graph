@@ -390,7 +390,7 @@ pub(super) struct SnapshotMetrics {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub(super) struct GraphStatusReport {
     pub workspace: String,
-    pub schema_version: i64,
+    pub schema_id: String,
     pub integrity_ok: bool,
     pub snapshot: SnapshotMetrics,
     pub repositories: Vec<RepoFreshness>,
@@ -500,20 +500,18 @@ pub(super) fn contracts_envelope(
             report.truncated = total > report.contracts.len();
             return Ok((report, freshness));
         }
-        let snapshot = store
-            .current_snapshot_summary(configured_workspace)
+        let (nodes, edges, evidence, persisted_freshness) = store
+            .consistent_read(|| {
+                let snapshot = store.current_snapshot_summary(configured_workspace)?;
+                let (nodes, edges) = store.load_graph_snapshot(&snapshot.snapshot_id)?;
+                let evidence = store.load_evidence_snapshot(&snapshot.snapshot_id)?;
+                let freshness = store.load_freshness_snapshot(&snapshot.snapshot_id)?;
+                Ok::<_, code_system_graph_store_sqlite::StoreError>((
+                    nodes, edges, evidence, freshness,
+                ))
+            })
             .map_err(|error| error.to_string())?;
-        let (nodes, edges) = store
-            .load_graph_snapshot(&snapshot.snapshot_id)
-            .map_err(|error| error.to_string())?;
-        let evidence = store
-            .load_evidence_snapshot(&snapshot.snapshot_id)
-            .map_err(|error| error.to_string())?;
-        let freshness = freshness_summary(
-            &store
-                .load_freshness_snapshot(&snapshot.snapshot_id)
-                .map_err(|error| error.to_string())?,
-        );
+        let freshness = freshness_summary(&persisted_freshness);
         let report = inspect_contracts(&nodes, &edges, &evidence, &[], &request)
             .map_err(|error| error.to_string())?;
         Ok::<_, String>((report, freshness))
@@ -560,11 +558,16 @@ pub(super) fn source_context_envelope(
     let result = (|| {
         let store =
             SqliteStore::open_read_only(database_path).map_err(|error| error.to_string())?;
-        let snapshot = store
-            .current_snapshot_summary(configured_workspace)
-            .map_err(|error| error.to_string())?;
-        let (nodes, edges) = store
-            .load_graph_snapshot(&snapshot.snapshot_id)
+        let (nodes, edges, persisted_evidence, persisted_freshness) = store
+            .consistent_read(|| {
+                let snapshot = store.current_snapshot_summary(configured_workspace)?;
+                let (nodes, edges) = store.load_graph_snapshot(&snapshot.snapshot_id)?;
+                let evidence = store.load_evidence_snapshot(&snapshot.snapshot_id)?;
+                let freshness = store.load_freshness_snapshot(&snapshot.snapshot_id)?;
+                Ok::<_, code_system_graph_store_sqlite::StoreError>((
+                    nodes, edges, evidence, freshness,
+                ))
+            })
             .map_err(|error| error.to_string())?;
         let entity = nodes
             .iter()
@@ -610,9 +613,7 @@ pub(super) fn source_context_envelope(
             })
             .flat_map(|edge| edge.evidence.iter().cloned())
             .collect::<BTreeSet<_>>();
-        let all_evidence = store
-            .load_evidence_snapshot(&snapshot.snapshot_id)
-            .map_err(|error| error.to_string())?
+        let all_evidence = persisted_evidence
             .into_iter()
             .map(|evidence| (evidence.id.clone(), evidence))
             .collect::<BTreeMap<_, _>>();
@@ -629,11 +630,7 @@ pub(super) fn source_context_envelope(
             .filter_map(|evidence_id| all_evidence.get(evidence_id).cloned())
             .take(input.evidence_limit)
             .collect::<Vec<_>>();
-        let freshness = freshness_summary(
-            &store
-                .load_freshness_snapshot(&snapshot.snapshot_id)
-                .map_err(|error| error.to_string())?,
-        );
+        let freshness = freshness_summary(&persisted_freshness);
         Ok::<_, String>((
             SourceContextReport {
                 workspace: configured_workspace.to_owned(),
@@ -886,7 +883,7 @@ fn load_status(
     Ok((
         GraphStatusReport {
             workspace: workspace.to_owned(),
-            schema_version: store.schema_version().map_err(|error| error.to_string())?,
+            schema_id: store.schema_id().map_err(|error| error.to_string())?,
             integrity_ok: store.integrity_check().map_err(|error| error.to_string())?,
             snapshot: SnapshotMetrics {
                 snapshot_id: snapshot.snapshot_id,

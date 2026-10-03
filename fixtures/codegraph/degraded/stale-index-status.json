@@ -1,6 +1,6 @@
 {
   "initialized": true,
-  "version": "1.5.0",
+  "version": "1.6.1",
   "projectPath": "/fixture/stale",
   "indexPath": "/fixture/stale/.codegraph",
   "lastIndexed": "2026-07-28T00:00:00.000Z",
@@ -11,7 +11,11 @@
   },
   "worktreeMismatch": null,
   "index": {
+    "builtWithVersion": "1.6.1",
+    "builtWithExtractionVersion": 27,
+    "currentExtractionVersion": 27,
     "reindexRecommended": false,
-    "state": "complete"
+    "state": "complete",
+    "pendingRefs": 0
   }
 }

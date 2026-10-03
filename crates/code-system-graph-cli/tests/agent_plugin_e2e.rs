@@ -8,7 +8,7 @@ use code_system_graph::{
     AgentPluginCreateMode, AgentPluginCreateReport, AgentPluginUninstallReport, scan_workspace
 };
 use rmcp::ServiceExt;
-use rmcp::model::{ClientCapabilities, ClientInfo, Implementation};
+use rmcp::model::{ClientCapabilities, ClientConfig, Implementation};
 
 const PLUGIN_SCHEMA: &str = include_str!(
     "../../code-system-graph-hooks/agent-integration-template/agent-plugin/schemas/1.0.0/plugin.schema.json"
@@ -279,7 +279,7 @@ fn plugin_create_should_render_official_structure_and_be_idempotent() -> anyhow:
         "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json"
     );
     assert_eq!(plugin["name"], first.plugin_name);
-    assert_eq!(plugin["version"], "1.1.0");
+    assert_eq!(plugin["version"], env!("CARGO_PKG_VERSION"));
     let mcp: serde_json::Value = serde_json::from_slice(&std::fs::read(output.join("mcp.json"))?)?;
     let mcp_schema: serde_json::Value = serde_json::from_str(MCP_SCHEMA)?;
     assert!(jsonschema::validator_for(&mcp_schema)?.is_valid(&mcp));
@@ -497,7 +497,7 @@ async fn generated_mcp_should_handshake_with_read_only_profile() -> anyhow::Resu
         .stdout
         .take()
         .ok_or_else(|| anyhow::anyhow!("stdout"))?;
-    let client = ClientInfo::new(
+    let client = ClientConfig::new(
         ClientCapabilities::default(),
         Implementation::new("agent-plugin-e2e", env!("CARGO_PKG_VERSION")),
     );
@@ -583,7 +583,7 @@ async fn generated_codegraph_profile_should_expose_explore_without_admin_tools()
         .stdout
         .take()
         .ok_or_else(|| anyhow::anyhow!("stdout"))?;
-    let client = ClientInfo::new(
+    let client = ClientConfig::new(
         ClientCapabilities::default(),
         Implementation::new("agent-plugin-codegraph-e2e", env!("CARGO_PKG_VERSION")),
     );
@@ -929,7 +929,6 @@ fn plugin_create_should_replace_only_an_owned_existing_plugin_binding() -> anyho
     );
     let binding_path = base.join(".local/code-system-graph/mcp-binding.json");
     let mut binding: serde_json::Value = serde_json::from_slice(&std::fs::read(&binding_path)?)?;
-    binding["generator"] = serde_json::json!("csgraph plugin compose");
     binding["workspace"] = serde_json::json!("locally-edited");
     binding
         .as_object_mut()
@@ -996,7 +995,7 @@ async fn existing_plugin_binding_should_start_the_read_only_mcp() -> anyhow::Res
         .stdout
         .take()
         .ok_or_else(|| anyhow::anyhow!("stdout"))?;
-    let client = ClientInfo::new(
+    let client = ClientConfig::new(
         ClientCapabilities::default(),
         Implementation::new("agent-plugin-binding-e2e", env!("CARGO_PKG_VERSION")),
     );

@@ -1,4 +1,4 @@
-//! Release-mode scale acceptance for the `Code System Graph` 1.0.0 workstation targets.
+//! Release-mode scale acceptance for the `Code System Graph` workstation targets.
 
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};

@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use code_system_graph_model::{
-    CommunityId, Edge, EdgeId, EdgeKind, EpistemicStatus, Evidence, Node, NodeId, NodeKind, RepoFreshnessState, RepoId, TraceSegment
+    CommunityId, Edge, EdgeId, EdgeKind, EpistemicStatus, Evidence, HttpLinkGap, Node, NodeId, NodeKind, RepoFreshnessState, RepoId, TraceSegment
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -156,6 +156,10 @@ pub struct SearchReport {
     /// Navigation based only on observed repositories and entity identifiers.
     #[serde(default)]
     pub next_actions: Vec<AgentNextAction>,
+    /// HTTP calls among the hits that have no provider edge: calls without a provider,
+    /// ambiguous calls with their candidates, and calls to external hosts.
+    #[serde(default)]
+    pub link_gaps: Vec<HttpLinkGap>,
 }
 
 /// Traversal strategy used to find confirmed paths.
@@ -452,6 +456,7 @@ pub fn search(nodes: &[Node], request: &SearchRequest) -> Result<SearchReport, Q
         truncated: page_end < total_matches,
         coverage,
         next_actions: Vec::new(),
+        link_gaps: Vec::new(),
     })
 }
 

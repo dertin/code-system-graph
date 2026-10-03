@@ -63,7 +63,10 @@ fn canonical_access_path(database_path: &Path) -> Result<PathBuf, StoreError> {
             "database path must include a file name",
         ),
     })?;
-    let parent = database_path.parent().unwrap_or_else(|| Path::new("."));
+    let parent = database_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
     if fs::symlink_metadata(database_path).is_err() {
         fs::create_dir_all(parent).map_err(|source| StoreError::Io {
             path: parent.to_path_buf(),

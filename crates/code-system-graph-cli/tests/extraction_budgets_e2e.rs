@@ -149,7 +149,7 @@ fn changed_budgets_should_reextract_and_fail_atomically_without_leaking_literals
     let persisted_text = String::from_utf8_lossy(&persisted_bytes);
     assert!(!persisted_text.contains("private-federation-value"));
     assert!(!persisted_text.contains("private-default-value"));
-    for suffix in [".work-v1.db", ".work-v1.db-wal", ".work-v1.db-shm"] {
+    for suffix in [".work.db", ".work.db-wal", ".work.db-shm"] {
         let path = temporary
             .path()
             .join(format!("code-system-graph.db{suffix}"));
@@ -181,7 +181,7 @@ fn changed_budgets_should_reextract_and_fail_atomically_without_leaking_literals
     assert!(
         changed_batches
             .iter()
-            .all(|batch| batch.extractor_version == "1.1.0")
+            .all(|batch| batch.extractor_version == env!("CARGO_PKG_VERSION"))
     );
     drop(changed_store);
 
@@ -277,11 +277,10 @@ fn legacy_graphql_payload_should_fail_without_partial_publication() -> anyhow::R
 
     let initial = scan_workspace(&config, &database)?;
     let connection = rusqlite::Connection::open(&database)?;
-    let (snapshot_id, payload): (String, Vec<u8>) = connection.query_row(
-        "SELECT snapshot_id, payload
+    let (workspace_name, payload): (String, Vec<u8>) = connection.query_row(
+        "SELECT workspace_name, payload
          FROM extractor_batches
          WHERE extractor = 'code-system-graph.graphql.document'
-         ORDER BY rowid DESC
          LIMIT 1",
         [],
         |row| Ok((row.get(0)?, row.get(1)?)),
@@ -294,8 +293,12 @@ fn legacy_graphql_payload_should_fail_without_partial_publication() -> anyhow::R
     connection.execute(
         "UPDATE extractor_batches
          SET payload = ?1
-         WHERE snapshot_id = ?2 AND extractor = 'code-system-graph.graphql.document'",
-        rusqlite::params![tampered, snapshot_id],
+         WHERE workspace_name = ?2 AND extractor = 'code-system-graph.graphql.document'",
+        rusqlite::params![tampered, workspace_name],
+    )?;
+    std::fs::write(
+        repository.join("orders.graphql"),
+        "type Query { orders: String }\n",
     )?;
 
     let rejected = scan_workspace(&config, &database);

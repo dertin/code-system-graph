@@ -92,5 +92,5 @@ alias and exact staged state; advisory mode fails open.
   secrets, provider patches, and raw provider responses are never returned.
 - GraphML and Markdown exports are deterministic views, not import or round-trip formats.
 - Doctor reports unknown when an observation is absent; absence never becomes healthy.
-- HTTP does not expose administrative, pull-request, or source-context routes in 1.1.0.
+- HTTP does not expose administrative, pull-request, or source-context routes.
 - Hook guidance cannot guarantee that a host follows the suggested provider routing.
