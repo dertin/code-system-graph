@@ -21,14 +21,16 @@ channel. Both use agent schema 6; `--response-format legacy` retains schema 5 an
 1.2.1 default while the [evaluation adoption gates](../evaluation/agent-responses/README.md)
 remain open. This does not change the persisted graph schema or the CLI JSON API.
 
-Schema 6 contains `snapshot`, `result`, `entities`, `relations`, and `limits`.
+Schema 6 contains `snapshot`, `result`, `entities`, `relations`, `limits`, and `omitted_defaults`.
 `result` is a projection of the existing typed reports; its nested schema version identifies
 that original view. Entity references resolve by exact `node_id`, relation references by
 exact `edge_id`. Relation direction belongs to each reference; intrinsic endpoint/evidence
 facts live in the catalog. Different views sharing an ID are retained inline when their
-facts differ; normalization never discards a conflicting view. Null means unavailable,
-empty collections mean no retained items, and false is retained explicitly. No default field
-is silently omitted. `missing_endpoint_evidence` names endpoints lacking selected evidence;
+facts differ; normalization never discards a conflicting view. Null means unavailable and empty collections mean no retained items. `omitted_defaults`
+explicitly supplies omitted empty warning/candidate/alternate-ID lists and zero/false candidate
+counts/truncation. Other uncertainty and coverage flags remain explicit. Ranking scores,
+internal stable keys/evidence IDs/provider-local IDs, inverse wording, and provider execution
+counters are diagnostics retained in legacy/CLI reports rather than the canonical selection. `missing_endpoint_evidence` names endpoints lacking selected evidence;
 an empty list does not certify complete observation of runtime behavior.
 
 Both final formatters receive the same canonical value and perform no graph/provider calls,

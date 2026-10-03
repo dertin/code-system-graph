@@ -23,6 +23,7 @@ pub(super) struct ExploreCorrelationInput {
 pub(super) struct ExploreCorrelationOutput {
     pub(super) handoffs: Vec<ExploreFederatedHandoff>,
     pub(super) truncations: Vec<String>,
+    pub(super) gaps: Vec<String>,
 }
 
 pub(super) fn explore_repository_context(
@@ -75,6 +76,7 @@ pub(super) fn correlate_explore_handoffs(
     let ownership = resolve_repository_ownership(&input.nodes, &input.edges, &mut should_stop)?;
     let mut output = Vec::new();
     let mut truncations = Vec::new();
+    let mut gaps = Vec::new();
     'anchors: for anchor in &input.anchors {
         if should_stop() {
             return Err(());
@@ -89,6 +91,7 @@ pub(super) fn correlate_explore_handoffs(
             &mut should_stop,
         )?;
         if matching_evidence.is_empty() && matching_nodes.is_empty() {
+            gaps.push(format!("No precise persisted symbol/callsite correlation was available for {:?} in {:?}; this does not establish absence of cross-repository relationships. Rescan the repository to refresh source associations.", anchor.name, anchor.file_path));
             continue;
         }
         let mut emitted_for_anchor = 0_usize;
@@ -166,6 +169,7 @@ pub(super) fn correlate_explore_handoffs(
     Ok(ExploreCorrelationOutput {
         handoffs: output,
         truncations,
+        gaps,
     })
 }
 

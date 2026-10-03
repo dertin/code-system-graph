@@ -769,7 +769,7 @@ channels:
                 kind: EdgeKind::Publishes,
                 confidence: 1.0,
                 status: EpistemicStatus::Confirmed,
-                evidence: evidence.clone(),
+                evidence,
             },
             Edge {
                 id: EdgeId::new("subscribe"),

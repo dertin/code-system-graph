@@ -417,8 +417,10 @@ async fn correlate_explore_with_deadline(
         Ok(ExploreCorrelationOutput {
             handoffs,
             truncations,
+            gaps,
         }) => {
             ledger.truncations.extend(truncations);
+            ledger.gaps.extend(gaps);
             handoffs
         }
         Err(ExploreBlockingError::Failed(_))
