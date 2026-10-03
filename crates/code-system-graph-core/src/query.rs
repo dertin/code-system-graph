@@ -414,6 +414,29 @@ pub enum QueryError {
 /// invalid.
 #[must_use = "search results and validation errors must be handled"]
 pub fn search(nodes: &[Node], request: &SearchRequest) -> Result<SearchReport, QueryError> {
+    search_with_fts_state(nodes, request, FtsSearchState::Unavailable)
+}
+
+/// Execution state supplied independently of the legacy search request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FtsSearchState {
+    /// No full-text operation ran; supplied scores can still be used.
+    Unavailable,
+    /// Full-text search completed, even if it found no matches.
+    Executed,
+    /// Full-text search failed and lexical fallback was used.
+    Failed,
+}
+
+/// Searches with explicit full-text execution coverage, preserving the legacy request shape.
+///
+/// # Errors
+/// Returns the same validation errors as [`search`].
+pub fn search_with_fts_state(
+    nodes: &[Node],
+    request: &SearchRequest,
+    fts_state: FtsSearchState,
+) -> Result<SearchReport, QueryError> {
     let normalized_query = normalize(&request.query);
     validate_search(nodes, request, &normalized_query)?;
     let distinct = distinct_nodes(nodes)?;
@@ -447,6 +470,7 @@ pub fn search(nodes: &[Node], request: &SearchRequest) -> Result<SearchReport, Q
         total_matches,
         request,
         unknown_freshness,
+        fts_state,
     );
     Ok(SearchReport {
         hits: page,
@@ -733,9 +757,12 @@ fn search_coverage(
     matched_nodes: usize,
     request: &SearchRequest,
     unknown: BTreeSet<RepoId>,
+    fts_state: FtsSearchState,
 ) -> SearchCoverage {
     let mut gaps = Vec::new();
-    if request.fts_scores.is_empty() {
+    if fts_state == FtsSearchState::Failed {
+        gaps.push("Full-text search failed; lexical fallback was used.".to_owned());
+    } else if fts_state == FtsSearchState::Unavailable && request.fts_scores.is_empty() {
         gaps.push("Full-text scores were not provided.".to_owned());
     }
     if request.centrality_scores.is_empty() {
@@ -1578,6 +1605,36 @@ mod tests {
             offset,
             limit,
         }
+    }
+
+    #[test]
+    fn successful_empty_fts_is_distinct_from_unavailable_search() {
+        let request = search_request("missing", 0, 5);
+        let unavailable = search(&[], &request).expect("search");
+        assert!(
+            unavailable
+                .coverage
+                .gaps
+                .iter()
+                .any(|gap| gap.contains("Full-text"))
+        );
+        let empty = super::search_with_fts_state(&[], &request, super::FtsSearchState::Executed)
+            .expect("search");
+        assert_eq!(empty.hits, []);
+        assert!(
+            !empty
+                .coverage
+                .gaps
+                .iter()
+                .any(|gap| gap.contains("Full-text"))
+        );
+        assert!(
+            empty
+                .coverage
+                .gaps
+                .iter()
+                .any(|gap| gap.contains("Centrality"))
+        );
     }
 
     fn traversal_request(

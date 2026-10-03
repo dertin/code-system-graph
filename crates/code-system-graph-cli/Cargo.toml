@@ -32,10 +32,10 @@ blake3 = "1.8.7"
 foldhash = "0.2.0"
 clap = { version = "4.6.7", features = ["derive"] }
 clap_complete = "4.6.11"
-code-system-graph-core = { version = "1.2.0", path = "../code-system-graph-core" }
-code-system-graph-hooks = { version = "1.2.0", path = "../code-system-graph-hooks" }
-code-system-graph-model = { version = "1.2.0", path = "../code-system-graph-model" }
-code-system-graph-store-sqlite = { version = "1.2.0", path = "../code-system-graph-store-sqlite" }
+code-system-graph-core = { version = "1.2.1", path = "../code-system-graph-core" }
+code-system-graph-hooks = { version = "1.2.1", path = "../code-system-graph-hooks" }
+code-system-graph-model = { version = "1.2.1", path = "../code-system-graph-model" }
+code-system-graph-store-sqlite = { version = "1.2.1", path = "../code-system-graph-store-sqlite" }
 rmcp = { version = "3.5.0", features = ["transport-io"] }
 notify = "8.2.0"
 rusqlite = { version = "0.40.2", features = ["bundled"] }

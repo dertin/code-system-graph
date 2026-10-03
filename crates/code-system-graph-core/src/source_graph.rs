@@ -78,6 +78,34 @@ pub fn source_observations_to_graph(
                         path,
                     ));
                 }
+                if observation.role == SourceRole::Consumer
+                    && let Some(symbol) = observation.symbol_name.as_deref()
+                {
+                    let identity = SourceSymbolIdentity::new(
+                        repo_id.clone(),
+                        language_name(observation.language),
+                        source_path,
+                        symbol,
+                    );
+                    let caller = identity.node(symbol);
+                    let edge_key = format!(
+                        "{}:consumes:{}:{}",
+                        caller.id.as_str(),
+                        boundary.node.id.as_str(),
+                        observation.lines.start
+                    );
+                    result.relation_edges.push(Edge {
+                        id: EdgeId::new(stable_id("edge", &edge_key)),
+                        source: caller.id.clone(),
+                        target: boundary.node.id.clone(),
+                        kind: EdgeKind::Consumes,
+                        confidence: observation.confidence,
+                        status: EpistemicStatus::Confirmed,
+                        evidence: vec![boundary.evidence.id.clone()],
+                    });
+                    result.relation_nodes.push(caller);
+                    result.relation_evidence.push(boundary.evidence.clone());
+                }
                 result.boundaries.push(boundary);
             }
             SourceRole::Factory => {

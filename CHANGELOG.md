@@ -3,6 +3,14 @@
 All notable public changes to Code System Graph are documented in this file. Code System Graph follows Semantic
 Versioning.
 
+## [1.2.1] - 2026-10-03
+
+- Preserve agent-facing identifiers, source locators, exact next-action arguments, and bilateral evidence with roles and provenance.
+- Correlate HTTP consumers to their containing symbols through exact callsite evidence; keep unrelated same-file symbols isolated.
+- Distinguish successful empty full-text search from unavailable or failed search without changing the existing Rust search request type.
+- Add opt-in canonical schema 6 Markdown/JSON delivery, source parity, deduplicated entity/relation catalogs, snapshot identity, and a complete response byte budget with explicit recovery.
+- Preserve legacy delivery during evaluation; add a reproducible 42-case MCP corpus, semantic parity/continuation checks and a Codex CLI remote-model replay harness.
+
 ## [1.2.0] - 2026-10-03
 
 ### Changed

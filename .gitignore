@@ -1,3 +1,10 @@
 /.cursor/
 /dist/
 /target/
+
+/evaluation/agent-responses/.work/
+/evaluation/agent-responses/results*/
+/artifacts/agent-response-examples/.work/
+
+/evaluation/agent-responses/__pycache__/
+/artifacts/agent-response-examples/__pycache__/

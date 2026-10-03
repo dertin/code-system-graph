@@ -247,7 +247,7 @@ impl AgentToolResult<'_> {
     }
 }
 
-fn structured_agent<T: Serialize, U>(
+pub(super) fn structured_agent<T: Serialize, U>(
     tool: &str,
     envelope: &ToolEnvelope<U>,
     data: Option<T>,
@@ -260,11 +260,11 @@ fn structured_agent<T: Serialize, U>(
     ))
 }
 
-fn structured_raw<T: Serialize>(tool: &str, envelope: &ToolEnvelope<T>) -> Value {
+pub(super) fn structured_raw<T: Serialize>(tool: &str, envelope: &ToolEnvelope<T>) -> Value {
     structured_raw_with_gap(tool, envelope, None)
 }
 
-fn structured_raw_with_gap<T: Serialize>(
+pub(super) fn structured_raw_with_gap<T: Serialize>(
     tool: &str,
     envelope: &ToolEnvelope<T>,
     context_gap: Option<&str>,
@@ -768,7 +768,16 @@ fn add_next_actions(document: &mut SemanticMarkdown, actions: &[AgentNextAction]
     }
     let actions = actions
         .iter()
-        .map(|action| format!("- Use {}: {}", code(&action.tool), plain(&action.rationale)))
+        .map(|action| {
+            let arguments =
+                serde_json::to_string(&action.arguments).expect("string arguments serialize");
+            format!(
+                "- Use {} with arguments {}: {}",
+                code(&action.tool),
+                code(&arguments),
+                plain(&action.rationale)
+            )
+        })
         .collect::<Vec<_>>();
     document.add(format!("## Useful next steps\n\n{}", actions.join("\n")));
 }
@@ -846,7 +855,14 @@ fn enum_word<T: Serialize>(value: &T) -> String {
 }
 
 fn code(value: &str) -> String {
-    format!("`{}`", value.replace('`', "'").replace(['\n', '\r'], " "))
+    let value = value.replace(['\n', '\r'], " ");
+    let longest = value.split(|ch| ch != '`').map(str::len).max().unwrap_or(0);
+    let fence = "`".repeat(longest + 1);
+    if longest == 0 {
+        format!("{fence}{value}{fence}")
+    } else {
+        format!("{fence} {value} {fence}")
+    }
 }
 
 fn plain(value: &str) -> String {
@@ -854,10 +870,7 @@ fn plain(value: &str) -> String {
 }
 
 fn heading_text(value: &str) -> String {
-    plain(value)
-        .replace('`', "'")
-        .replace(['#', '*', '_', '[', ']', '<', '>'], "")
-        .replace('|', "¦")
+    code(value)
 }
 
 fn plural(count: usize) -> &'static str {

@@ -1,7 +1,7 @@
 # MCP Surface
 
 Code System Graph exposes a small read-only-by-default stdio MCP surface and advertises the server
-name `code_system_graph` during initialization. Every tool returns exactly one `text` content block
+name `code_system_graph` during initialization. The compatibility mode returns one `text` content block
 containing bounded Markdown plus typed `structuredContent` using agent delivery schema version 5.
 Persisted graph tools exclude source bodies; `explore` is the explicit
 source-bearing, ephemeral exception. Mutating tools are absent from discovery unless the server
@@ -12,6 +12,45 @@ remains the persisted tool/resource contract; agent delivery schema version 5 ad
 repository attribution, and explicit derivation metadata. Fenced JSON appears only inside the
 schema catalog. Final tool, resource, and schema-catalog Markdown budgets must each be at least
 256 bytes.
+
+## Canonical response preview (1.2.1)
+
+`csgraph mcp --response-format markdown` selects a single Markdown response.
+`--response-format json` selects equivalent JSON text, without a duplicate `structuredContent`
+channel. Both use agent schema 6; `--response-format legacy` retains schema 5 and is the
+1.2.1 default while the [evaluation adoption gates](../evaluation/agent-responses/README.md)
+remain open. This does not change the persisted graph schema or the CLI JSON API.
+
+Schema 6 contains `snapshot`, `result`, `entities`, `relations`, and `limits`.
+`result` is a projection of the existing typed reports; its nested schema version identifies
+that original view. Entity references resolve by exact `node_id`, relation references by
+exact `edge_id`. Relation direction belongs to each reference; intrinsic endpoint/evidence
+facts live in the catalog. Different views sharing an ID are retained inline when their
+facts differ; normalization never discards a conflicting view. Null means unavailable,
+empty collections mean no retained items, and false is retained explicitly. No default field
+is silently omitted. `missing_endpoint_evidence` names endpoints lacking selected evidence;
+an empty list does not certify complete observation of runtime behavior.
+
+Both final formatters receive the same canonical value and perform no graph/provider calls,
+ranking, or evidence selection. Source Markdown is a canonical field, including assertions,
+and is fenced as untrusted content in Markdown. Exact actions retain tool names and arguments.
+`confirmed` confirms only graph linkage, not a bug or guaranteed runtime delivery.
+
+`--response-budget-bytes` (default 65536, minimum 512) is a new limit for the complete serialized
+`CallToolResult`. Selection must fit **both** format representations before a format is chosen,
+so format does not change the selected facts. If it cannot fit, delivery returns an explicit
+error with recovery instructions and no partial facts. JSON stays parseable. This initial
+conservative policy preserves complete selected records instead of silently shortening pages,
+evidence or source; reduce the query limit/source budget or raise the delivery budget to retry.
+The JSON-RPC envelope added by the transport and host context/token limits are separate.
+`maxMcpToolResponseBytes` retains its existing legacy Markdown-only meaning.
+
+Legacy output also preserves identifiers, includes exact continuation arguments and evidence
+roles/provenance, prefers bilateral evidence, and includes `explore.source_markdown` in JSON.
+A successful empty FTS result is distinct from missing/failed FTS. Query coverage notes about
+searching graph entities rather than source bodies do not alone mark a successful query degraded.
+After upgrading, rescan to materialize consumer-symbol associations; extraction cache version
+1.2.1 prevents reuse of prior extraction payloads. Existing graph snapshots remain readable.
 
 ## `status`
 
@@ -57,8 +96,9 @@ already present. One persisted relation is rendered once per response even when 
 entities matched the query. Cross-repository HTTP previews retain bounded evidence for both the
 consumer and provider; database and internal-package previews also retain the confirmed
 declaration evidence used for structural repository attribution. Stable keys, node and edge IDs,
-scores, pagination, and evidence roles remain in `structuredContent` instead of interrupting the
-human-readable Markdown.
+scores and full pagination remain in legacy `structuredContent`; evidence roles and exact
+continuation arguments also appear in legacy Markdown. Canonical output retains the same selected
+facts in both formats.
 
 ## `explore`
 

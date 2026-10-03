@@ -31,7 +31,7 @@ timeouts, internal errors, and cancellation.
 The read-only catalog covers status, query, trace, impact, changes, contracts, communities,
 source-context handoff, and explicitly consented pull-request inspection. Inputs have generated
 JSON input schemas and non-overridable server bounds. Each call result contains one human-oriented
-Markdown text block plus typed `structuredContent` as its complete machine-readable mirror; no
+Markdown text block plus typed `structuredContent` in compatibility mode (the legacy text is a summary, not a complete mirror); no
 result `outputSchema` is advertised.
 
 Stable resources:
@@ -94,3 +94,7 @@ alias and exact staged state; advisory mode fails open.
 - Doctor reports unknown when an observation is absent; absence never becomes healthy.
 - HTTP does not expose administrative, pull-request, or source-context routes.
 - Hook guidance cannot guarantee that a host follows the suggested provider routing.
+
+MCP 1.2.1 also offers opt-in canonical schema 6 via `--response-format markdown|json`. Both
+formats represent one selected response, including Explore source and exact actions. See
+[MCP delivery](MCP.md#canonical-response-preview-121) for compatibility and whole-response budgets.

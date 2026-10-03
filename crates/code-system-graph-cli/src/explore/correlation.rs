@@ -57,6 +57,10 @@ pub(super) fn explore_repository_contexts(
         .collect()
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "Bounded anchor traversal keeps cancellation and handoff limits together"
+)]
 pub(super) fn correlate_explore_handoffs(
     input: &ExploreCorrelationInput,
     mut should_stop: impl FnMut() -> bool,
@@ -75,8 +79,15 @@ pub(super) fn correlate_explore_handoffs(
         if should_stop() {
             return Err(());
         }
-        let matching_evidence = matching_anchor_evidence(input, anchor, &mut should_stop)?;
+        let mut matching_evidence = matching_anchor_evidence(input, anchor, &mut should_stop)?;
         let matching_nodes = matching_anchor_nodes(input, anchor, &node_by_id, &mut should_stop)?;
+        add_consumer_evidence(
+            input,
+            &evidence_by_id,
+            &matching_nodes,
+            &mut matching_evidence,
+            &mut should_stop,
+        )?;
         if matching_evidence.is_empty() && matching_nodes.is_empty() {
             continue;
         }
@@ -156,6 +167,36 @@ pub(super) fn correlate_explore_handoffs(
         handoffs: output,
         truncations,
     })
+}
+
+// Exact containing-symbol edges share callsite evidence with their HTTP boundary.
+// Do not expand by endpoint identity: several functions can call the same route.
+fn add_consumer_evidence<'a>(
+    input: &'a ExploreCorrelationInput,
+    by_id: &BTreeMap<&EvidenceId, &'a Evidence>,
+    nodes: &BTreeSet<&NodeId>,
+    evidence: &mut BTreeSet<&'a EvidenceId>,
+    should_stop: &mut impl FnMut() -> bool,
+) -> Result<(), ()> {
+    for (index, edge) in input.edges.iter().enumerate() {
+        if index % 256 == 0 && should_stop() {
+            return Err(());
+        }
+        if edge.kind == code_system_graph_model::EdgeKind::Consumes && nodes.contains(&edge.source)
+        {
+            evidence.extend(edge.evidence.iter().filter(|id| {
+                by_id.get(id).is_some_and(|item| {
+                    &item.id == *id
+                        && item.repo_id.as_ref() == Some(&input.repository.id)
+                        && match (&item.observed_at_commit, &input.repository.head_commit) {
+                            (Some(observed), Some(current)) => observed == current,
+                            _ => true,
+                        }
+                })
+            }));
+        }
+    }
+    Ok(())
 }
 
 fn remote_node_for_edge<'a>(
@@ -239,12 +280,27 @@ fn matching_anchor_evidence<'a>(
     should_stop: &mut impl FnMut() -> bool,
 ) -> Result<BTreeSet<&'a EvidenceId>, ()> {
     let anchor_path = anchor.file_path.trim_start_matches("./");
+    let mut consumer_evidence = BTreeSet::new();
+    for (index, edge) in input.edges.iter().enumerate() {
+        if index % 256 == 0 && should_stop() {
+            return Err(());
+        }
+        if edge.kind == code_system_graph_model::EdgeKind::Consumes {
+            consumer_evidence.extend(&edge.evidence);
+        }
+    }
     let mut matching = BTreeSet::new();
     for (index, item) in input.evidence.iter().enumerate() {
         if index % 256 == 0 && should_stop() {
             return Err(());
         }
-        let matches_anchor = item.repo_id.as_ref() == Some(&input.repository.id)
+        let revision_matches = match (&item.observed_at_commit, &input.repository.head_commit) {
+            (Some(observed), Some(current)) => observed == current,
+            _ => true,
+        };
+        let matches_anchor = revision_matches
+            && !consumer_evidence.contains(&item.id)
+            && item.repo_id.as_ref() == Some(&input.repository.id)
             && item
                 .file_path
                 .as_deref()
@@ -637,5 +693,51 @@ mod tests {
         let result = correlate_explore_handoffs(&input, || false).expect("correlation");
 
         assert_eq!(result.handoffs, []);
+    }
+    #[test]
+    fn consumer_handoff_uses_exact_containing_symbol_not_shared_file() {
+        let mut input = correlation_input(false);
+        let symbol = code_system_graph_core::SourceSymbolIdentity::new(
+            RepoId::new("repo:api"),
+            "rust",
+            "src/first.rs",
+            "first",
+        )
+        .node("first");
+        input.evidence[0].start_line = Some(3);
+        input.evidence[0].end_line = Some(6);
+        input.edges.push(Edge {
+            id: EdgeId::new("edge:consumer"),
+            source: symbol.id.clone(),
+            target: input.edges[0].source.clone(),
+            kind: EdgeKind::Consumes,
+            confidence: 1.0,
+            status: EpistemicStatus::Confirmed,
+            evidence: vec![input.evidence[0].id.clone()],
+        });
+        input.nodes.push(symbol);
+        assert_eq!(
+            correlate_explore_handoffs(&input, || false)
+                .expect("correlate")
+                .handoffs
+                .len(),
+            1
+        );
+        input.anchors[0].name = "nested_or_sibling".to_owned();
+        input.anchors[0].start_line = 4;
+        assert_eq!(
+            correlate_explore_handoffs(&input, || false)
+                .expect("correlate")
+                .handoffs,
+            []
+        );
+        input.anchors[0].name = "first".to_owned();
+        input.repository.id = RepoId::new("repo:homonym");
+        assert_eq!(
+            correlate_explore_handoffs(&input, || false)
+                .expect("correlate")
+                .handoffs,
+            []
+        );
     }
 }

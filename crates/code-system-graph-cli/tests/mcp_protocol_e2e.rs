@@ -322,7 +322,11 @@ async fn stdio_explore_should_proxy_bounded_ephemeral_codegraph_context() -> any
         .as_ref()
         .expect("explore structuredContent");
     assert_eq!(explore_structured["tool"], "explore");
-    assert!(explore_structured["data"].get("source_markdown").is_none());
+    assert!(
+        explore_structured["data"]["source_markdown"]
+            .as_str()
+            .is_some_and(|source| source.contains("ephemeral local context"))
+    );
     assert!(
         explore_structured["data"]["execution"]
             .get("effective_policy")

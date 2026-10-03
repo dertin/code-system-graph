@@ -200,6 +200,7 @@ pub(super) struct AgentExploreExecutionSummary {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub(super) struct AgentExploreReport {
     pub repository: ExploreRepositoryContext,
+    pub source_markdown: String,
     pub resolved_symbols: Vec<ResolvedSymbol>,
     pub local_relationships: Vec<ExploreLocalRelationship>,
     pub federated_handoffs: Vec<ExploreFederatedHandoff>,
@@ -357,6 +358,7 @@ pub(super) fn query_view(
 pub(super) fn explore_view(report: &ExploreReport) -> AgentExploreReport {
     AgentExploreReport {
         repository: report.repository.clone(),
+        source_markdown: report.source_markdown.clone(),
         resolved_symbols: report.resolved_symbols.clone(),
         local_relationships: report.local_relationships.clone(),
         federated_handoffs: report.federated_handoffs.clone(),
@@ -639,16 +641,14 @@ const fn query_entity_priority(kind: NodeKind) -> u8 {
 }
 
 pub(super) fn entity_path(node: &Node) -> Option<String> {
-    if matches!(
+    if let Some(identity) = code_system_graph_core::SourceSymbolIdentity::from_node(node) {
+        return Some(identity.source_path().to_owned());
+    }
+    matches!(
         node.kind,
         NodeKind::Artifact | NodeKind::Document | NodeKind::Adr
-    ) || matches!(node.kind, NodeKind::SymbolRef | NodeKind::TestCase)
-        && (node.label.contains('/') || node.label.contains('\\'))
-    {
-        Some(node.label.clone())
-    } else {
-        None
-    }
+    )
+    .then(|| node.label.clone())
 }
 
 fn match_explanation(explanation: &SearchExplanation) -> String {

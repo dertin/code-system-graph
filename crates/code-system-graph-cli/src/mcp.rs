@@ -48,12 +48,26 @@ struct CodeGraphPolicy {
     binary: Option<OsString>,
 }
 
+/// Agent delivery contract selected at process startup.
+#[derive(Debug, Clone, Copy, Default, clap::ValueEnum)]
+pub enum ResponseFormat {
+    /// Compatible schema 5 with both presentation channels.
+    #[default]
+    Legacy,
+    /// Experimental canonical schema 6, Markdown only.
+    Markdown,
+    /// Experimental canonical schema 6, JSON only.
+    Json,
+}
+
 /// Workspace-scoped `Code System Graph` MCP server with an optional explicit admin profile.
 #[derive(Debug, Clone)]
 pub struct CodeSystemGraphServer {
     database_path: PathBuf,
     workspace: String,
     admin_enabled: bool,
+    response_format: ResponseFormat,
+    response_budget_bytes: usize,
     codegraph: CodeGraphPolicy,
     github_pull_requests_enabled: bool,
     bitbucket_pull_requests_enabled: bool,
@@ -76,6 +90,8 @@ impl CodeSystemGraphServer {
             database_path,
             workspace,
             admin_enabled: false,
+            response_format: ResponseFormat::Legacy,
+            response_budget_bytes: 65_536,
             codegraph: CodeGraphPolicy::default(),
             github_pull_requests_enabled: false,
             bitbucket_pull_requests_enabled: false,
@@ -130,11 +146,37 @@ impl CodeSystemGraphServer {
         self
     }
 
+    /// Selects the canonical response format and complete delivery budget.
+    /// Legacy delivery retains its existing presentation-policy limit.
+    #[must_use]
+    pub fn with_response_format(mut self, format: ResponseFormat, maximum: usize) -> Self {
+        self.response_format = format;
+        self.response_budget_bytes = maximum.max(512);
+        self
+    }
+
+    fn deliver_response(
+        &self,
+        result: AgentToolResult<'_>,
+        maximum: usize,
+        context: &AgentPresentationContext,
+    ) -> CallToolResult {
+        match self.response_format {
+            ResponseFormat::Legacy => Self::deliver_markdown(result, maximum, context),
+            ResponseFormat::Markdown | ResponseFormat::Json => mcp_support::canonical::deliver(
+                result,
+                context,
+                matches!(self.response_format, ResponseFormat::Json),
+                self.response_budget_bytes,
+            ),
+        }
+    }
+
     fn markdown_result(&self, result: AgentToolResult<'_>) -> CallToolResult {
         let maximum = usize::try_from(self.execution_policy.max_mcp_tool_response_bytes)
             .expect("validated policy bytes are usize-representable");
         let context = AgentPresentationContext::default();
-        Self::deliver_markdown(result, maximum, &context)
+        self.deliver_response(result, maximum, &context)
     }
 
     async fn contextual_markdown_result(
@@ -145,7 +187,7 @@ impl CodeSystemGraphServer {
         let maximum = usize::try_from(self.execution_policy.max_mcp_tool_response_bytes)
             .expect("validated policy bytes are usize-representable");
         if !result.requires_presentation_context() || !result.has_data() {
-            return Self::deliver_markdown(result, maximum, &AgentPresentationContext::default());
+            return self.deliver_response(result, maximum, &AgentPresentationContext::default());
         }
         let snapshot_after = self.presentation_snapshot_id();
         let context = match (snapshot_before, snapshot_after) {
@@ -156,7 +198,7 @@ impl CodeSystemGraphServer {
                 "The current snapshot changed while this request was running; semantic projections were omitted to avoid mixing snapshots. Retry the tool call.",
             )),
         };
-        Self::deliver_markdown(result, maximum, context.as_ref())
+        self.deliver_response(result, maximum, context.as_ref())
     }
 
     fn deliver_markdown(
@@ -544,11 +586,7 @@ impl CodeSystemGraphServer {
             };
             let maximum = usize::try_from(self.execution_policy.max_mcp_tool_response_bytes)
                 .expect("validated policy bytes are usize-representable");
-            return Self::deliver_markdown(
-                AgentToolResult::Contracts(&envelope),
-                maximum,
-                &context,
-            );
+            return self.deliver_response(AgentToolResult::Contracts(&envelope), maximum, &context);
         }
         self.contextual_markdown_result(AgentToolResult::Contracts(&envelope), snapshot)
             .await
@@ -905,13 +943,22 @@ impl ServerHandler for CodeSystemGraphServer {
              evidence, impact for known targets, and analyze_changes for Git diffs. Repository-local \
              source access is unavailable because CodeGraph is disabled."
         };
+        let delivery = match self.response_format {
+            ResponseFormat::Legacy => {
+                "Tool results pair one bounded semantic Markdown text block with structuredContent using agent delivery schema version 5; only the schema catalog embeds fenced JSON."
+            }
+            ResponseFormat::Markdown => {
+                "Tool results contain only canonical schema 6 Markdown. All selected facts, source, evidence, limits and exact actions are in this channel. Resources keep their documented schema."
+            }
+            ResponseFormat::Json => {
+                "Tool results contain only canonical schema 6 JSON text. All selected facts, source, evidence, limits and exact actions are in this channel. Resources keep their documented schema."
+            }
+        };
         let instructions = format!(
             "Code System Graph exposes bounded cross-repository intelligence for the already selected workspace `{}`. \
              Omit the optional workspace assertion from read-only tools unless you need an explicit policy check. \
-             Tool and resource results \
-             pair one bounded semantic Markdown text block with complete structuredContent using agent delivery schema version 5; \
-             only the schema catalog embeds fenced JSON. {} Administrative tools mutate state only when enabled and still require the exact workspace.",
-            self.workspace, capabilities
+             {} {} Administrative tools mutate state only when enabled and still require the exact workspace.",
+            self.workspace, delivery, capabilities
         );
         ServerConfig::new(
             ServerCapabilities::builder()

@@ -54,13 +54,18 @@ pub(super) fn relation_markdown(relation: &AgentRelationView) -> String {
             &evidence
                 .iter()
                 .map(|item| {
-                    location(
-                        item.repository_alias
-                            .as_deref()
-                            .unwrap_or("unknown repository"),
-                        item.path.as_deref().unwrap_or("location unavailable"),
-                        item.start_line,
-                        item.end_line,
+                    format!(
+                        "{} ({}, {})",
+                        location(
+                            item.repository_alias
+                                .as_deref()
+                                .unwrap_or("unknown repository"),
+                            item.path.as_deref().unwrap_or("location unavailable"),
+                            item.start_line,
+                            item.end_line,
+                        ),
+                        super::enum_word(&item.role),
+                        super::enum_word(&item.provenance)
                     )
                 })
                 .collect::<Vec<_>>()
@@ -94,14 +99,19 @@ pub(super) fn relation_preview_markdown(relation: &AgentRelationView) -> String 
                 .iter()
                 .take(relation_preview_evidence_limit(relation))
                 .map(|evidence| {
-                    location(
-                        evidence
-                            .repository_alias
-                            .as_deref()
-                            .unwrap_or("unknown repository"),
-                        evidence.path.as_deref().unwrap_or("location unavailable"),
-                        evidence.start_line,
-                        evidence.end_line,
+                    format!(
+                        "{} ({}, {})",
+                        location(
+                            evidence
+                                .repository_alias
+                                .as_deref()
+                                .unwrap_or("unknown repository"),
+                            evidence.path.as_deref().unwrap_or("location unavailable"),
+                            evidence.start_line,
+                            evidence.end_line,
+                        ),
+                        super::enum_word(&evidence.role),
+                        super::enum_word(&evidence.provenance)
                     )
                 })
                 .collect::<Vec<_>>()
@@ -162,7 +172,28 @@ fn ordered_relation_evidence(relation: &AgentRelationView) -> Vec<&AgentEvidence
             item.end_line,
         ))
     });
-    evidence
+    let mut selected = Vec::new();
+    for alias in [
+        &relation.source.repository_alias,
+        &relation.target.repository_alias,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if let Some(item) = evidence
+            .iter()
+            .find(|item| item.repository_alias.as_ref() == Some(alias))
+            && !selected.contains(item)
+        {
+            selected.push(*item);
+        }
+    }
+    for item in evidence {
+        if !selected.contains(&item) {
+            selected.push(item);
+        }
+    }
+    selected
 }
 
 fn relation_chain_markdown(relation: &AgentRelationView) -> String {

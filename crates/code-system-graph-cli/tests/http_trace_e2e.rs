@@ -288,8 +288,8 @@ fn scan_and_trace_should_link_python_test_to_rust_implementation() -> anyhow::Re
             cross_language_edges,
         },
         TraceObservation {
-            node_count: 89,
-            edge_count: 105,
+            node_count: 91,
+            edge_count: 107,
             evidence_count: 93,
             tool_status: ToolStatus::Ok,
             segment_count: 1,

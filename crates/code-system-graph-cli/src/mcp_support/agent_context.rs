@@ -19,6 +19,7 @@ const REPOSITORY_CANDIDATE_PREVIEW_LIMIT: usize = 4;
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct AgentPresentationContext {
+    pub(super) snapshot_id: Option<String>,
     pub(super) aliases: BTreeMap<RepoId, String>,
     pub(super) nodes: BTreeMap<NodeId, Node>,
     pub(super) edges: Vec<Edge>,
@@ -93,7 +94,7 @@ impl AgentPresentationContext {
                 ))
             })
             .map_err(|error| error.to_string())?;
-        Ok(Self::from_parts(
+        let mut context = Self::from_parts(
             registry
                 .repositories
                 .into_iter()
@@ -103,7 +104,9 @@ impl AgentPresentationContext {
             edges,
             evidence,
             None,
-        ))
+        );
+        context.snapshot_id = Some(snapshot_id.to_owned());
+        Ok(context)
     }
 
     #[expect(
@@ -250,6 +253,7 @@ impl AgentPresentationContext {
             event_gap
         };
         Self {
+            snapshot_id: None,
             aliases,
             nodes,
             edges,
@@ -330,7 +334,20 @@ impl AgentPresentationContext {
             repository_candidate_count,
             repository_candidates_truncated: repository_candidate_count
                 > REPOSITORY_CANDIDATE_PREVIEW_LIMIT,
-            path: entity_path(node),
+            path: entity_path(node).or_else(|| {
+                let paths = self
+                    .incident_semantic_edges
+                    .get(&node.id)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|index| self.edges.get(*index))
+                    .flat_map(|edge| &edge.evidence)
+                    .filter_map(|id| self.evidence.get(id))
+                    .filter(|item| item.repo_id == node.repo_id)
+                    .filter_map(|item| item.file_path.as_ref())
+                    .collect::<BTreeSet<_>>();
+                (paths.len() == 1).then(|| (*paths.first().expect("one path")).clone())
+            }),
         }
     }
 

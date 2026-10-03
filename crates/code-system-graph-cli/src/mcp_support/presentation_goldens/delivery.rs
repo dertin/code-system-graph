@@ -118,7 +118,7 @@ fn source_context_markdown_lists_every_retained_evidence_location() {
 
     assert!(
         markdown.contains(
-            "`orders-service/src/orders/query.rs:41`, `orders-service/src/orders/query.rs:73`"
+            "`orders-service/src/orders/query.rs:41` (observed relation, extracted), `orders-service/src/orders/query.rs:73`"
         ),
         "{markdown}"
     );

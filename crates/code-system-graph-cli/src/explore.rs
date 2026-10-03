@@ -338,8 +338,20 @@ fn select_explore_repository<'a>(
         });
     }
     Err(format!(
-        "repository is required because workspace `{workspace}` contains {} repositories",
-        registry.repositories.len()
+        "repository is required because workspace `{workspace}` contains {} repositories. Retry explore with repository set to one of these aliases: {}{}. Call status with {{}} for repository discovery.",
+        registry.repositories.len(),
+        registry
+            .repositories
+            .iter()
+            .take(8)
+            .map(|repo| format!("{:?}", repo.alias))
+            .collect::<Vec<_>>()
+            .join(", "),
+        if registry.repositories.len() > 8 {
+            " (list truncated)"
+        } else {
+            ""
+        }
     ))
 }
 
