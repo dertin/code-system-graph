@@ -334,6 +334,8 @@ impl AgentPresentationContext {
             repository_candidate_count,
             repository_candidates_truncated: repository_candidate_count
                 > REPOSITORY_CANDIDATE_PREVIEW_LIMIT,
+            qualified_name: code_system_graph_core::SourceSymbolIdentity::from_node(node)
+                .map(|identity| identity.symbol().to_owned()),
             path: entity_path(node).or_else(|| {
                 let paths = self
                     .incident_semantic_edges

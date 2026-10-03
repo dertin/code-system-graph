@@ -326,6 +326,7 @@ fn repository_endpoints_use_the_alias_instead_of_the_internal_hash() {
         repository_candidates: Vec::new(),
         repository_candidate_count: 0,
         repository_candidates_truncated: false,
+        qualified_name: None,
         path: None,
     };
 
@@ -349,6 +350,7 @@ fn entity_markdown_keeps_stable_keys_in_structured_content_only() {
         repository_candidates: Vec::new(),
         repository_candidate_count: 0,
         repository_candidates_truncated: false,
+        qualified_name: None,
         path: None,
     };
 
@@ -374,6 +376,7 @@ fn local_relation_with_a_global_endpoint_is_described_as_workspace_scoped() {
         repository_candidates: Vec::new(),
         repository_candidate_count: 0,
         repository_candidates_truncated: false,
+        qualified_name: None,
         path: Some("requirements.txt".to_owned()),
     };
     let global = AgentEntityView {
@@ -387,6 +390,7 @@ fn local_relation_with_a_global_endpoint_is_described_as_workspace_scoped() {
         repository_candidates: Vec::new(),
         repository_candidate_count: 0,
         repository_candidates_truncated: false,
+        qualified_name: None,
         path: None,
     };
     let relation = AgentRelationView {

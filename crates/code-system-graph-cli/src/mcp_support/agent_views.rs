@@ -101,6 +101,7 @@ pub(super) struct AgentEntityView {
     pub repository_candidate_count: usize,
     pub repository_candidates_truncated: bool,
     pub path: Option<String>,
+    pub qualified_name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

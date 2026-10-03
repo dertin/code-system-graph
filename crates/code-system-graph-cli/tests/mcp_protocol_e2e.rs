@@ -255,6 +255,10 @@ async fn stdio_should_initialize_without_noise_and_hide_admin_tools() -> anyhow:
 
 #[cfg(unix)]
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "One stdio exchange verifies source parity, navigation and shutdown"
+)]
 async fn stdio_explore_should_proxy_bounded_ephemeral_codegraph_context() -> anyhow::Result<()> {
     let temporary = tempfile::tempdir()?;
     let repository = temporary.path().join("api");
@@ -322,10 +326,9 @@ async fn stdio_explore_should_proxy_bounded_ephemeral_codegraph_context() -> any
         .as_ref()
         .expect("explore structuredContent");
     assert_eq!(explore_structured["tool"], "explore");
-    assert!(
-        explore_structured["data"]["source_markdown"]
-            .as_str()
-            .is_some_and(|source| source.contains("ephemeral local context"))
+    assert_eq!(
+        explore_structured["data"]["source_markdown"],
+        "ephemeral local context"
     );
     assert!(
         explore_structured["data"]["execution"]
