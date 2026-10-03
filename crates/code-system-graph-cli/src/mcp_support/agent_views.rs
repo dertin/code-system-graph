@@ -201,7 +201,8 @@ pub(super) struct AgentExploreExecutionSummary {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub(super) struct AgentExploreReport {
     pub repository: ExploreRepositoryContext,
-    pub source_markdown: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_markdown: Option<String>,
     pub resolved_symbols: Vec<ResolvedSymbol>,
     pub local_relationships: Vec<ExploreLocalRelationship>,
     pub federated_handoffs: Vec<ExploreFederatedHandoff>,
@@ -359,7 +360,7 @@ pub(super) fn query_view(
 pub(super) fn explore_view(report: &ExploreReport) -> AgentExploreReport {
     AgentExploreReport {
         repository: report.repository.clone(),
-        source_markdown: report.source_markdown.clone(),
+        source_markdown: None,
         resolved_symbols: report.resolved_symbols.clone(),
         local_relationships: report.local_relationships.clone(),
         federated_handoffs: report.federated_handoffs.clone(),

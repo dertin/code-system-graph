@@ -79,7 +79,17 @@ def check(json_dir, markdown_dir, budget):
         facts = {key:fact for key,fact in facts.items() if key[-1] not in ignored}
         expected = {key:fact for key,fact in expected.items() if key[-1] not in ignored}
         assert facts == expected, (case['id'], list(set(facts.items()) ^ set(expected.items()))[:6])
+        fixture = Path(__file__).resolve().parent / '.work' / 'commerce'
+        directories = {'api':'api','web':'web','tests':'tests-python','worker':'worker-python','infra':'infra','docs':'docs'}
         for record in walk(value):
+            alias, path = record.get('repository_alias'), record.get('path')
+            if alias in directories and path:
+                source = fixture / directories[alias] / path
+                assert source.is_file(), (case['id'], alias, path)
+                lines = len(source.read_text().splitlines())
+                start, end = record.get('start_line'), record.get('end_line')
+                if start is not None: assert 1 <= start <= lines, (case['id'], path, start, lines)
+                if end is not None: assert (start or 1) <= end <= lines, (case['id'], path, end, lines)
             if 'entity_ref' in record: assert record['entity_ref'] in value['entities']
             if 'relation_ref' in record: assert record['relation_ref'] in value['relations']
         assert bool(response.get('isError')) == (case['id'] == 'bad-scope'), case['id']

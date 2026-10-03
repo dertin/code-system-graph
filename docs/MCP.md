@@ -48,7 +48,8 @@ The JSON-RPC envelope added by the transport and host context/token limits are s
 `maxMcpToolResponseBytes` retains its existing legacy Markdown-only meaning.
 
 Legacy output also preserves identifiers, includes exact continuation arguments and evidence
-roles/provenance, prefers bilateral evidence, and includes `explore.source_markdown` in JSON.
+roles/provenance and prefers bilateral evidence. Legacy Explore keeps its previous JSON
+shape without source; canonical schema 6 includes `source_markdown` in both formats.
 A successful empty FTS result is distinct from missing/failed FTS. Query coverage notes about
 searching graph entities rather than source bodies do not alone mark a successful query degraded.
 After upgrading, rescan to materialize consumer-symbol associations; extraction cache version

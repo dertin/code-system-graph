@@ -206,7 +206,11 @@ fn project(result: AgentToolResult<'_>, context: &AgentPresentationContext) -> V
         AgentToolResult::Explore(envelope) => structured_agent(
             "explore",
             envelope,
-            envelope.data.as_ref().map(explore_view),
+            envelope.data.as_ref().map(|report| {
+                let mut view = explore_view(report);
+                view.source_markdown = Some(report.source_markdown.clone());
+                view
+            }),
             None,
         ),
         AgentToolResult::Communities(envelope) => structured_raw("communities", envelope),

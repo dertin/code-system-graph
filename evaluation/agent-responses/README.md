@@ -46,6 +46,13 @@ fixture evidence; `proves_bug=false` alone is not a task-success score.
 
 This replay does not trace Themis's actual adapter or measure real 2–4-hop task completion.
 Its token usage is an observation for this Codex invocation, not a tokenizer estimate or a
-promise of savings in another host. Human blind review, paired confidence intervals and
+promise of savings in another host. Human blind review, paired task-success confidence intervals and
 Themis integration remain adoption gates. No ranking/filter/source-trimming heuristic is
 adopted from the pilot alone. The legacy default remains until those gates are satisfied.
+
+`score_replay.py` checks reported aliases/locators, exact suggested tool arguments, required
+participants in the HTTP/event/handoff probes, and unsupported bug claims. These are narrow,
+deterministic answer checks, not a full semantic task-success judgement. `summarize_eval.py`
+records batch usage/latency and bootstraps **case-level** mean check-rate differences for B/C;
+repetitions are not independent tasks. CLI model aliases do not pin a provider model snapshot;
+temperature/tokenizer versions are not exposed by this replay. See `RESULTS.md` for the decision.
