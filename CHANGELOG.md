@@ -3,7 +3,7 @@
 All notable public changes to Code System Graph are documented in this file. Code System Graph follows Semantic
 Versioning.
 
-## [1.2.0] - Unreleased
+## [1.2.0] - 2026-10-03
 
 ### Changed
 
@@ -65,6 +65,10 @@ Versioning.
   `implemented_by`: concrete paths such as `/orders/42` match templates, the most specific template
   wins, and equally specific providers are narrowed to an explicit repository restriction or the
   caller's repository before being reported as ambiguous with their candidates.
+- Route parameters embedded in a segment preserve its literal prefix and suffix. For example,
+  `/files/{name}.json` matches `/files/readme.json`, rejects `/files/readme.xml`, and has a distinct
+  identity from `/files/{id}`. Static segments take precedence over mixed segments, then whole
+  parameters and catch-alls; overlapping mixed templates are reported as ambiguous.
 - Relationships are relinked from all current batches on every scan, so incremental and full scans
   publish identical graphs.
 - `sync --watch` passes after the initial one discover and synchronize only the repositories touched

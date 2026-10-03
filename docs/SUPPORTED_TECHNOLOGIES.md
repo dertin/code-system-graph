@@ -101,6 +101,10 @@ request path such as `/orders/42` reaches the `/orders/{id}` template whatever p
 provider framework uses; the most specific template wins, and equally specific providers are
 narrowed to the caller's repository before being reported as ambiguous.
 
+Parameters embedded in a segment retain their literal constraints: `/files/{name}.json` matches
+`/files/readme.json` and rejects `/files/readme.xml`. Static segments rank ahead of mixed segments,
+then whole-segment parameters and catch-alls. Overlapping mixed templates remain ambiguous.
+
 Client URLs are evaluated from the expression that builds them:
 
 - constants and variables bound earlier in the same function or file, including `this.` and `self.`

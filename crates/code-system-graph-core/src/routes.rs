@@ -22,6 +22,9 @@ pub enum RouteSegment {
     Static(String),
     /// Single-segment parameter such as `{id}`, `:id`, `<int:id>`, `{id:int}`, or `[id]`.
     Param,
+    /// Literal pieces separated by single-segment parameters, such as `{name}.json`.
+    /// The first and last pieces may be empty; parameter names are discarded.
+    Mixed(Vec<String>),
     /// Parameter that consumes one or more remaining segments, such as `{*rest}`, `{path...}`,
     /// `<path:rest>`, `[...slug]`, or `*filepath`.
     CatchAll,
@@ -76,6 +79,7 @@ impl RouteShape {
             match segment {
                 RouteSegment::Static(value) => rendered.push_str(value),
                 RouteSegment::Param => rendered.push_str("{}"),
+                RouteSegment::Mixed(literals) => rendered.push_str(&literals.join("{}")),
                 RouteSegment::CatchAll => rendered.push_str("{*}"),
             }
         }
@@ -137,10 +141,56 @@ fn classify_segment(segment: &str) -> RouteSegment {
     if segment.len() > 1 && segment.starts_with('*') {
         return RouteSegment::CatchAll;
     }
-    if segment.contains('{') && segment.contains('}') {
-        return RouteSegment::Param;
+    if let Some(literals) = mixed_segment_literals(segment) {
+        if literals.len() == 2 && literals.iter().all(String::is_empty) {
+            return RouteSegment::Param;
+        }
+        return RouteSegment::Mixed(literals);
     }
     RouteSegment::Static(segment.to_owned())
+}
+
+fn mixed_segment_literals(segment: &str) -> Option<Vec<String>> {
+    let mut remaining = segment;
+    let mut literals = Vec::new();
+    while let Some((prefix, parameter)) = remaining.split_once('{') {
+        let (name, suffix) = parameter.split_once('}')?;
+        if name.contains('{') || prefix.contains('}') {
+            return None;
+        }
+        // JavaScript interpolation uses `${name}` for the same path parameter.
+        literals.push(prefix.strip_suffix('$').unwrap_or(prefix).to_owned());
+        remaining = suffix;
+    }
+    if literals.is_empty() || remaining.contains('}') {
+        return None;
+    }
+    literals.push(remaining.to_owned());
+    Some(literals)
+}
+
+fn mixed_segment_matches(literals: &[String], value: &str) -> bool {
+    let [prefix, middle @ .., suffix] = literals else {
+        return false;
+    };
+    let Some(remaining) = value.strip_prefix(prefix.as_str()) else {
+        return false;
+    };
+    let Some(mut remaining) = remaining.strip_suffix(suffix.as_str()) else {
+        return false;
+    };
+    for literal in middle {
+        // Each parameter consumes at least one character, including adjacent parameters.
+        let Some(first) = remaining.chars().next() else {
+            return false;
+        };
+        remaining = &remaining[first.len_utf8()..];
+        let Some((_, rest)) = remaining.split_once(literal.as_str()) else {
+            return false;
+        };
+        remaining = rest;
+    }
+    !remaining.is_empty()
 }
 
 /// Returns the normalized authority of an absolute `http`/`https` URL.
@@ -348,6 +398,7 @@ impl<'a> ProviderSet<'a> {
 #[derive(Debug, Default)]
 struct RouteNode<'a> {
     statics: BTreeMap<String, RouteNode<'a>>,
+    mixed: BTreeMap<Vec<String>, RouteNode<'a>>,
     param: Option<Box<RouteNode<'a>>>,
     catch_all: ProviderSet<'a>,
     terminal: ProviderSet<'a>,
@@ -369,12 +420,17 @@ impl<'a> RouteNode<'a> {
                 .param
                 .get_or_insert_with(Box::default)
                 .insert(rest, provider),
+            RouteSegment::Mixed(literals) => self
+                .mixed
+                .entry(literals.clone())
+                .or_default()
+                .insert(rest, provider),
             RouteSegment::CatchAll => self.catch_all.insert(provider),
         }
     }
 
     /// Finds the most specific accepted providers: at every segment a static match is preferred
-    /// over a parameter, and a parameter over a catch-all.
+    /// over a mixed segment, then a whole-segment parameter, then a catch-all.
     fn find(
         &self,
         query: &[RouteSegment],
@@ -391,7 +447,21 @@ impl<'a> RouteNode<'a> {
                 return found;
             }
         }
-        if matches!(first, RouteSegment::Static(_) | RouteSegment::Param)
+        let mut mixed_matches = Vec::new();
+        for (literals, child) in &self.mixed {
+            let matches = match first {
+                RouteSegment::Static(value) => mixed_segment_matches(literals, value),
+                RouteSegment::Mixed(query_literals) => literals == query_literals,
+                RouteSegment::Param | RouteSegment::CatchAll => false,
+            };
+            if matches {
+                mixed_matches.extend(child.find(rest, accept));
+            }
+        }
+        if !mixed_matches.is_empty() {
+            return mixed_matches;
+        }
+        if !matches!(first, RouteSegment::CatchAll)
             && let Some(child) = &self.param
         {
             let found = child.find(rest, accept);
@@ -1036,5 +1106,113 @@ mod tests {
         let express = provider("repo:api", "GET", "/orders/:id");
 
         assert_eq!(openapi.node.id, express.node.id);
+    }
+
+    #[test]
+    fn mixed_route_segments_should_preserve_literals_in_their_identity() {
+        for (template, canonical) in [
+            ("/files/{name}.json", "/files/{}.json"),
+            ("/files/report-{name}", "/files/report-{}"),
+            ("/files/{name}.{format}", "/files/{}.{}"),
+            ("/files/${name}.json", "/files/{}.json"),
+        ] {
+            assert_eq!(canonical_route(template), canonical, "{template}");
+            assert!(!RouteShape::parse(template).is_concrete(), "{template}");
+        }
+        let json = provider("repo:api", "GET", "/files/{name}.json");
+        let renamed = provider("repo:api", "GET", "/files/{id}.json");
+        let plain = provider("repo:api", "GET", "/files/{id}");
+        let xml = provider("repo:api", "GET", "/files/{id}.xml");
+        assert_eq!(json.node.id, renamed.node.id);
+        assert_ne!(json.node.id, plain.node.id);
+        assert_ne!(json.node.id, xml.node.id);
+    }
+
+    #[test]
+    fn mixed_route_segments_should_link_only_calls_satisfying_every_literal() {
+        for (template, matching, mismatching) in [
+            (
+                "/files/{name}.json",
+                "/files/readme.json",
+                "/files/readme.xml",
+            ),
+            (
+                "/files/report-{name}",
+                "/files/report-readme",
+                "/files/other-readme",
+            ),
+            (
+                "/files/{name}.{format}",
+                "/files/readme.json",
+                "/files/readme",
+            ),
+            (
+                "/files/${name}.json",
+                "/files/readme.json",
+                "/files/readme.xml",
+            ),
+            ("/files/{a}{b}.json", "/files/ab.json", "/files/a.json"),
+        ] {
+            let boundaries = [
+                provider("repo:api", "GET", template),
+                consumer("repo:web", "GET", matching),
+                consumer("repo:web", "GET", mismatching),
+            ];
+            assert_eq!(
+                linked_targets(&boundaries),
+                vec![template.to_owned()],
+                "{template}"
+            );
+        }
+    }
+
+    #[test]
+    fn mixed_route_segments_should_rank_between_static_and_whole_segment_parameters() {
+        for (call, target) in [
+            ("/files/readme.json", "/files/readme.json"),
+            ("/files/other.json", "/files/{name}.json"),
+            ("/files/readme.xml", "/files/{id}"),
+            ("/files/{id}.json", "/files/{name}.json"),
+        ] {
+            let boundaries = [
+                provider("repo:api", "GET", "/files/{id}"),
+                provider("repo:api", "GET", "/files/{name}.json"),
+                provider("repo:api", "GET", "/files/readme.json"),
+                consumer("repo:web", "GET", call),
+            ];
+            assert_eq!(
+                linked_targets(&boundaries),
+                vec![target.to_owned()],
+                "{call}"
+            );
+        }
+    }
+
+    #[test]
+    fn overlapping_mixed_route_segments_should_report_ambiguity() {
+        let boundaries = [
+            provider("repo:api", "GET", "/files/{name}.json"),
+            provider("repo:api", "GET", "/files/report-{name}"),
+            consumer("repo:web", "GET", "/files/report-readme.json"),
+        ];
+        let resolution = link_http_routes(&boundaries, &[], &[], &AuthorityMap::new());
+        assert_eq!(resolution.edges, Vec::new());
+        assert_eq!(resolution.ambiguities.len(), 1);
+        assert_eq!(resolution.ambiguities[0].candidates.len(), 2);
+    }
+
+    #[test]
+    fn mixed_route_parameters_should_consume_nonempty_unicode_values() {
+        for (call, expected_links) in [
+            ("/files/éñ.json", 1),
+            ("/files/é.json", 0),
+            ("/files/.json", 0),
+        ] {
+            let boundaries = [
+                provider("repo:api", "GET", "/files/{a}{b}.json"),
+                consumer("repo:web", "GET", call),
+            ];
+            assert_eq!(linked_targets(&boundaries).len(), expected_links, "{call}");
+        }
     }
 }
