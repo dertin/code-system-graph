@@ -308,7 +308,7 @@ First public release of Code System Graph.
 
 ### CodeGraph delivery
 
-- Added the read-only `explore` MCP tool and HTTP endpoint for bounded, ephemeral
+- Added the read-only `explore` MCP tool for bounded, ephemeral
   repository-local source and flow context. The tool is advertised only when CodeGraph is
   explicitly enabled through `--codegraph` or `CODE_SYSTEM_GRAPH_CODEGRAPH=1`.
 - Added server-configured automatic CodeGraph enrichment to MCP and HTTP impact requests.

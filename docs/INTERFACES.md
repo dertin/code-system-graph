@@ -96,6 +96,6 @@ alias and exact staged state; advisory mode fails open.
 - HTTP does not expose administrative, pull-request, or source-context routes.
 - Hook guidance cannot guarantee that a host follows the suggested provider routing.
 
-MCP 1.2.1 deliberately breaks the previous agent delivery contract. JSON and Markdown share one
-canonical selection, including Explore source. `executionPolicy.maxMcpToolResponseBytes` bounds
-the full serialized tool result. Clients must migrate to schema 6; see [MCP](MCP.md).
+JSON and Markdown share one canonical selection, including Explore source.
+`executionPolicy.maxMcpToolResponseBytes` bounds the full serialized tool result.
+See [MCP surface](MCP.md) for schema 6 fields and catalog references.
