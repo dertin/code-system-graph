@@ -147,7 +147,10 @@ fn candidate_kind(language: SourceSyntaxLanguage, kind: &str) -> bool {
                     | "lexical_declaration"
             )
         }
-        SourceSyntaxLanguage::Rust => matches!(kind, "call_expression" | "attribute_item"),
+        SourceSyntaxLanguage::Rust => matches!(
+            kind,
+            "call_expression" | "attribute_item" | "macro_definition" | "macro_invocation"
+        ),
         SourceSyntaxLanguage::Python => {
             matches!(
                 kind,
