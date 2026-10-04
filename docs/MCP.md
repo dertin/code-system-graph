@@ -52,6 +52,10 @@ roles/provenance and prefers bilateral evidence. Legacy Explore keeps its previo
 shape without source; canonical schema 6 includes `source_markdown` in both formats.
 A successful empty FTS result is distinct from missing/failed FTS. Query coverage notes about
 searching graph entities rather than source bodies do not alone mark a successful query degraded.
+Consumer identities include their declaration line, so same-named methods in different scopes
+do not share callsite evidence. Missing/ambiguous declaration locations do not create those
+associations. Entity `symbol_name` is unqualified; provider-resolved Explore symbols retain a
+`qualified_name` only when supplied by the provider.
 After upgrading, rescan to materialize consumer-symbol associations; extraction cache version
 1.2.1 prevents reuse of prior extraction payloads. Existing graph snapshots remain readable.
 

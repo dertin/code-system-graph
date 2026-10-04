@@ -302,9 +302,10 @@ impl<'a> RepositoryFlows<'a> {
                     let arguments = bound_arguments(call);
                     for wrapper in wrappers {
                         let url = wrapper.url.bind(&arguments);
-                        if let Some(consumer) =
+                        if let Some(mut consumer) =
                             instantiated_consumer(wrapper.origin, &url, caller.1, call.lines)
                         {
+                            consumer.symbol_start_line = call.symbol_start_line;
                             let consumers = resolved.entry(caller).or_default();
                             let identity = consumer_identity(&consumer);
                             if !consumers
@@ -385,6 +386,7 @@ impl<'a> RepositoryFlows<'a> {
                 for consumer in self.exact_consumers(function, resolved) {
                     let mut attributed = consumer.clone();
                     attributed.symbol_name = Some(test.1.to_owned());
+                    attributed.symbol_start_line = None;
                     attributed.lines = lines;
                     attributed.url = None;
                     reached.push(attributed);

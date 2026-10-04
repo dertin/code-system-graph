@@ -1573,6 +1573,10 @@ fn index_known_source_symbols(nodes: &[Node]) -> KnownSourceSymbols {
         .filter_map(|node| {
             let identity = crate::SourceSymbolIdentity::from_node(node)?;
             identity.language()?;
+            // A line-scoped consumer cannot identify an unqualified data owner.
+            if identity.declaration_line().is_some() {
+                return None;
+            }
             Some((
                 (
                     identity.repository().clone(),

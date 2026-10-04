@@ -79,7 +79,10 @@ pub fn source_observations_to_graph(
                     ));
                 }
                 if observation.role == SourceRole::Consumer
-                    && let Some(symbol) = observation.symbol_name.as_deref()
+                    && let (Some(symbol), Some(line)) = (
+                        observation.symbol_name.as_deref(),
+                        observation.symbol_start_line,
+                    )
                 {
                     let identity = SourceSymbolIdentity::new(
                         repo_id.clone(),
@@ -87,7 +90,7 @@ pub fn source_observations_to_graph(
                         source_path,
                         symbol,
                     );
-                    let caller = identity.node(symbol);
+                    let caller = identity.at_declaration(line).node(symbol);
                     let edge_key = format!(
                         "{}:consumes:{}:{}",
                         caller.id.as_str(),
@@ -548,6 +551,41 @@ mod tests {
 
     use super::source_observations_to_graph;
     use crate::{AuthorityMap, link_http_routes, parse_python_source, parse_rust_source};
+
+    #[test]
+    fn same_named_consumers_keep_distinct_declaration_identities() {
+        let repo = RepoId::new("repo:client");
+        let examples = [
+            crate::parse_python_source(
+                "import requests\nclass A:\n    def get(self):\n        return requests.get('https://api/a')\nclass B:\n    def get(self):\n        return requests.get('https://api/b')\n",
+            ),
+            crate::parse_rust_source(
+                "impl A {\n fn get() { reqwest::get(\"https://api/a\"); }\n}\nimpl B {\n fn get() { reqwest::get(\"https://api/b\"); }\n}\n",
+            ),
+            crate::parse_typescript_source(
+                "class A {\n get() { return fetch('https://api/a'); }\n}\nclass B {\n get() { return fetch('https://api/b'); }\n}\n",
+            ),
+            crate::parse_python_source(
+                "import requests\ndef get():\n    requests.get('https://api/a')\n    def get():\n        requests.get('https://api/b')\n",
+            ),
+        ];
+        for observations in examples {
+            let facts = source_observations_to_graph(&repo, "client", "hash", &observations);
+            let consumers = facts
+                .relation_edges
+                .iter()
+                .filter(|edge| edge.kind == EdgeKind::Consumes)
+                .collect::<Vec<_>>();
+            assert_eq!(consumers.len(), 2, "{observations:?}");
+            assert_ne!(consumers[0].source, consumers[1].source);
+            for node in &facts.relation_nodes {
+                let identity =
+                    crate::SourceSymbolIdentity::from_node(node).expect("source identity");
+                assert_eq!(identity.symbol(), "get");
+                assert!(identity.declaration_line().is_some());
+            }
+        }
+    }
 
     #[test]
     fn source_graph_should_link_python_test_to_rust_handler() {

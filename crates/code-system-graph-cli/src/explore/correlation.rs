@@ -240,6 +240,9 @@ fn matching_anchor_nodes<'a>(
             && persisted_symbol_identity(node, &input.repository.id).is_some_and(|identity| {
                 identity.source_path() == anchor.file_path.trim_start_matches("./")
                     && identity.symbol() == anchor.name
+                    && identity
+                        .declaration_line()
+                        .is_none_or(|line| usize::try_from(line) == Ok(anchor.start_line))
             })
         {
             matching.insert(&node.id);
@@ -707,6 +710,7 @@ mod tests {
             "src/first.rs",
             "first",
         )
+        .at_declaration(1)
         .node("first");
         input.evidence[0].start_line = Some(3);
         input.evidence[0].end_line = Some(6);
@@ -726,6 +730,18 @@ mod tests {
                 .handoffs
                 .len(),
             1
+        );
+        // A same-named declaration elsewhere in this file must not inherit the call.
+        input.anchors[0].start_line = 10;
+        let sibling = correlate_explore_handoffs(&input, || false).expect("sibling");
+        assert_eq!(sibling.handoffs, []);
+        assert_ne!(sibling.gaps, [] as [String; 0]);
+        input.anchors[0].start_line = 4;
+        assert_eq!(
+            correlate_explore_handoffs(&input, || false)
+                .expect("nested homonym")
+                .handoffs,
+            []
         );
         input.anchors[0].name = "nested_or_sibling".to_owned();
         input.anchors[0].start_line = 4;

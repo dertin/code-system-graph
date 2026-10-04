@@ -4,6 +4,11 @@ Date: 2026-10-03. **Keep `legacy` as the default.** Canonical Markdown and JSON 
 schema 6 delivery modes. Markdown did not meet the planned 20% token-reduction gate.
 No model was downloaded or fine-tuned. Codex CLI 0.160.0 invoked `gpt-6-astra` remotely.
 
+The replay measured candidate `2266194` (the later legacy-only compatibility fix does not alter
+canonical output). Subsequent review fixes add declaration-line isolation for consumer identities
+and rename the unqualified entity field to `symbol_name`. The token numbers below describe the
+measured candidate, not a new model run of those review fixes; the default decision stays gated.
+
 ## Recorded measurements
 
 Total tokens are API-reported input plus output for an entire batch, including the Codex
@@ -44,7 +49,7 @@ tokenizer versions are not exposed by this CLI.
 - All 44 suggested continuations executed successfully against the same fixture snapshot.
 - Rust regressions cover identifier fidelity, bilateral event evidence, exact symbol/callsite
   handoffs, repository isolation, empty versus unavailable FTS, adversarial strings and budgets.
-- Local workspace validation: 1,093 tests passed, 7 ignored; nightly formatting/clippy, rustdoc with
+- Local workspace validation: 1,096 tests passed, 7 ignored; nightly formatting/clippy, rustdoc with
   warnings denied, MSRV 1.96.0, cargo audit and cargo deny passed.
 
 The replay batches can share context between cases and do not execute model-selected 2–4-hop

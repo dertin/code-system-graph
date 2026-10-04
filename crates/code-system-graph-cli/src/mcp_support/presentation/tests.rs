@@ -56,6 +56,23 @@ fn contract_envelope(
 }
 
 #[test]
+fn entity_symbol_name_does_not_claim_provider_qualification() {
+    let node = code_system_graph_core::SourceSymbolIdentity::new(
+        RepoId::new("repo"),
+        "python",
+        "client.py",
+        "get",
+    )
+    .at_declaration(3)
+    .node("get");
+    let view = AgentPresentationContext::default().entity(&node);
+    let value = serde_json::to_value(view).expect("entity JSON");
+    assert_eq!(value["symbol_name"], "get");
+    assert!(value.get("qualified_name").is_none());
+    assert_eq!(value["path"], "client.py");
+}
+
+#[test]
 fn resolved_method_label_should_prefer_the_qualified_receiver() {
     let symbol = ResolvedSymbol {
         local_id: None,
@@ -326,7 +343,7 @@ fn repository_endpoints_use_the_alias_instead_of_the_internal_hash() {
         repository_candidates: Vec::new(),
         repository_candidate_count: 0,
         repository_candidates_truncated: false,
-        qualified_name: None,
+        symbol_name: None,
         path: None,
     };
 
@@ -350,7 +367,7 @@ fn entity_markdown_keeps_stable_keys_in_structured_content_only() {
         repository_candidates: Vec::new(),
         repository_candidate_count: 0,
         repository_candidates_truncated: false,
-        qualified_name: None,
+        symbol_name: None,
         path: None,
     };
 
@@ -376,7 +393,7 @@ fn local_relation_with_a_global_endpoint_is_described_as_workspace_scoped() {
         repository_candidates: Vec::new(),
         repository_candidate_count: 0,
         repository_candidates_truncated: false,
-        qualified_name: None,
+        symbol_name: None,
         path: Some("requirements.txt".to_owned()),
     };
     let global = AgentEntityView {
@@ -390,7 +407,7 @@ fn local_relation_with_a_global_endpoint_is_described_as_workspace_scoped() {
         repository_candidates: Vec::new(),
         repository_candidate_count: 0,
         repository_candidates_truncated: false,
-        qualified_name: None,
+        symbol_name: None,
         path: None,
     };
     let relation = AgentRelationView {
