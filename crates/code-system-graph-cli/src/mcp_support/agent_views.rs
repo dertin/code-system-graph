@@ -1,4 +1,4 @@
-//! Semantic, machine-readable views paired with agent-facing MCP Markdown.
+//! Semantic views used by canonical MCP delivery.
 
 use std::collections::{BTreeMap, BTreeSet};
 

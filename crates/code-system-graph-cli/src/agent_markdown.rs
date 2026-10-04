@@ -1,4 +1,4 @@
-//! Typed, bounded Markdown construction for agent-facing MCP delivery.
+//! Typed, bounded Markdown construction for MCP resources.
 
 use std::fmt::{Debug, Display};
 

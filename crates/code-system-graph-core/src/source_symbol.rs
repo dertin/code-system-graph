@@ -40,7 +40,7 @@ impl SourceSymbolIdentity {
         self
     }
 
-    /// Declaration line for scoped source identities; absent in legacy identities.
+    /// Declaration line for scoped source identities; absent when the identity has no location.
     #[must_use]
     pub const fn declaration_line(&self) -> Option<u32> {
         self.declaration_line

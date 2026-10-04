@@ -30,9 +30,10 @@ timeouts, internal errors, and cancellation.
 
 The read-only catalog covers status, query, trace, impact, changes, contracts, communities,
 source-context handoff, and explicitly consented pull-request inspection. Inputs have generated
-JSON input schemas and non-overridable server bounds. Each call result contains one canonical schema 6 JSON text block by default, or equivalent
-Markdown with `--response-format markdown`. There is no `structuredContent` duplicate or schema 5
-compatibility mode. No result `outputSchema` is advertised.
+JSON input schemas and non-overridable server bounds. Each call result contains one canonical
+schema-6 JSON text block by default, or equivalent Markdown with `--response-format markdown`. Clients read `content[0].text` and resolve entity and
+relation catalog references as described in [MCP surface](MCP.md). No result `outputSchema` is
+advertised.
 
 Stable resources:
 

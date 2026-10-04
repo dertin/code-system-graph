@@ -5,7 +5,7 @@ for maintainers are in [Release engineering](RELEASE.md).
 
 ## Current availability
 
-Code System Graph `1.2.0` is published on [crates.io](https://crates.io/crates/code-system-graph)
+Published packages are available on [crates.io](https://crates.io/crates/code-system-graph)
 and [GitHub Releases](https://github.com/dertin/code-system-graph/releases). Native release CI
 validates Linux x86_64/ARM64, macOS x86_64/ARM64, and Windows x86_64 before their archives are
 published.
@@ -80,12 +80,13 @@ Download the archive for your exact target, the release CycloneDX SBOM, and `SHA
 [official release page](https://github.com/dertin/code-system-graph/releases). Keep all three files
 in one directory.
 
-For a Linux x86_64 archive:
+For a Linux x86_64 archive, replace `X.Y.Z` with the release version you downloaded:
 
 ```bash
+CSGRAPH_VERSION="X.Y.Z"
 sha256sum --ignore-missing --check SHA256SUMS
-tar -xzf code-system-graph-x86_64-unknown-linux-gnu-v1.2.0.tgz
-PREFIX="$HOME/.local" ./code-system-graph-x86_64-unknown-linux-gnu-v1.2.0/install.sh
+tar -xzf "code-system-graph-x86_64-unknown-linux-gnu-v${CSGRAPH_VERSION}.tgz"
+PREFIX="$HOME/.local" "./code-system-graph-x86_64-unknown-linux-gnu-v${CSGRAPH_VERSION}/install.sh"
 ```
 
 Replace the target in the archive name with `x86_64-apple-darwin`,
@@ -93,7 +94,7 @@ Replace the target in the archive name with `x86_64-apple-darwin`,
 same installer.
 
 The Windows archive is a ZIP file. Verify `SHA256SUMS`, extract
-`code-system-graph-x86_64-pc-windows-msvc-v1.2.0.zip`, and add its `bin` directory containing
+`code-system-graph-x86_64-pc-windows-msvc-v<version>.zip`, and add its `bin` directory containing
 `csgraph.exe` and `code-system-graph-hooks.exe` to `PATH`.
 
 `PREFIX` defaults to `$HOME/.local`. The installer places binaries under `$PREFIX/bin`, installed
@@ -169,10 +170,12 @@ cargo uninstall code-system-graph-hooks
 
 ### Release archive
 
-Run `uninstall.sh` from the verified extracted package with the same prefix:
+Run `uninstall.sh` from the verified extracted package with the same prefix. Set
+`CSGRAPH_VERSION` to the installed version, without the `v` prefix:
 
 ```bash
-PREFIX="$HOME/.local" ./code-system-graph-x86_64-unknown-linux-gnu-v1.2.0/uninstall.sh
+CSGRAPH_VERSION="X.Y.Z"
+PREFIX="$HOME/.local" "./code-system-graph-x86_64-unknown-linux-gnu-v${CSGRAPH_VERSION}/uninstall.sh"
 ```
 
 Before uninstalling either installation type, remove any optional agent hooks:

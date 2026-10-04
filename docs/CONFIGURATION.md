@@ -383,11 +383,12 @@ deterministic extractor batches.
 Explore budgets use milliseconds, item counts, or decoded UTF-8 Markdown bytes as indicated by
 their names. One provider operation is one public context, symbol-resolution, caller, or callee
 request; internal transport negotiation consumes the shared deadline and bytes but not the
-operation count. `maxMcpToolResponseBytes` bounds the complete canonical MCP tool result, including its content envelope, in both formats. Resource rendering
-uses its own item and byte limits, with a separate schema-catalog ceiling. Reducing a value may
+operation count. `maxMcpToolResponseBytes` bounds the complete canonical MCP tool result, including
+its content envelope, in both formats. Resource rendering uses its own item and byte limits, with
+a separate schema-catalog ceiling. Reducing a value may
 produce explicit gaps or truncations but cannot be overridden upward by a request, environment
-variable, repository-local file, or CLI argument. The three final MCP Markdown byte limits must be
-at least 256 bytes so every response can retain its mandatory control and truncation block.
+variable, repository-local file, or CLI argument. The final MCP tool, resource, and schema-catalog
+byte limits must each be at least 256 bytes to retain a tool error or a resource control block.
 
 `csgraph config show` emits schema v2, every default/effective value, origin
 `global_manifest`, `scan_fingerprint`, and `agent_delivery_fingerprint`. Scan-affecting limits,

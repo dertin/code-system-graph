@@ -1,20 +1,19 @@
 # Changelog
 
-All notable public changes to Code System Graph are documented in this file. Code System Graph follows Semantic
-Versioning.
+All notable public changes to Code System Graph are documented in this file.
 
 ## [1.2.1] - 2026-10-03
 
-**Breaking MCP delivery change:** this patch-numbered release intentionally requires client
-migration to schema 6. Schema 5 and `--response-format legacy` are removed without a fallback.
-JSON is the default; Markdown uses the same canonical selection. Read the single text content
-block instead of `structuredContent`. `maxMcpToolResponseBytes` now caps the full tool result.
+MCP tools use schema 6 with a single text content block. JSON is the default;
+`--response-format markdown` provides the same selected facts as Markdown. Clients read
+`content[0].text` and resolve entity/relation catalog references.
 
-- Preserve agent-facing identifiers, source locators, exact next-action arguments, and bilateral evidence with roles and provenance.
-- Correlate HTTP consumers to their containing symbols through exact callsite evidence; keep unrelated same-file symbols isolated.
-- Distinguish successful empty full-text search from unavailable or failed search without changing the existing Rust search request type.
-- Add canonical schema 6 Markdown/JSON delivery, source parity, deduplicated entity/relation catalogs, snapshot identity, and a complete response byte budget with explicit recovery.
-- Remove the legacy renderer and duplicate delivery path; add a reproducible 42-case MCP corpus, semantic parity/continuation checks and a Codex CLI remote-model replay harness.
+- Preserve exact identifiers, source locators, next-action arguments, and bilateral evidence.
+- Correlate HTTP consumers to containing symbols by repository and declaration line.
+- Distinguish successful empty full-text search from unavailable or failed search.
+- Include Explore source, deduplicated entity/relation catalogs, and snapshot identity in both formats.
+- Bound the complete tool result with `maxMcpToolResponseBytes` and return explicit recovery guidance
+  when it exceeds the budget.
 
 ## [1.2.0] - 2026-10-03
 
@@ -169,15 +168,11 @@ block instead of `structuredContent`. `maxMcpToolResponseBytes` now caps the ful
 
 ### Breaking changes
 
-- MCP tools now return one bounded Markdown text block plus typed agent-delivery
-  `structuredContent`; result `outputSchema` remains omitted. All MCP resources use
-  `text/markdown`, with fenced JSON only in the schema catalog.
 - HTTP and CLI tool envelopes use delivery schema v2. Explore returns `ExploreReport` and places
   ephemeral source in `source_markdown`.
 - Direct MCP mode requires `--config`; binding mode loads its recorded global manifest. Generated
   plugin bindings and ownership receipts use version 2.
-- SQLite schema version 2 deliberately rejects 1.0.x databases. A fresh database and complete scan
-  are required; no legacy serializer, cache, plugin, or database compatibility path is provided.
+- SQLite validation requires a database to match the running binary's embedded schema.
 
 ### Added
 
@@ -191,8 +186,8 @@ block instead of `structuredContent`. `maxMcpToolResponseBytes` now caps the ful
   exact provider execution accounting.
 - Query now returns grounded next actions and directs zero-hit source questions toward Explore when
   a real registered repository alias is recognized.
-- Added bounded Markdown rendering with UTF-8-safe, block-stable truncation and centralized escaping
-  for headings, inline values, paths, controls, and untrusted source blocks.
+- Added bounded MCP resource Markdown rendering with UTF-8-safe truncation and escaping for
+  headings, inline values, paths, and controls.
 
 ### Fixed
 
@@ -202,15 +197,12 @@ block instead of `structuredContent`. `maxMcpToolResponseBytes` now caps the ful
   agent-delivery-only settings, so scan-facing changes cannot reuse stale persisted results.
 - Explore reports observed provider concurrency and counts an anchor as traversed only after both
   caller and callee directions complete successfully.
-- MCP rendering now preserves compact status, freshness, warnings, coverage, and paths at the
+- MCP resource rendering preserves compact status, freshness, warnings, coverage, and paths at the
   256-byte minimum, and reports collection retention after both item and byte limits are applied.
 
 ### Release engineering
 
-- Added exhaustive typed Markdown fixtures and golden coverage for all 15 MCP tools and every MCP
-  resource, including low-budget, UTF-8, fenced-source, error, and nested-collection cases.
-- Added direct deadline and cancellation tests for Explore snapshot loading and correlation, plus
-  synchronized Markdown-only MCP instructions and CLI configuration examples.
+- Added direct deadline and cancellation tests for Explore snapshot loading and correlation.
 - Updated `rustls` to 0.23.45 (RUSTSEC-2026-0285) with `rustls-webpki` 0.103.15, and replaced the
   yanked `chacha20` 0.10.1 with 0.10.2.
 
@@ -444,7 +436,7 @@ First public release of Code System Graph.
 
 - Added validation for unsafe control characters, bidirectional metadata, duplicate graph
   identities, invalid references, malformed numeric evidence, and oversized metadata.
-- Added GraphQL extraction payload strictness: legacy `default_value` fields are rejected and
+- Added GraphQL extraction payload strictness: unknown fields are rejected and
   structural default categories use `default_value_kind` only.
 - Added backup-restore validation for missing or altered schema objects, foreign-key integrity,
   and pinned read-only backup sources.

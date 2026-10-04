@@ -1,12 +1,8 @@
-# Code System Graph 1.2.0 Release
+# Release Engineering
 
-Code System Graph 1.2.0 is a synchronization and linking release. Each workspace keeps one current
-graph that every scan updates by delta publication; unchanged files are recognized from a per-file
-stat cache without being read, changed files are read once for all of their extractors, and
-extraction runs in parallel with a deterministic merge. One route engine links consumers, tests,
-and implementations across languages by canonical HTTP method and path, and every scan reports the
-calls it could not link. The source tree and package version are `1.2.0`. Continuous integration
-runs on GitHub at `https://github.com/dertin/code-system-graph`.
+This guide covers validation, packaging, and publication for Code System Graph. The source
+version is `1.2.1`. Continuous integration runs in the
+[public repository](https://github.com/dertin/code-system-graph/actions).
 
 Platform claims below require native build, test, packaging, and archive-smoke evidence from the
 release workflow.
@@ -27,7 +23,7 @@ target.
 
 ## Included capabilities
 
-Code System Graph 1.2.0 includes:
+Code System Graph includes:
 
 - multi-repository workspace registration with lossless native-path identity;
 - incremental, source-free extraction for package, HTTP, event, GraphQL, RPC, data,
@@ -45,8 +41,8 @@ Code System Graph 1.2.0 includes:
 - configurable per-repository corroboration bounds and opt-in Git-native ignore discovery;
 - portable Agent Plugins 1.0.0 generation and ownership-checked local bindings for versioned base
   plugins with a read-only MCP and existing routing guidance;
-- schema-v2 JSON over CLI/HTTP and one bounded Markdown block plus typed agent-delivery
-  `structuredContent` over MCP, without result `outputSchema` metadata;
+- schema-v2 JSON over CLI/HTTP and one canonical schema-6 text block over MCP, with JSON
+  as the default and equivalent Markdown available through `--response-format markdown`;
 - bounded Explore source, symbols, callers/callees, federated handoffs, coverage, actions, and
   execution accounting;
 - one immutable global `executionPolicy` covering scan, Explore, Query, tools, and resources, with
@@ -101,8 +97,8 @@ GNU tar, and SHA-256 tooling. The workspace MSRV remains 1.96.0 and is validated
 
 ```text
 SOURCE_DATE_EPOCH=0 scripts/package-release.sh x86_64-unknown-linux-gnu
-scripts/smoke-install.sh dist/code-system-graph-x86_64-unknown-linux-gnu-v1.2.0
-sha256sum --check dist/code-system-graph-x86_64-unknown-linux-gnu-v1.2.0.sha256
+scripts/smoke-install.sh dist/code-system-graph-x86_64-unknown-linux-gnu-v1.2.1
+sha256sum --check dist/code-system-graph-x86_64-unknown-linux-gnu-v1.2.1.sha256
 ```
 
 The package contains `csgraph`, `code-system-graph-hooks`, the visible Agent integration template
@@ -136,7 +132,7 @@ clean `main` branch aligned with `origin/main`, Cargo credentials for crates.io,
 selects `prepare`:
 
 ```text
-.github/workflows/release.sh 1.2.0 prepare
+.github/workflows/release.sh 1.2.1 prepare
 ```
 
 Preparation runs the complete publish-readiness suite and dry-runs all five packages without
@@ -144,7 +140,7 @@ creating a tag, publishing a crate, or dispatching a workflow. To perform the ir
 pass `publish` explicitly:
 
 ```text
-.github/workflows/release.sh 1.2.0 publish
+.github/workflows/release.sh 1.2.1 publish
 ```
 
 Publish mode verifies that the workspace repository matches `origin`, creates and pushes the
@@ -157,24 +153,6 @@ validates the tag and workspace version, runs the release tests and policy gates
 archives for each configured target, generates the CycloneDX SBOM and checksums, attests every
 asset, and creates or updates the GitHub Release. Dispatching only the workflow does not publish
 the crates to crates.io, so the script remains the standard full-release entry point.
-
-## Recorded Linux x86_64 evidence
-
-The synthetic graph workload completed with 100,000 nodes and 500,000 confirmed edges:
-
-- query p95: 48 ms over five searches;
-- trace p95: below 1 ms at whole-millisecond resolution over five bounded traces;
-- summary impact p95: 824 ms over five depth-one analyses;
-- connected-components analysis: 337 ms;
-- resident memory after the workload: 497,444 KiB.
-
-The generated 100-repository workload discovered 600 inputs. A targeted scan after one repository
-change completed in 165 ms, retained 595 unchanged inputs and at least 99 unchanged repositories,
-and produced an 11 ms status p95 over ten samples.
-
-Fuzzing, dependency policy, package lifecycle, backup and recovery, source-free diagnostics, and
-the complete Rust test suite also passed locally on Linux x86_64. These observations are release
-evidence from one environment, not universal latency or memory guarantees.
 
 ## Publication requirements
 
