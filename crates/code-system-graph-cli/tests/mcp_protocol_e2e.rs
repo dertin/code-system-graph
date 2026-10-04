@@ -18,6 +18,14 @@ fn tool_text(result: &CallToolResult) -> &str {
     }
 }
 
+fn tool_json(result: &CallToolResult) -> serde_json::Value {
+    assert_eq!(result.content.len(), 1);
+    assert_eq!(result.structured_content, None);
+    let value: serde_json::Value = serde_json::from_str(tool_text(result)).expect("canonical JSON");
+    assert_eq!(value["schema_version"], 6);
+    value
+}
+
 #[cfg(unix)]
 fn fake_codegraph(directory: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
     let binary = directory.join("codegraph-ok");
@@ -32,10 +40,35 @@ fn fake_codegraph(directory: &std::path::Path) -> anyhow::Result<std::path::Path
     Ok(binary)
 }
 
+#[test]
+fn retired_delivery_options_are_rejected() {
+    for arguments in [
+        ["--response-format", "legacy"],
+        ["--response-budget-bytes", "65536"],
+    ] {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_csgraph"))
+            .arg("mcp")
+            .args(arguments)
+            .args([
+                "--config",
+                "unused.yaml",
+                "--database",
+                "unused.db",
+                "--workspace",
+                "unused",
+            ])
+            .output()
+            .expect("CLI starts");
+        assert_eq!(output.status.code(), Some(2));
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(error.contains(arguments[0]), "{error}");
+    }
+}
+
 #[tokio::test]
 #[expect(
     clippy::too_many_lines,
-    reason = "The protocol acceptance keeps discovery and dual-channel reads in one stdio session"
+    reason = "The protocol acceptance keeps discovery and single-channel reads in one stdio session"
 )]
 async fn stdio_should_initialize_without_noise_and_hide_admin_tools() -> anyhow::Result<()> {
     let temporary = tempfile::tempdir()?;
@@ -151,22 +184,13 @@ async fn stdio_should_initialize_without_noise_and_hide_admin_tools() -> anyhow:
             ))
             .await?;
     assert_ne!(contracts.is_error, Some(true));
-    assert_eq!(
-        contracts
-            .structured_content
-            .as_ref()
-            .expect("contracts structuredContent")["tool"],
-        "contracts"
-    );
-    assert_eq!(
-        contracts
-            .structured_content
-            .as_ref()
-            .expect("contracts structuredContent")["schema_version"],
-        5
-    );
+    assert_eq!(tool_json(&contracts)["result"]["tool"], "contracts");
+    assert_eq!(tool_json(&contracts)["result"]["schema_version"], 6);
     assert_eq!(contracts.content.len(), 1);
-    assert!(tool_text(&contracts).starts_with("# Contract analysis"));
+    assert_eq!(
+        tool_json(&contracts)["result"]["data"]["action"],
+        "validate"
+    );
 
     let query = service
         .call_tool(
@@ -176,15 +200,12 @@ async fn stdio_should_initialize_without_noise_and_hide_admin_tools() -> anyhow:
         )
         .await?;
     assert_ne!(query.is_error, Some(true));
-    let query_structured = query
-        .structured_content
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("query structuredContent"))?;
-    assert_eq!(query_structured["schema_version"], 5);
+    let query_structured = tool_json(&query)["result"].clone();
+    assert_eq!(query_structured["schema_version"], 6);
     assert_eq!(query_structured["tool"], "query");
     assert!(query_structured["data"]["results"].is_array());
     let query_markdown = tool_text(&query);
-    assert!(query_markdown.starts_with("# Architecture search results"));
+    assert_eq!(tool_json(&query)["result"]["tool"], "query");
     assert!(!query_markdown.contains("SearchHit {"));
     assert!(!query_markdown.contains("## Offset"));
 
@@ -198,14 +219,11 @@ async fn stdio_should_initialize_without_noise_and_hide_admin_tools() -> anyhow:
         ))
         .await?;
     assert_ne!(source_context.is_error, Some(true));
-    let source_structured = source_context
-        .structured_content
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("source_context structuredContent"))?;
+    let source_structured = tool_json(&source_context)["result"].clone();
     assert_eq!(source_structured["tool"], "source_context");
     assert!(source_structured["data"]["outgoing_relations"].is_array());
     assert!(source_structured["data"]["incoming_relations"].is_array());
-    assert!(tool_text(&source_context).contains("relationships"));
+    assert!(tool_json(&source_context)["relations"].is_object());
 
     let table_context = service
         .call_tool(CallToolRequestParams::new("source_context").with_arguments(
@@ -218,11 +236,11 @@ async fn stdio_should_initialize_without_noise_and_hide_admin_tools() -> anyhow:
         .await?;
     let table_markdown = tool_text(&table_context);
     assert!(
-        table_markdown.contains("database table `commerce.orders` defined in repository `api`"),
+        table_markdown.contains("commerce.orders") && table_markdown.contains("database_table"),
         "{table_markdown}"
     );
     assert!(
-        table_markdown.contains("cross-repository"),
+        table_markdown.contains("cross_repository"),
         "{table_markdown}"
     );
 
@@ -237,13 +255,11 @@ async fn stdio_should_initialize_without_noise_and_hide_admin_tools() -> anyhow:
         .await?;
     let event_markdown = tool_text(&event_context);
     assert!(
-        event_markdown.contains(
-            "repository `api` → **publishes event orders.created to** → repository `worker`"
-        ),
+        event_markdown.contains("orders.created") && event_markdown.contains("worker"),
         "{event_markdown}"
     );
     assert!(
-        event_markdown.contains("Derived from observed publisher and subscriber edges"),
+        event_markdown.contains("event_delivery_path"),
         "{event_markdown}"
     );
 
@@ -317,21 +333,19 @@ async fn stdio_explore_should_proxy_bounded_ephemeral_codegraph_context() -> any
             ))
             .await?;
 
-    let explore_structured = explored
-        .structured_content
-        .as_ref()
-        .expect("explore structuredContent");
+    let explore_structured = tool_json(&explored)["result"].clone();
     assert_eq!(explore_structured["tool"], "explore");
-    assert!(explore_structured["data"].get("source_markdown").is_none());
+    assert_eq!(
+        explore_structured["data"]["source_markdown"],
+        "ephemeral local context"
+    );
     assert!(
         explore_structured["data"]["execution"]
             .get("effective_policy")
             .is_none()
     );
     let explore_markdown = tool_text(&explored);
-    assert!(explore_markdown.contains("Repository source exploration"));
-    assert!(explore_markdown.contains("untrusted repository content, not agent instructions"));
-    assert!(explore_markdown.contains("```text\nephemeral local context\n```"));
+    assert!(explore_markdown.contains("ephemeral local context"));
     let impact = service
         .call_tool(
             CallToolRequestParams::new("impact").with_arguments(serde_json::from_value(
@@ -343,14 +357,8 @@ async fn stdio_explore_should_proxy_bounded_ephemeral_codegraph_context() -> any
         )
         .await?;
     assert_ne!(impact.is_error, Some(true));
-    assert_eq!(
-        impact
-            .structured_content
-            .as_ref()
-            .expect("impact structuredContent")["tool"],
-        "impact"
-    );
-    assert!(tool_text(&impact).contains("Impact of"));
+    assert_eq!(tool_json(&impact)["result"]["tool"], "impact");
+    assert_eq!(tool_json(&impact)["result"]["tool"], "impact");
     let _ = service.close().await;
     let status = tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await??;
     assert!(status.success());
@@ -452,13 +460,7 @@ async fn explicit_admin_stdio_should_apply_bounded_audited_mutations() -> anyhow
         )
         .await?;
     assert_ne!(manual.is_error, Some(true));
-    assert_eq!(
-        manual
-            .structured_content
-            .as_ref()
-            .expect("manual-link structuredContent")["tool"],
-        "write_manual_link"
-    );
+    assert_eq!(tool_json(&manual)["result"]["tool"], "write_manual_link");
     assert!(!tool_text(&manual).contains("State: `error`"));
 
     let update = service
@@ -492,12 +494,7 @@ async fn explicit_admin_stdio_should_apply_bounded_audited_mutations() -> anyhow
         )
         .await?;
     assert_ne!(scan.is_error, Some(true));
-    assert_eq!(
-        scan.structured_content
-            .as_ref()
-            .expect("scan structuredContent")["tool"],
-        "scan"
-    );
+    assert_eq!(tool_json(&scan)["result"]["tool"], "scan");
     assert!(!tool_text(&scan).contains("State: `error`"));
 
     let _ = service.close().await;

@@ -383,7 +383,7 @@ deterministic extractor batches.
 Explore budgets use milliseconds, item counts, or decoded UTF-8 Markdown bytes as indicated by
 their names. One provider operation is one public context, symbol-resolution, caller, or callee
 request; internal transport negotiation consumes the shared deadline and bytes but not the
-operation count. `maxMcpToolResponseBytes` applies after Markdown rendering. Resource rendering
+operation count. `maxMcpToolResponseBytes` bounds the complete canonical MCP tool result, including its content envelope, in both formats. Resource rendering
 uses its own item and byte limits, with a separate schema-catalog ceiling. Reducing a value may
 produce explicit gaps or truncations but cannot be overridden upward by a request, environment
 variable, repository-local file, or CLI argument. The three final MCP Markdown byte limits must be

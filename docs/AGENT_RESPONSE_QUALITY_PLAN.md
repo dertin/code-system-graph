@@ -1,8 +1,15 @@
 # Plan de mejora de respuestas para agentes LLM
 
-Estado: implementación 1.2.1 con adopción del nuevo predeterminado condicionada a evaluación. Fecha: 2026-10-03.
+Estado: implementación 1.2.1; cambio incompatible deliberado, sin modo de compatibilidad.
 
-La implementación y sus límites verificables se documentan en [MCP](MCP.md#canonical-response-preview-121) y en [evaluación](../evaluation/agent-responses/README.md). El contrato anterior sigue disponible y es el predeterminado hasta cerrar las puertas de calidad/host descritas abajo.
+**Decisión posterior del mantenedor (2026-10-03):** evitar código de retrocompatibilidad. Se elimina
+`legacy` y el esquema 5; el contrato canónico 6 es la única ruta de entrega. JSON queda como
+predeterminado por los resultados del candidato evaluado; Markdown usa la misma selección.
+`maxMcpToolResponseBytes` pasa a limitar el resultado MCP completo. Esta decisión reemplaza las
+propuestas originales de migración gradual y Markdown predeterminado que se conservan abajo como
+historial del plan. No implica que las evaluaciones humanas o de Themis estén completadas.
+
+Contrato y migración: [MCP](MCP.md). Resultados y límites: [evaluación](../evaluation/agent-responses/RESULTS.md).
 
 ## 1. Decisión principal
 

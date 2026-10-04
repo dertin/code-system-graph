@@ -1,8 +1,6 @@
 //! Human-readable vocabulary shared by semantic MCP views and Markdown.
 
-use code_system_graph_model::{
-    EdgeKind, EpistemicStatus, NodeKind, OverallFreshness, RepoFreshnessState
-};
+use code_system_graph_model::EdgeKind;
 
 pub(super) const fn relationship_phrase(kind: EdgeKind) -> &'static str {
     match kind {
@@ -61,66 +59,5 @@ pub(super) const fn inverse_relationship_phrase(kind: EdgeKind) -> &'static str 
         EdgeKind::IncompatibleWith => "is incompatible with",
         EdgeKind::MemberOf => "has member",
         EdgeKind::ManualLink => "is manually linked from",
-    }
-}
-
-pub(super) const fn node_kind_name(kind: NodeKind) -> &'static str {
-    match kind {
-        NodeKind::Repository => "repository",
-        NodeKind::Service => "service",
-        NodeKind::Package => "package",
-        NodeKind::Artifact => "artifact",
-        NodeKind::SymbolRef => "symbol",
-        NodeKind::TestCase => "test",
-        NodeKind::HttpOperation => "HTTP operation",
-        NodeKind::GraphqlOperation => "GraphQL operation",
-        NodeKind::RpcMethod => "RPC method",
-        NodeKind::EventChannel => "event channel",
-        NodeKind::EventSchema => "event schema",
-        NodeKind::Database => "database",
-        NodeKind::DatabaseTable => "database table",
-        NodeKind::DatabaseColumn => "database column",
-        NodeKind::ConfigKey => "configuration key",
-        NodeKind::Deployment => "deployment",
-        NodeKind::Document => "document",
-        NodeKind::Adr => "architecture decision",
-        NodeKind::Owner => "owner",
-        NodeKind::ChangeSet => "change set",
-        NodeKind::PullRequest => "pull request",
-        NodeKind::Community => "community",
-    }
-}
-
-pub(super) const fn freshness_name(freshness: OverallFreshness) -> &'static str {
-    match freshness {
-        OverallFreshness::Fresh => "fresh",
-        OverallFreshness::Stale => "stale",
-        OverallFreshness::Partial => "partial",
-        OverallFreshness::Unknown => "unknown",
-    }
-}
-
-pub(super) const fn freshness_state_name(state: RepoFreshnessState) -> &'static str {
-    match state {
-        RepoFreshnessState::Fresh => "fresh",
-        RepoFreshnessState::WorkingTreeChanged => "working tree changed",
-        RepoFreshnessState::CommitsBehind => "commits behind",
-        RepoFreshnessState::ConfigChanged => "configuration changed",
-        RepoFreshnessState::ExtractorChanged => "extractor changed",
-        RepoFreshnessState::CodegraphPending => "CodeGraph pending",
-        RepoFreshnessState::Partial => "partial",
-        RepoFreshnessState::Corrupt => "corrupt",
-        RepoFreshnessState::Unknown => "unknown",
-        RepoFreshnessState::Unavailable => "unavailable",
-    }
-}
-
-pub(super) const fn epistemic_status_name(status: EpistemicStatus) -> &'static str {
-    match status {
-        EpistemicStatus::Confirmed => "confirmed",
-        EpistemicStatus::Inferred => "inferred",
-        EpistemicStatus::Ambiguous => "ambiguous",
-        EpistemicStatus::Stale => "stale",
-        EpistemicStatus::Incomplete => "incomplete",
     }
 }

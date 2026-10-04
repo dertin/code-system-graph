@@ -5,11 +5,16 @@ Versioning.
 
 ## [1.2.1] - 2026-10-03
 
+**Breaking MCP delivery change:** this patch-numbered release intentionally requires client
+migration to schema 6. Schema 5 and `--response-format legacy` are removed without a fallback.
+JSON is the default; Markdown uses the same canonical selection. Read the single text content
+block instead of `structuredContent`. `maxMcpToolResponseBytes` now caps the full tool result.
+
 - Preserve agent-facing identifiers, source locators, exact next-action arguments, and bilateral evidence with roles and provenance.
 - Correlate HTTP consumers to their containing symbols through exact callsite evidence; keep unrelated same-file symbols isolated.
 - Distinguish successful empty full-text search from unavailable or failed search without changing the existing Rust search request type.
-- Add opt-in canonical schema 6 Markdown/JSON delivery, source parity, deduplicated entity/relation catalogs, snapshot identity, and a complete response byte budget with explicit recovery.
-- Preserve legacy delivery during evaluation; add a reproducible 42-case MCP corpus, semantic parity/continuation checks and a Codex CLI remote-model replay harness.
+- Add canonical schema 6 Markdown/JSON delivery, source parity, deduplicated entity/relation catalogs, snapshot identity, and a complete response byte budget with explicit recovery.
+- Remove the legacy renderer and duplicate delivery path; add a reproducible 42-case MCP corpus, semantic parity/continuation checks and a Codex CLI remote-model replay harness.
 
 ## [1.2.0] - 2026-10-03
 

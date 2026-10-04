@@ -1,4 +1,4 @@
-//! Versioned opt-in delivery. Selection precedes both pure formatters.
+//! Canonical single-channel delivery. Selection precedes both pure formatters.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -34,7 +34,7 @@ impl CanonicalResponse {
             limits,
             omitted_defaults: BTreeMap::new(),
         };
-        selected.result = selected.intern(result);
+        selected.result = selected.intern(result, context);
         compact_selection(&mut selected.result, &mut selected.omitted_defaults);
         for value in selected
             .entities
@@ -46,12 +46,27 @@ impl CanonicalResponse {
         selected
     }
 
-    fn intern(&mut self, value: Value) -> Value {
+    fn intern(&mut self, value: Value, context: &AgentPresentationContext) -> Value {
         match value {
-            Value::Array(items) => {
-                Value::Array(items.into_iter().map(|item| self.intern(item)).collect())
-            }
+            Value::Array(items) => Value::Array(
+                items
+                    .into_iter()
+                    .map(|item| self.intern(item, context))
+                    .collect(),
+            ),
             Value::Object(mut fields) => {
+                if fields.len() == 5
+                    && fields.contains_key("id")
+                    && fields.contains_key("stable_key")
+                    && let Ok(node) = serde_json::from_value::<code_system_graph_model::Node>(
+                        Value::Object(fields.clone()),
+                    )
+                    && context.nodes.contains_key(&node.id)
+                {
+                    let entity = serde_json::to_value(context.entity(&node))
+                        .expect("typed entity serializes");
+                    return self.intern(entity, context);
+                }
                 if fields.contains_key("node_id") && fields.contains_key("stable_key") {
                     let id = fields["node_id"]
                         .as_str()
@@ -97,7 +112,7 @@ impl CanonicalResponse {
                     let relation = Value::Object(
                         fields
                             .into_iter()
-                            .map(|(key, item)| (key, self.intern(item)))
+                            .map(|(key, item)| (key, self.intern(item, context)))
                             .collect(),
                     );
                     if self
@@ -115,7 +130,7 @@ impl CanonicalResponse {
                 Value::Object(
                     fields
                         .into_iter()
-                        .map(|(key, item)| (key, self.intern(item)))
+                        .map(|(key, item)| (key, self.intern(item, context)))
                         .collect(),
                 )
             }
@@ -125,7 +140,7 @@ impl CanonicalResponse {
 }
 
 // These fields describe ranking/transport implementation, not the selected relationship.
-// Full diagnostics and identity keys remain available in legacy/CLI reports.
+// Full diagnostics and identity keys remain available in CLI reports.
 fn compact_selection(value: &mut Value, defaults: &mut BTreeMap<String, Value>) {
     match value {
         Value::Object(fields) => {
@@ -206,11 +221,7 @@ fn project(result: AgentToolResult<'_>, context: &AgentPresentationContext) -> V
         AgentToolResult::Explore(envelope) => structured_agent(
             "explore",
             envelope,
-            envelope.data.as_ref().map(|report| {
-                let mut view = explore_view(report);
-                view.source_markdown = Some(report.source_markdown.clone());
-                view
-            }),
+            envelope.data.as_ref().map(explore_view),
             None,
         ),
         AgentToolResult::Communities(envelope) => structured_raw("communities", envelope),
@@ -274,13 +285,11 @@ pub(crate) fn deliver(
     if measured > maximum {
         // No unilateral renderer truncation or orphaned references. A caller can
         // lower query limits or source budgets and retry the original operation.
-        let error = json!({"schema_version":6,"status":"error","code":"response_budget_exceeded","required_bytes":measured,"maximum_bytes":maximum,"recovery":"Reduce query limit or source max_files, or increase --response-budget-bytes; retry the original call. No facts delivered."});
+        let error = json!({"schema_version":6,"code":"response_budget_exceeded","recovery":"Lower query/source limits or raise maxMcpToolResponseBytes."});
         let text = if json_format {
             error.to_string()
         } else {
-            format!(
-                "Response budget exceeded. Required: {measured} bytes; limit: {maximum}. Reduce query limit or source max_files, or increase --response-budget-bytes; retry the original call. No facts delivered."
-            )
+            "Response budget exceeded; no facts delivered. Lower query/source limits or raise maxMcpToolResponseBytes.".to_owned()
         };
         return tool_result(text, true);
     }
@@ -386,6 +395,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn raw_node_without_presentation_context_keeps_its_repository() {
+        let node = code_system_graph_model::Node {
+            id: code_system_graph_model::NodeId::new("node:a"),
+            kind: code_system_graph_model::NodeKind::Service,
+            repo_id: Some(code_system_graph_model::RepoId::new("repo:a")),
+            stable_key: "service:a".to_owned(),
+            label: "api".to_owned(),
+        };
+        let selected = CanonicalResponse::select(
+            serde_json::to_value(node).expect("node"),
+            &AgentPresentationContext::default(),
+            vec![],
+        );
+        assert_eq!(selected.result["repo_id"], "repo:a");
+        assert_eq!(selected.result["id"], "node:a");
+    }
+
+    #[test]
     fn catalogs_preserve_direction_source_actions_and_uncertainty() {
         let entity = json!({"node_id":"node:a", "stable_key":"a", "label":"test_create_order", "kind":"test_case", "path":null});
         let relation = json!({"edge_id":"edge:a", "source":entity, "target":entity, "direction":"incoming", "status":"ambiguous", "evidence":[{"path":"worker.py","start_line":5,"role":"observed_relation"}]});
@@ -441,12 +468,12 @@ mod tests {
                 AgentToolResult::Query(&envelope),
                 &AgentPresentationContext::default(),
                 json_format,
-                512,
+                256,
             );
             assert_eq!(result.is_error, Some(true));
             assert_eq!(result.structured_content, None);
             let encoded = serde_json::to_value(&result).expect("result");
-            assert!(serde_json::to_vec(&result).expect("result").len() <= 512);
+            assert!(serde_json::to_vec(&result).expect("result").len() <= 256);
             if json_format {
                 let error: Value =
                     serde_json::from_str(encoded["content"][0]["text"].as_str().expect("text"))

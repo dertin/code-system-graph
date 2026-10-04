@@ -1,13 +1,15 @@
 # Evaluation decision for 1.2.1
 
-Date: 2026-10-03. **Keep `legacy` as the default.** Canonical Markdown and JSON are opt-in
-schema 6 delivery modes. Markdown did not meet the planned 20% token-reduction gate.
+Date: 2026-10-03. The measured candidate did not justify switching to Markdown: it missed the
+planned 20% token-reduction gate. The maintainer subsequently required a breaking release without
+compatibility code. **The release now uses canonical JSON by default, with equivalent Markdown
+optional and no legacy mode.** This is a maintenance/adoption decision, not a new model result.
 No model was downloaded or fine-tuned. Codex CLI 0.160.0 invoked `gpt-6-astra` remotely.
 
 The replay measured candidate `2266194` (the later legacy-only compatibility fix does not alter
 canonical output). Subsequent review fixes add declaration-line isolation for consumer identities
 and rename the unqualified entity field to `symbol_name`. The token numbers below describe the
-measured candidate, not a new model run of those review fixes; the default decision stays gated.
+measured candidate, not a new model run of those review fixes; these numbers are historical candidate measurements.
 
 ## Recorded measurements
 
@@ -47,14 +49,18 @@ tokenizer versions are not exposed by this CLI.
 - 42 live MCP cases have identical semantic leaves in Markdown and JSON, with one content channel,
   source parity, valid fixture file/range locators and whole-result budget checks.
 - All 44 suggested continuations executed successfully against the same fixture snapshot.
+- After removing compatibility, both formats were recaptured with the unified execution policy:
+  all 42 cases and 44 continuations still pass at 65,536 bytes. This run also caught and fixed a
+  generated-client label incorrectly exposed as a file path; only file-artifact identities or
+  evidence now supply artifact paths.
 - Rust regressions cover identifier fidelity, bilateral event evidence, exact symbol/callsite
   handoffs, repository isolation, empty versus unavailable FTS, adversarial strings and budgets.
-- Local workspace validation: 1,096 tests passed, 7 ignored; nightly formatting/clippy, rustdoc with
-  warnings denied, MSRV 1.96.0, cargo audit and cargo deny passed.
+- Local workspace validation after compatibility removal: 1,069 tests passed, 7 ignored; nightly
+  formatting/clippy, rustdoc with warnings denied and MSRV 1.96.0 passed. The smaller test count
+  reflects deletion of the retired renderer tests. Cargo audit and cargo deny passed during release validation.
 
 The replay batches can share context between cases and do not execute model-selected 2–4-hop
 investigations. Blind human review, actual Themis adapter traces, end-to-end task-success and
-host-specific token/latency evidence remain gates for changing the default. Ranking, adaptive
+host-specific token/latency evidence remain pending before claiming semantic noninferiority or general efficiency. Ranking, adaptive
 source trimming and navigation-ID heuristics are deferred. Oversized canonical responses fail
-explicitly with recovery guidance instead of silently discarding evidence. This release delivers
-the fidelity fixes and experimental canonical contract without claiming those adoption gates passed.
+explicitly with recovery guidance instead of silently discarding evidence. The release adopts the single canonical contract by maintainer decision without claiming those quality gates passed.

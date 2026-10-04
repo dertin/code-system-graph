@@ -30,9 +30,9 @@ timeouts, internal errors, and cancellation.
 
 The read-only catalog covers status, query, trace, impact, changes, contracts, communities,
 source-context handoff, and explicitly consented pull-request inspection. Inputs have generated
-JSON input schemas and non-overridable server bounds. Each call result contains one human-oriented
-Markdown text block plus typed `structuredContent` in compatibility mode (the legacy text is a summary, not a complete mirror); no
-result `outputSchema` is advertised.
+JSON input schemas and non-overridable server bounds. Each call result contains one canonical schema 6 JSON text block by default, or equivalent
+Markdown with `--response-format markdown`. There is no `structuredContent` duplicate or schema 5
+compatibility mode. No result `outputSchema` is advertised.
 
 Stable resources:
 
@@ -95,6 +95,6 @@ alias and exact staged state; advisory mode fails open.
 - HTTP does not expose administrative, pull-request, or source-context routes.
 - Hook guidance cannot guarantee that a host follows the suggested provider routing.
 
-MCP 1.2.1 also offers opt-in canonical schema 6 via `--response-format markdown|json`. Both
-formats represent one selected response, including Explore source and exact actions. See
-[MCP delivery](MCP.md#canonical-response-preview-121) for compatibility and whole-response budgets.
+MCP 1.2.1 deliberately breaks the previous agent delivery contract. JSON and Markdown share one
+canonical selection, including Explore source. `executionPolicy.maxMcpToolResponseBytes` bounds
+the full serialized tool result. Clients must migrate to schema 6; see [MCP](MCP.md).

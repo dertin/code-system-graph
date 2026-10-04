@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use code_system_graph_core::{EventDeliveryProjection, project_event_deliveries_bounded};
 use code_system_graph_model::{
-    Edge, EdgeId, EdgeKind, EpistemicStatus, Evidence, EvidenceId, Node, NodeId, NodeKind, RepoFreshness, RepoId
+    Edge, EdgeKind, EpistemicStatus, Evidence, EvidenceId, Node, NodeId, NodeKind, RepoFreshness, RepoId
 };
 use code_system_graph_store_sqlite::SqliteStore;
 
@@ -23,7 +23,6 @@ pub(crate) struct AgentPresentationContext {
     pub(super) aliases: BTreeMap<RepoId, String>,
     pub(super) nodes: BTreeMap<NodeId, Node>,
     pub(super) edges: Vec<Edge>,
-    pub(super) edge_by_id: BTreeMap<EdgeId, usize>,
     pub(super) evidence: BTreeMap<EvidenceId, Evidence>,
     pub(super) ownership: BTreeMap<NodeId, RepositoryOwnership>,
     pub(super) incident_semantic_edges: BTreeMap<NodeId, Vec<usize>>,
@@ -194,11 +193,6 @@ impl AgentPresentationContext {
             evidence_ids.dedup();
             evidence_ids.truncate(STRUCTURAL_OWNER_EVIDENCE_LIMIT);
         }
-        let edge_by_id = edges
-            .iter()
-            .enumerate()
-            .map(|(index, edge)| (edge.id.clone(), index))
-            .collect();
         let unique_owners = ownership
             .iter()
             .filter_map(|(node_id, ownership)| {
@@ -257,7 +251,6 @@ impl AgentPresentationContext {
             aliases,
             nodes,
             edges,
-            edge_by_id,
             evidence: evidence
                 .into_iter()
                 .map(|item| (item.id.clone(), item))
@@ -278,20 +271,6 @@ impl AgentPresentationContext {
 
     pub(super) fn gap(&self) -> Option<&str> {
         self.gap.as_deref()
-    }
-
-    pub(super) fn scoped_gap(&self, include_events: bool) -> Option<String> {
-        match (
-            self.gap(),
-            include_events
-                .then_some(self.event_gap.as_deref())
-                .flatten(),
-        ) {
-            (Some(global), Some(event)) => Some(format!("{global} {event}")),
-            (Some(global), None) => Some(global.to_owned()),
-            (None, Some(event)) => Some(event.to_owned()),
-            (None, None) => None,
-        }
     }
 
     pub(super) fn entity(&self, node: &Node) -> AgentEntityView {
@@ -365,13 +344,6 @@ impl AgentPresentationContext {
         let source = self.nodes.get(&edge.source)?;
         let target = self.nodes.get(&edge.target)?;
         Some(self.relation_for_parts(edge, source, target, focus))
-    }
-
-    pub(super) fn relation_for_edge_id(&self, edge_id: &str) -> Option<AgentRelationView> {
-        self.edge_by_id
-            .get(&EdgeId::new(edge_id))
-            .and_then(|index| self.edges.get(*index))
-            .and_then(|edge| self.relation_for_edge(edge, None))
     }
 
     pub(super) fn relation_for_parts(

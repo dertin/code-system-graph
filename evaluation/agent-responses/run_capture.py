@@ -34,7 +34,16 @@ for alias, directory in [('web','web'),('api','api'),('tests','tests-python'),('
         (WORK/f'init-{alias}.log').write_text(result)
         print(f'Indexed {alias}: {time.monotonic()-start:.1f}s', flush=True)
 
-MANIFEST = FIXTURE/'code-system-graph.yaml'
+MANIFEST = WORK/'capture.yaml'
+manifest_text = (FIXTURE/'code-system-graph.yaml').read_text()
+import re
+manifest_text = re.sub(r'(?m)^(\s+path:) (.+)$', lambda match: match[1]+' '+str(FIXTURE/match[2]), manifest_text)
+budget = int(os.environ.get('CSGRAPH_EVAL_BUDGET', '65536'))
+policy = {'maxMcpToolResponseBytes': budget,
+          'maxExploreSourceMarkdownBytes': min(262144, budget),
+          'maxExploreEnrichmentBytes': min(65536, budget)}
+manifest_text += '\nexecutionPolicy:\n' + ''.join(f'  {key}: {value}\n' for key, value in policy.items())
+MANIFEST.write_text(manifest_text)
 DB = WORK/'graph.db'
 scan = json.loads((WORK/'scan.json').read_text()) if os.environ.get('CSGRAPH_EVAL_REUSE') == '1' else json.loads(run([BIN,'scan','--force','--config',MANIFEST,'--database',DB]))
 (WORK/'scan.json').write_text(json.dumps(scan,indent=2))
@@ -42,7 +51,7 @@ graph = json.loads(run([BIN,'export','--database',DB,'--workspace','commerce-pla
 (WORK/'graph.json').write_text(json.dumps(graph,indent=2))
 print('Scanned. Export keys:', list(graph), flush=True)
 err = (WORK/'mcp.stderr').open('w')
-process = subprocess.Popen([str(BIN),'mcp','--response-format',os.environ.get('CSGRAPH_EVAL_FORMAT','legacy'),'--response-budget-bytes',os.environ.get('CSGRAPH_EVAL_BUDGET','65536'),'--config',str(MANIFEST),'--database',str(DB),'--workspace','commerce-platform','--codegraph','--codegraph-binary',shutil.which('codegraph')], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=err, text=True, bufsize=1)
+process = subprocess.Popen([str(BIN),'mcp','--response-format',os.environ.get('CSGRAPH_EVAL_FORMAT','json'),'--config',str(MANIFEST),'--database',str(DB),'--workspace','commerce-platform','--codegraph','--codegraph-binary',shutil.which('codegraph')], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=err, text=True, bufsize=1)
 seq = 0
 
 def request(method, params):
@@ -132,7 +141,7 @@ try:
             continuations.append({'case':case['id'], 'action':action, 'result':result})
     (OUT/'continuations.json').write_text(json.dumps(continuations, ensure_ascii=False, indent=2))
     sources={str(p.relative_to(FIXTURE)):p.read_text() for p in [FIXTURE/'web/src/checkout.ts',FIXTURE/'api/src/lib.rs',FIXTURE/'tests-python/tests/test_orders.py',FIXTURE/'worker-python/worker.py']}
-    capture={'captured_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'binary':run([BIN,'--version']).strip(),'codegraph':run(['codegraph','--version']).strip(),'source_commit':run(['git','rev-parse','HEAD'],cwd=ROOT).strip(),'origin':'Local build of current source; synthetic platform-demo repositories; real MCP calls, no fake CodeGraph provider.','initialize':initialized,'repo_revisions':revisions,'sources':sources,'cases':cases}
+    capture={'captured_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'binary':run([BIN,'--version']).strip(),'codegraph':run(['codegraph','--version']).strip(),'source_commit':run(['git','rev-parse','HEAD'],cwd=ROOT).strip(),'origin':'Local build of current source; synthetic platform-demo repositories; real MCP calls, no fake CodeGraph provider.','execution_policy':policy,'initialize':initialized,'repo_revisions':revisions,'sources':sources,'cases':cases}
     (OUT/'responses.json').write_text(json.dumps(capture,ensure_ascii=False,indent=2))
     (OUT/'responses.partial.json').unlink(missing_ok=True)
 finally:

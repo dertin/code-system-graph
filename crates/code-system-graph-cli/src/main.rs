@@ -503,12 +503,9 @@ enum Command {
     },
     /// Run the read-only MCP server over stdio.
     Mcp {
-        /// Delivery contract; canonical formats remain opt-in pending LLM evaluation.
-        #[arg(long, value_enum, default_value = "legacy")]
+        /// Canonical response representation; each result uses one content channel.
+        #[arg(long, value_enum, default_value = "json")]
         response_format: ResponseFormat,
-        /// Complete canonical `CallToolResult` byte budget (minimum 512).
-        #[arg(long, default_value_t = 65_536, value_parser = clap::value_parser!(u32).range(512..))]
-        response_budget_bytes: u32,
         /// Trusted global workspace manifest; required in direct mode.
         #[arg(long, required_unless_present = "binding", conflicts_with = "binding")]
         config: Option<PathBuf>,
@@ -1975,7 +1972,6 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
         }
         Command::Mcp {
             response_format,
-            response_budget_bytes,
             config,
             database,
             workspace,
@@ -2012,7 +2008,7 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                 codegraph_server_policy(codegraph, codegraph_binary);
             let execution_policy = load_server_execution_policy(&config, &workspace)?;
             let service = CodeSystemGraphServer::new(database, workspace)
-                .with_response_format(response_format, response_budget_bytes as usize)
+                .with_response_format(response_format)
                 .with_execution_policy(execution_policy)
                 .with_pull_request_providers(
                     enable_github_pull_requests,

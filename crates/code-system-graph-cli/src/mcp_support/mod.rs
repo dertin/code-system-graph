@@ -23,8 +23,6 @@ mod agent_context;
 mod agent_views;
 pub(super) mod canonical;
 mod presentation;
-#[cfg(test)]
-mod presentation_goldens;
 mod resources;
 mod vocabulary;
 mod workspace_policy;

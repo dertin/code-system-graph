@@ -1,36 +1,33 @@
 # MCP Surface
 
-Code System Graph exposes a small read-only-by-default stdio MCP surface and advertises the server
-name `code_system_graph` during initialization. The compatibility mode returns one `text` content block
-containing bounded Markdown plus typed `structuredContent` using agent delivery schema version 5.
-Persisted graph tools exclude source bodies; `explore` is the explicit
-source-bearing, ephemeral exception. Mutating tools are absent from discovery unless the server
-starts with the explicit administrative profile.
+Code System Graph exposes a read-only-by-default stdio MCP surface and advertises the server
+name `code_system_graph`. Each tool returns exactly one text content block containing canonical
+schema 6 JSON by default. `--response-format markdown` selects the equivalent Markdown rendering.
+Neither format sends duplicate `structuredContent`. Persisted graph tools exclude source bodies;
+`explore` is the explicit source-bearing, ephemeral exception. Administrative tools require the
+explicit administrative profile.
 
-Initialization instructions describe this dual-channel delivery explicitly. Schema version 2
-remains the persisted tool/resource contract; agent delivery schema version 5 adds semantic views,
-repository attribution, and explicit derivation metadata. Fenced JSON appears only inside the
-schema catalog. Final tool, resource, and schema-catalog Markdown budgets must each be at least
-256 bytes.
+## Canonical responses: breaking change in 1.2.1
 
-## Canonical response preview (1.2.1)
+This release deliberately replaces the schema 5 MCP delivery contract without a compatibility
+mode. `--response-format legacy` is rejected. Clients must parse the JSON text block or explicitly
+select Markdown, then resolve catalog references; they must not read the removed `structuredContent`
+channel. The persisted graph and CLI JSON schema remain version 2 because this change concerns MCP delivery.
+Resources retain their documented Markdown contracts.
 
-`csgraph mcp --response-format markdown` selects a single Markdown response.
-`--response-format json` selects equivalent JSON text, without a duplicate `structuredContent`
-channel. Both use agent schema 6; `--response-format legacy` retains schema 5 and is the
-1.2.1 default while the [evaluation adoption gates](../evaluation/agent-responses/README.md)
-remain open. This does not change the persisted graph schema or the CLI JSON API.
+JSON is the default based on the [candidate evaluation](../evaluation/agent-responses/RESULTS.md).
+The measurements do not certify semantic task success in every host, and TOON has not been adopted.
+Markdown remains an alternative representation of the same selection, without a separate data path.
 
 Schema 6 contains `snapshot`, `result`, `entities`, `relations`, `limits`, and `omitted_defaults`.
-`result` is a projection of the existing typed reports; its nested schema version identifies
-that original view. Entity references resolve by exact `node_id`, relation references by
+`result` is a projection of the existing typed reports; its nested agent envelope also uses schema 6. Entity references resolve by exact `node_id`, relation references by
 exact `edge_id`. Relation direction belongs to each reference; intrinsic endpoint/evidence
 facts live in the catalog. Different views sharing an ID are retained inline when their
 facts differ; normalization never discards a conflicting view. Null means unavailable and empty collections mean no retained items. `omitted_defaults`
 explicitly supplies omitted empty warning/candidate/alternate-ID lists and zero/false candidate
 counts/truncation. Other uncertainty and coverage flags remain explicit. Ranking scores,
 internal stable keys/evidence IDs/provider-local IDs, inverse wording, and provider execution
-counters are diagnostics retained in legacy/CLI reports rather than the canonical selection. `missing_endpoint_evidence` names endpoints lacking selected evidence;
+counters are diagnostics retained in CLI reports rather than the canonical selection. `missing_endpoint_evidence` names endpoints lacking selected evidence;
 an empty list does not certify complete observation of runtime behavior.
 
 Both final formatters receive the same canonical value and perform no graph/provider calls,
@@ -38,18 +35,14 @@ ranking, or evidence selection. Source Markdown is a canonical field, including 
 and is fenced as untrusted content in Markdown. Exact actions retain tool names and arguments.
 `confirmed` confirms only graph linkage, not a bug or guaranteed runtime delivery.
 
-`--response-budget-bytes` (default 65536, minimum 512) is a new limit for the complete serialized
-`CallToolResult`. Selection must fit **both** format representations before a format is chosen,
-so format does not change the selected facts. If it cannot fit, delivery returns an explicit
-error with recovery instructions and no partial facts. JSON stays parseable. This initial
-conservative policy preserves complete selected records instead of silently shortening pages,
-evidence or source; reduce the query limit/source budget or raise the delivery budget to retry.
-The JSON-RPC envelope added by the transport and host context/token limits are separate.
-`maxMcpToolResponseBytes` retains its existing legacy Markdown-only meaning.
+The workspace `executionPolicy.maxMcpToolResponseBytes` now bounds the **complete serialized
+`CallToolResult`**, including its text envelope (default 524288 bytes, minimum 256). It replaces the
+old Markdown-only budget; there is no separate `--response-budget-bytes` setting. Both format
+representations must fit before a format is chosen, so formatting cannot change selected facts.
+Oversized results return an explicit error with recovery guidance and no partial facts. Reduce
+query/source limits or raise the policy budget to retry. JSON-RPC transport and host token/context
+limits remain separate. `explore.source_markdown` is present in both representations.
 
-Legacy output also preserves identifiers, includes exact continuation arguments and evidence
-roles/provenance and prefers bilateral evidence. Legacy Explore keeps its previous JSON
-shape without source; canonical schema 6 includes `source_markdown` in both formats.
 A successful empty FTS result is distinct from missing/failed FTS. Query coverage notes about
 searching graph entities rather than source bodies do not alone mark a successful query degraded.
 Consumer identities include their declaration line, so same-named methods in different scopes
@@ -78,9 +71,7 @@ receive a bounded projection of semantic relationships from components uniquely 
 repository by confirmed `contains` edges. Shared tables and internal packages are attributed only
 when one repository owns the declaration; competing owners remain explicitly ambiguous. Event
 summaries are derived only from an exact persisted `publisher -> channel <- subscriber` identity
-and retain evidence from both endpoints. When a repository-level event sentence is available, its
-low-level publisher, subscriber, and delivery observations stay in `structuredContent` but are
-collapsed out of the Markdown. Evidence records distinguish `observed_relation` from
+and retain evidence from both endpoints. Publisher, subscriber and delivery facts are selected once and shared by both renderers. Evidence records distinguish `observed_relation` from
 `structural_attribution`, so a table or package owner statement remains auditable without
 displacing the call, query, or dependency evidence that created the semantic edge.
 
@@ -97,15 +88,10 @@ responses explain that Query searches persisted entities rather than code bodies
 `explore` when the question names a registered alias. Inputs support
 bounded pagination and graph-entity filters. Each hit includes a stable `NodeId`; clients select
 the intended hit and pass that identifier to `trace`. The server does not silently choose
-between close or ambiguous candidates. Agent Markdown starts with deduplicated cross-repository
-relationships and omits structural subordinate matches when their semantically connected parent is
-already present. One persisted relation is rendered once per response even when both endpoint
-entities matched the query. Cross-repository HTTP previews retain bounded evidence for both the
-consumer and provider; database and internal-package previews also retain the confirmed
-declaration evidence used for structural repository attribution. Stable keys, node and edge IDs,
-scores and full pagination remain in legacy `structuredContent`; evidence roles and exact
-continuation arguments also appear in legacy Markdown. Canonical output retains the same selected
-facts in both formats.
+between close or ambiguous candidates. The canonical projection includes deduplicated cross-repository relationships, exact IDs and
+pagination. HTTP previews retain bounded evidence for both consumer and provider; database and
+package previews retain confirmed declaration evidence for structural repository attribution.
+Evidence roles, uncertainty and exact continuation arguments are available in both formats.
 
 ## `explore`
 
@@ -117,10 +103,8 @@ freshness, source Markdown, resolved symbols, callers/callees, persisted federat
 coverage gaps, deterministic next actions, effective limits, provider operation counts,
 concurrency, retained bytes, and degradations. `source_markdown` may contain source and exists only
 in the response. Code System Graph never persists, caches, logs, or audits it, although the MCP
-host may retain requests and responses in its own history. Agent-facing Markdown keeps one trusted
-H1 result title and trusted H2 semantic sections. Because repository content is untrusted, Explore
-places the retained CodeGraph Markdown inside a dynamically sized text fence: its source, fences,
-and headings remain visible as context but cannot become response headings or instructions. Set
+host may retain requests and responses in its own history. The canonical field preserves source in JSON and places multiline source in a dynamically sized
+code fence in Markdown. Repository source and labels are data, not agent instructions. Set
 `CODE_SYSTEM_GRAPH_CODEGRAPH_BINARY` on the trusted server process to select a non-default executable.
 
 ## `communities`
@@ -170,7 +154,7 @@ responses are discarded.
 - Remote providers are disabled by default, HTTPS-only, allowlisted, bounded, and redirect-free.
 - Bitbucket Data Center is not implemented.
 - Tool errors retain status, freshness, warnings, coverage, verifiable locations, truncations, and
-  next actions in Markdown and do not write protocol noise to stdout.
+  next actions in the selected representation and do not write protocol noise to stdout.
 - Resources are constrained to the configured workspace and expose source-free metadata only.
 
 ## Resources and schemas

@@ -47,8 +47,8 @@ fixture evidence; `proves_bug=false` alone is not a task-success score.
 This replay does not trace Themis's actual adapter or measure real 2–4-hop task completion.
 Its token usage is an observation for this Codex invocation, not a tokenizer estimate or a
 promise of savings in another host. Human blind review, paired task-success confidence intervals and
-Themis integration remain adoption gates. No ranking/filter/source-trimming heuristic is
-adopted from the pilot alone. The legacy default remains until those gates are satisfied.
+Themis integration remain pending quality validations. No ranking/filter/source-trimming heuristic is
+adopted from the pilot alone. The maintainer subsequently chose a breaking schema 6 release without legacy support. JSON is the default; those remaining gates still constrain claims about cross-host quality.
 
 `score_replay.py` checks reported aliases/locators, exact suggested tool arguments, required
 participants in the HTTP/event/handoff probes, and unsupported bug claims. These are narrow,
@@ -56,3 +56,8 @@ deterministic answer checks, not a full semantic task-success judgement. `summar
 records batch usage/latency and bootstraps **case-level** mean check-rate differences for B/C;
 repetitions are not independent tasks. CLI model aliases do not pin a provider model snapshot;
 temperature/tokenizer versions are not exposed by this replay. See `RESULTS.md` for the decision.
+
+The current capture runner configures the unified `maxMcpToolResponseBytes` policy (65536 bytes
+for this corpus), clamps source/enrichment sub-budgets to that limit, records the effective policy,
+and accepts JSON/Markdown only. Historical model runs predate removal of legacy;
+they remain measurements of the recorded candidate, not freshly measured release metrics.
