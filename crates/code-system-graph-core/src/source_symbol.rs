@@ -12,6 +12,7 @@ pub struct SourceSymbolIdentity {
     language: Option<String>,
     source_path: String,
     symbol: String,
+    declaration_line: Option<u32>,
 }
 
 impl SourceSymbolIdentity {
@@ -28,7 +29,21 @@ impl SourceSymbolIdentity {
             language: Some(language.into().trim().to_ascii_lowercase()),
             source_path: source_path.into(),
             symbol: symbol.into(),
+            declaration_line: None,
         }
+    }
+
+    /// Adds a declaration-line discriminator within a repository revision.
+    #[must_use]
+    pub const fn at_declaration(mut self, line: u32) -> Self {
+        self.declaration_line = Some(line);
+        self
+    }
+
+    /// Declaration line for scoped source identities; absent when the identity has no location.
+    #[must_use]
+    pub const fn declaration_line(&self) -> Option<u32> {
+        self.declaration_line
     }
 
     /// Creates a data-only source symbol when no language-specific node exists.
@@ -43,6 +58,7 @@ impl SourceSymbolIdentity {
             language: None,
             source_path: source_path.into(),
             symbol: symbol.into(),
+            declaration_line: None,
         }
     }
 
@@ -53,6 +69,13 @@ impl SourceSymbolIdentity {
             return None;
         }
         let repository = node.repo_id.clone()?;
+        let scoped_prefix = format!("scoped-symbol:{}:", repository.as_str());
+        if let Some(remainder) = node.stable_key.strip_prefix(&scoped_prefix) {
+            let (line, rest) = remainder.split_once(':')?;
+            let mut legacy = node.clone();
+            legacy.stable_key = format!("symbol:{}:{rest}", repository.as_str());
+            return Some(Self::from_node(&legacy)?.at_declaration(line.parse().ok()?));
+        }
         let source_prefix = format!("symbol:{}:", repository.as_str());
         if let Some(remainder) = node.stable_key.strip_prefix(&source_prefix) {
             let (language, source_identity) = remainder.split_once(':')?;
@@ -104,7 +127,8 @@ impl SourceSymbolIdentity {
         &self.symbol
     }
 
-    /// Stable comparison key that deliberately ignores the optional language dimension.
+    /// Unqualified comparison key; ignores language and declaration line.
+    /// This is not sufficient to establish identity between scoped symbols.
     #[must_use]
     pub fn location_key(&self) -> (&RepoId, &str, &str) {
         (&self.repository, &self.source_path, &self.symbol)
@@ -113,6 +137,15 @@ impl SourceSymbolIdentity {
     /// Canonical persisted key.
     #[must_use]
     pub fn stable_key(&self) -> String {
+        if let (Some(line), Some(language)) = (self.declaration_line, &self.language) {
+            return format!(
+                "scoped-symbol:{}:{line}:{}:{}:{}",
+                self.repository.as_str(),
+                encode_component(language),
+                encode_component(&self.source_path),
+                encode_component(&self.symbol)
+            );
+        }
         self.language.as_ref().map_or_else(
             || {
                 format!(
@@ -181,6 +214,23 @@ mod tests {
     use code_system_graph_model::{NodeKind, RepoId};
 
     use super::SourceSymbolIdentity;
+
+    #[test]
+    fn scoped_identities_round_trip_and_separate_homonyms() {
+        let first = SourceSymbolIdentity::new(RepoId::new("repo"), "rust", "src/lib.rs", "get")
+            .at_declaration(2);
+        let second = SourceSymbolIdentity::new(RepoId::new("repo"), "rust", "src/lib.rs", "get")
+            .at_declaration(8);
+        assert_ne!(first.node_id(), second.node_id());
+        assert_eq!(
+            SourceSymbolIdentity::from_node(&first.node("get")),
+            Some(first)
+        );
+        assert_eq!(
+            SourceSymbolIdentity::from_node(&second.node("get")),
+            Some(second)
+        );
+    }
 
     #[test]
     fn every_supported_language_round_trips_without_using_the_label() {

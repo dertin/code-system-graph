@@ -659,6 +659,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rust_macro_bodies_should_not_fail_structural_validation() {
+        let extractor = FocusedSourceExtractor::new(FocusedSourceLanguage::Rust);
+        let file = file("src/macros.rs");
+        let sources: &[&[u8]] = &[
+            b"macro_rules! delegate { () => { fn run(path: &str) { worker::execute(path); } }; }",
+            b"generate! { fn run(path: &str) { worker::execute(path); } }",
+        ];
+        for source in sources {
+            let batch = extractor
+                .extract(&ExtractInput {
+                    file: &file,
+                    content: source,
+                })
+                .await
+                .expect("valid macro body should pass structural validation");
+            assert!(batch.output_count > 0);
+        }
+    }
+
+    #[tokio::test]
     async fn source_extractor_should_preflight_work_and_values() {
         let file = file("src/routes.rs");
         let source =

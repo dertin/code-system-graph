@@ -18,7 +18,10 @@ schemas derive from the Rust request and report types.
 
 MCP stdio is read-only by default. Administrative tools are absent from capability discovery
 unless the process starts with an explicit administrative profile. Administrative calls retain
-normal writer locks, previews, audit records, and server-side bounds.
+normal writer locks, previews, audit records, and server-side bounds. Tool delivery uses one
+schema-6 text block, with JSON by default and equivalent Markdown available by configuration.
+Entity and relation catalogs retain exact navigation IDs; the complete tool result is bounded
+by the workspace policy.
 
 HTTP is optional and binds to loopback by default. A non-loopback bind requires a configured
 bearer token, constant-time token verification, request/concurrency/rate limits, timeouts, and

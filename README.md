@@ -9,7 +9,7 @@ Map APIs, events, schemas, packages, databases, and ownership across repositorie
 breaks another service.
 
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-![Source version](https://img.shields.io/badge/source-v1.2.0-orange.svg)
+![Source version](https://img.shields.io/badge/source-v1.2.1-orange.svg)
 [![crates.io](https://img.shields.io/crates/v/code-system-graph.svg)](https://crates.io/crates/code-system-graph)
 ![Platforms](https://img.shields.io/badge/validated-Linux%20%7C%20macOS%20%7C%20Windows-1793d1.svg)
 ![Privacy](https://img.shields.io/badge/privacy-local%20%7C%20no%20telemetry-2ea44f.svg)
@@ -280,8 +280,10 @@ codex mcp add code-system-graph -- \
   --database /absolute/path/to/my-project/.code-system-graph/code-system-graph.db
 ```
 
-MCP tools return one bounded Markdown text block and resources use `text/markdown`. HTTP and CLI
-retain typed schema-v2 JSON. Explore is the only source-bearing response and combines ephemeral
+MCP tools return one bounded schema-6 JSON text block by default; `--response-format markdown`
+selects Markdown with the same facts. Clients read `content[0].text` and resolve the entity and
+relation catalogs described in [MCP surface](docs/MCP.md). Resources use `text/markdown`; HTTP and
+CLI use typed schema-v2 JSON. Explore is the only source-bearing response and combines ephemeral
 source, symbols, callers/callees, federated evidence handoffs, coverage, and grounded next actions.
 Final MCP tool, resource, and schema-catalog budgets must each be at least 256 bytes so status and
 truncation controls remain representable.
@@ -334,7 +336,7 @@ plugin root. Re-run with `--replace-generated` after local paths change; only a 
 Code System Graph's recognized ownership identity can be replaced. Until local binding creation
 runs, that MCP entry fails visibly while independent plugin skills and servers remain usable.
 
-The generated MCP is read-only and requires `csgraph 1.2.0` in `PATH`; it does not bundle binaries.
+The generated MCP is read-only and requires `csgraph 1.2.1` in `PATH`; it does not bundle binaries.
 Its plugin, server, and skill share a stable name derived from the declared workspace name, so
 clones produce the same versioned files. Install it project-locally for workspace-only activation;
 the generated skill also requires the nearest manifest and MCP `status` to report that workspace.

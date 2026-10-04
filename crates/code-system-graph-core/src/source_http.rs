@@ -322,6 +322,9 @@ pub struct SourceObservation {
     pub path: Option<String>,
     /// Enclosing implementation symbol or test name when known.
     pub symbol_name: Option<String>,
+    /// Declaration line of the innermost containing function, when precisely known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symbol_start_line: Option<u32>,
     /// Related model symbol for declarations such as Factory Boy `Meta.model`.
     pub related_symbol: Option<String>,
     /// Repository-relative module path that declares `related_symbol`, when statically imported.
@@ -388,6 +391,32 @@ impl<'a> SourceObservationCollector<'a> {
             return;
         }
         self.observations.push(observation);
+    }
+
+    fn locate_symbols(&mut self, tokens: &[Token], functions: &[FunctionSpan]) {
+        for observation in &mut self.observations {
+            let containing = functions
+                .iter()
+                .filter(|function| {
+                    tokens[function.start_token].line <= observation.lines.start
+                        && tokens[function.end_token].line >= observation.lines.end
+                })
+                .min_by_key(|function| function.end_token - function.start_token);
+            observation.symbol_start_line = containing
+                .filter(|function| {
+                    observation.symbol_name.as_deref() == Some(function.name.as_str())
+                        && functions
+                            .iter()
+                            .filter(|other| {
+                                other.name == function.name
+                                    && tokens[other.start_token].line
+                                        == tokens[function.start_token].line
+                            })
+                            .count()
+                            == 1
+                })
+                .map(|function| tokens[function.start_token].line);
+        }
     }
 
     pub(crate) fn into_result(self) -> Result<Vec<SourceObservation>, ExtractionLimitExceeded> {
@@ -491,6 +520,7 @@ fn collect_rust_source<'a>(
     };
     let declares_tests = observations.has_role(SourceRole::Test) || has_ident(&tokens, "test");
     scopes.record_calls(&clients, declares_tests, &mut observations);
+    observations.locate_symbols(&tokens, &functions);
     observations
 }
 
@@ -561,6 +591,7 @@ fn collect_python_source<'a>(
         &mut observations,
     );
     record_fixture_requests(&scopes, &mut observations);
+    observations.locate_symbols(&tokens, &functions);
     observations
 }
 
@@ -1658,6 +1689,7 @@ pub(crate) fn call_observation(
         method: None,
         path: None,
         symbol_name: Some(function),
+        symbol_start_line: None,
         related_symbol: None,
         related_path: None,
         authority: None,
@@ -1708,6 +1740,7 @@ fn confirmed_test(
         method: None,
         path: None,
         symbol_name: Some(name),
+        symbol_start_line: None,
         related_symbol: None,
         related_path: None,
         authority: None,
@@ -1762,6 +1795,7 @@ fn http_from_literal(
         method,
         path,
         symbol_name,
+        symbol_start_line: None,
         related_symbol: None,
         related_path: None,
         authority,
@@ -1807,6 +1841,7 @@ fn inexact_http(
         method,
         path,
         symbol_name,
+        symbol_start_line: None,
         related_symbol: None,
         related_path: None,
         authority: None,
@@ -2917,6 +2952,7 @@ fn parse_python_factories(
             method: None,
             path: None,
             symbol_name: Some(factory_name.to_owned()),
+            symbol_start_line: None,
             related_symbol: Some(model_name.to_owned()),
             related_path: imported_paths.get(model_name).cloned(),
             authority: None,

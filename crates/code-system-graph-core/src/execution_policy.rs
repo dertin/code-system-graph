@@ -55,7 +55,7 @@ pub const DEFAULT_MAX_MCP_TOOL_RESPONSE_BYTES: u64 = 524_288;
 pub const DEFAULT_MAX_MCP_RESOURCE_ITEMS: u64 = 100;
 pub const DEFAULT_MAX_MCP_RESOURCE_BYTES: u64 = 262_144;
 pub const DEFAULT_MAX_MCP_SCHEMA_CATALOG_BYTES: u64 = 2_097_152;
-/// Smallest Markdown response budget that can retain the mandatory MCP control block.
+/// Smallest MCP response budget that can retain a tool error or resource control block.
 pub const MIN_MCP_MARKDOWN_BYTES: u64 = 256;
 
 // Keep the agent-facing policy inventory in one declarative list. Defaults, override resolution,
@@ -642,7 +642,7 @@ pub enum InvalidExecutionPolicy {
         /// Rejected numeric value.
         value: u64,
     },
-    /// An MCP Markdown budget cannot retain its mandatory control block.
+    /// An MCP response budget cannot retain its mandatory error or control block.
     #[error("execution policy `{field}` must be at least {minimum}; received {value}")]
     BelowMinimum {
         /// Manifest field containing the undersized budget.

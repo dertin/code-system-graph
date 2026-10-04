@@ -157,7 +157,7 @@ email variable selected by `--user-env`. Overlap is local and source-free.
 ## Delivery and integration
 
 ```text
-csgraph mcp --config <manifest> --workspace <name> --database <db>
+csgraph mcp --config <manifest> --workspace <name> --database <db> [--response-format json|markdown]
 csgraph serve --workspace <name> [--host 127.0.0.1] [--port 4767]
 csgraph hooks install|status|uninstall ... [--codegraph]
 csgraph completions <shell>
@@ -172,7 +172,9 @@ override either setting.
 The hook `--codegraph` flag controls only installed routing guidance; use it exactly when the
 agent's MCP command enables CodeGraph, and reinstall after changing that policy.
 
-MCP reserves stdout for protocol traffic. HTTP is never started implicitly and non-loopback binds
-require an ephemeral bearer token. Stable failure exit codes are documented by the generated
+MCP tools return a single text content block using schema 6. JSON is the default; Markdown
+contains the same selected facts. Read `content[0].text` and resolve catalog references as
+described in [MCP surface](MCP.md). MCP reserves stdout for protocol traffic. HTTP is never started
+implicitly, and non-loopback binds require an ephemeral bearer token. Stable failure exit codes are documented by the generated
 `ExitCode` schema and cover invalid input, not found, ambiguity, conflict, partial results,
 unavailable capability, timeout, internal failure, and cancellation.

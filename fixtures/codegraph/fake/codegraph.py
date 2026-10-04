@@ -28,6 +28,8 @@ def emit(value):
 
 
 def mcp_server(mode):
+    if mode == "slow-symbol-query":
+        time.sleep(0.75)
     if mode == "slow-mcp":
         time.sleep(2)
     if mode == "invalid-mcp":
@@ -109,6 +111,8 @@ def main():
             print("x" * 10000)
         elif mode == "slow-cli":
             time.sleep(1)
+        elif mode == "slow-symbol-query":
+            time.sleep(30)
         else:
             emit(
                 [

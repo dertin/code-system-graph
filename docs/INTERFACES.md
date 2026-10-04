@@ -30,9 +30,10 @@ timeouts, internal errors, and cancellation.
 
 The read-only catalog covers status, query, trace, impact, changes, contracts, communities,
 source-context handoff, and explicitly consented pull-request inspection. Inputs have generated
-JSON input schemas and non-overridable server bounds. Each call result contains one human-oriented
-Markdown text block plus typed `structuredContent` as its complete machine-readable mirror; no
-result `outputSchema` is advertised.
+JSON input schemas and non-overridable server bounds. Each call result contains one canonical
+schema-6 JSON text block by default, or equivalent Markdown with `--response-format markdown`. Clients read `content[0].text` and resolve entity and
+relation catalog references as described in [MCP surface](MCP.md). No result `outputSchema` is
+advertised.
 
 Stable resources:
 
@@ -94,3 +95,7 @@ alias and exact staged state; advisory mode fails open.
 - Doctor reports unknown when an observation is absent; absence never becomes healthy.
 - HTTP does not expose administrative, pull-request, or source-context routes.
 - Hook guidance cannot guarantee that a host follows the suggested provider routing.
+
+JSON and Markdown share one canonical selection, including Explore source.
+`executionPolicy.maxMcpToolResponseBytes` bounds the full serialized tool result.
+See [MCP surface](MCP.md) for schema 6 fields and catalog references.

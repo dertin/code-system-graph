@@ -200,12 +200,21 @@ fn join_event_observations(
                 }
                 let (channel_label, has_namespace) =
                     channels.get(&channel_id).cloned().unwrap_or_default();
-                let mut evidence = publisher
+                let mut evidence = Vec::new();
+                for item in publisher
                     .evidence
-                    .union(&subscriber.evidence)
-                    .take(EVENT_DELIVERY_EVIDENCE_LIMIT + 1)
-                    .cloned()
-                    .collect::<Vec<_>>();
+                    .first()
+                    .into_iter()
+                    .chain(subscriber.evidence.first())
+                    .chain(publisher.evidence.union(&subscriber.evidence))
+                {
+                    if !evidence.contains(item) {
+                        evidence.push(item.clone());
+                    }
+                    if evidence.len() > EVENT_DELIVERY_EVIDENCE_LIMIT {
+                        break;
+                    }
+                }
                 let evidence_truncated = publisher.evidence_truncated
                     || subscriber.evidence_truncated
                     || evidence.len() > EVENT_DELIVERY_EVIDENCE_LIMIT;
@@ -760,7 +769,7 @@ channels:
                 kind: EdgeKind::Publishes,
                 confidence: 1.0,
                 status: EpistemicStatus::Confirmed,
-                evidence: evidence.clone(),
+                evidence,
             },
             Edge {
                 id: EdgeId::new("subscribe"),
@@ -769,7 +778,7 @@ channels:
                 kind: EdgeKind::Subscribes,
                 confidence: 1.0,
                 status: EpistemicStatus::Confirmed,
-                evidence,
+                evidence: vec![EvidenceId::new("evidence:zz-subscriber")],
             },
         ];
 
@@ -783,5 +792,15 @@ channels:
             super::EVENT_DELIVERY_EVIDENCE_LIMIT
         );
         assert!(deliveries[0].evidence_truncated);
+        assert!(
+            deliveries[0]
+                .evidence
+                .contains(&EvidenceId::new("evidence:000"))
+        );
+        assert!(
+            deliveries[0]
+                .evidence
+                .contains(&EvidenceId::new("evidence:zz-subscriber"))
+        );
     }
 }

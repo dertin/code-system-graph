@@ -27,7 +27,7 @@ pub use agent_plugin::{
 };
 use atomic_write_file::AtomicWriteFile;
 use code_system_graph_core::{
-    AffectedTestsRequest, AgentNextAction, AnalyzerVersions, AuthorityMap, BatchPlanError, BitbucketProvider, ChangeAnalysisError, ChangeAnalysisOptions, ChangeError, ChangeImpactReport, ChangeProvider, ChangeRequest, ChangeScope, ChangeSet, CodeGraphConfig, CodeGraphProvider, CommunityError, ConfigDoctorInput, ConfigError, ConfigExtractionError, ContractReport, ContractRequest, CorroborationReport, DataDocument, DataExtractionError, DeclaredImplementation, DeclaredTestCase, DoctorReport, DoctorRequest, DocumentationDocument, DocumentationExtractionError, EXTRACTION_CONTRACT_VERSION, EffectiveRepositoryConfig, EventDocument, EventExtractionError, EventGraphFacts, ExecutionPolicy, ExitCode, ExportReport, ExportRequest, ExtractionBudgets, ExtractionGraphFacts, ExtractionLimitExceeded, ExtractionTracker, ExtractorBatch, FederatedGraph, FreshnessDoctorInput, GeneratedClientError, GeneratedClientMetadata, GitCliChangeProvider, GitHubProvider, GraphqlDocument, GraphqlExtractionError, GraphqlGraphFacts, HttpBoundary, HttpExtractionError, ImpactContext, ImpactError, ImpactReport, ImpactRequest, ImpactTarget, IncrementalPlan, InfrastructureDocument, InfrastructureExtractionError, IntegrityDoctorInput, InterfaceError, LocalCodeIntelligenceProvider, LocalContextRequest, LocalEnrichmentInput, LocalEnrichmentStatus, LocalImpactItem, LocalImpactRequest, LocalNeighborDirection, LocalNeighborsRequest, ManifestEdit, ManifestEditError, ManifestError, ManualLinkConfig, ManualLinkError, PackageGraphFacts, PackageManifest, PackageManifestError, PrAuthToken, ProtobufDocument, ProtobufExtractionError, ProtobufGraphFacts, ProviderBudget, ProviderCapability, ProviderDoctorInput, ProviderDoctorStatus, ProviderRequest, ProviderStatus, PullRequestCoordinates, PullRequestError, PullRequestInspectRequest, PullRequestInspection, PullRequestListPage, PullRequestListRequest, PullRequestListState, PullRequestProvider, PullRequestProviderConfig, PullRequestProviderKind, QueryError, RecommendedCommand, RegisteredWorkspace, RegistryError, RepositorySourceFile, ReqwestPrHttpTransport, SafeConfigDocument, SchemaDoctorInput, SearchFilters, SearchReport, SearchRequest, SourceGraphFacts, SourceLanguage, SourceObservation, SourceRole, SourceSymbolIdentity, SourceSyntaxError, SourceSyntaxLanguage, SymbolAnchor, SymbolCorroboration, TraceError, TraversalReport, TraversalRequest, WorkspaceManifest, analyze_changes, analyze_communities_with_progress, analyze_impact, apply_openapi_override, classify_interface_error, commit_manifest_edit, compare_community_snapshots, compose_client_flows, compose_router_mounts, corroborate_repository, declared_implementation, declared_test_case, doctor, documents_to_graph, event_documents_to_graph, export_graph, extract_openapi_with_tracker, graphql_documents_to_graph, inspect_contracts, link_http_routes, link_registered_package_owners, load_extractor_batch_with_budgets, normalize_authority, package_manifest_to_graph, parse_manifest, parse_manifest_with_extensions, plan_incremental_scan, preview_add_manual_link, preview_add_repository, preview_remove_repository, protobuf_documents_to_graph, register_workspace, resolve_manual_links, resolve_repository_config, resolve_repository_config_with_use_gitignore, search, source_observations_to_graph, traverse
+    AffectedTestsRequest, AgentNextAction, AnalyzerVersions, AuthorityMap, BatchPlanError, BitbucketProvider, ChangeAnalysisError, ChangeAnalysisOptions, ChangeError, ChangeImpactReport, ChangeProvider, ChangeRequest, ChangeScope, ChangeSet, CodeGraphConfig, CodeGraphProvider, CommunityError, ConfigDoctorInput, ConfigError, ConfigExtractionError, ContractReport, ContractRequest, CorroborationReport, DataDocument, DataExtractionError, DeclaredImplementation, DeclaredTestCase, DoctorReport, DoctorRequest, DocumentationDocument, DocumentationExtractionError, EXTRACTION_CONTRACT_VERSION, EffectiveRepositoryConfig, EventDocument, EventExtractionError, EventGraphFacts, ExecutionPolicy, ExitCode, ExportReport, ExportRequest, ExtractionBudgets, ExtractionGraphFacts, ExtractionLimitExceeded, ExtractionTracker, ExtractorBatch, FederatedGraph, FreshnessDoctorInput, GeneratedClientError, GeneratedClientMetadata, GitCliChangeProvider, GitHubProvider, GraphqlDocument, GraphqlExtractionError, GraphqlGraphFacts, HttpBoundary, HttpExtractionError, ImpactContext, ImpactError, ImpactReport, ImpactRequest, ImpactTarget, IncrementalPlan, InfrastructureDocument, InfrastructureExtractionError, IntegrityDoctorInput, InterfaceError, LocalCodeIntelligenceProvider, LocalContextRequest, LocalEnrichmentInput, LocalEnrichmentStatus, LocalImpactItem, LocalImpactRequest, LocalNeighborDirection, LocalNeighborsRequest, ManifestEdit, ManifestEditError, ManifestError, ManualLinkConfig, ManualLinkError, PackageGraphFacts, PackageManifest, PackageManifestError, PrAuthToken, ProtobufDocument, ProtobufExtractionError, ProtobufGraphFacts, ProviderBudget, ProviderCapability, ProviderDoctorInput, ProviderDoctorStatus, ProviderRequest, ProviderStatus, PullRequestCoordinates, PullRequestError, PullRequestInspectRequest, PullRequestInspection, PullRequestListPage, PullRequestListRequest, PullRequestListState, PullRequestProvider, PullRequestProviderConfig, PullRequestProviderKind, QueryError, RecommendedCommand, RegisteredWorkspace, RegistryError, RepositorySourceFile, ReqwestPrHttpTransport, SafeConfigDocument, SchemaDoctorInput, SearchFilters, SearchReport, SearchRequest, SourceGraphFacts, SourceLanguage, SourceObservation, SourceRole, SourceSymbolIdentity, SourceSyntaxError, SourceSyntaxLanguage, SymbolAnchor, SymbolCorroboration, TraceError, TraversalReport, TraversalRequest, WorkspaceManifest, analyze_changes, analyze_communities_with_progress, analyze_impact, apply_openapi_override, classify_interface_error, commit_manifest_edit, compare_community_snapshots, compose_client_flows, compose_router_mounts, corroborate_repository, declared_implementation, declared_test_case, doctor, documents_to_graph, event_documents_to_graph, export_graph, extract_openapi_with_tracker, graphql_documents_to_graph, inspect_contracts, link_http_routes, link_registered_package_owners, load_extractor_batch_with_budgets, normalize_authority, package_manifest_to_graph, parse_manifest, parse_manifest_with_extensions, plan_incremental_scan, preview_add_manual_link, preview_add_repository, preview_remove_repository, protobuf_documents_to_graph, register_workspace, resolve_manual_links, resolve_repository_config, resolve_repository_config_with_use_gitignore, source_observations_to_graph, traverse
 };
 pub use code_system_graph_core::{
     ConfigSource, DEFAULT_EXCLUDES, IgnorePolicy, PROTECTED_EXCLUDES, discover_repository_files
@@ -56,7 +56,7 @@ pub use worker::{
 const MAX_TRACE_DEPTH: usize = 32;
 const MAX_SCAN_DEGRADATIONS: usize = 25;
 const DATA_ARTIFACT_EXTRACTOR: &str = "code-system-graph.data.artifact";
-const QUERY_DELIVERY_REVISION: u32 = 3;
+const QUERY_DELIVERY_REVISION: u32 = 4;
 const GENERATED_STATE_IGNORE_RULE: &[u8] = b".code-system-graph/";
 pub(crate) const CODEGRAPH_DISABLED_CODE: &str = "codegraph_disabled";
 pub(crate) const CODEGRAPH_DISABLED_MESSAGE: &str =
@@ -1966,6 +1966,10 @@ impl QueryActionCapabilities {
     };
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "Snapshot, coverage, continuations and cache publication stay in one consistent read"
+)]
 pub(crate) fn search_workspace_for_delivery(
     database_path: &Path,
     workspace: &str,
@@ -2021,7 +2025,11 @@ pub(crate) fn search_workspace_for_delivery(
             offset: input.offset,
             limit: input.limit,
         };
-        let mut report = search(&nodes, &request)?;
+        let mut report = code_system_graph_core::search_with_fts_state(
+            &nodes,
+            &request,
+            code_system_graph_core::FtsSearchState::Executed,
+        )?;
         let hit_ids = report
             .hits
             .iter()
@@ -2036,18 +2044,18 @@ pub(crate) fn search_workspace_for_delivery(
             policy,
             action_capabilities,
         );
+        let search_incomplete = !report.coverage.gaps.is_empty();
         if report.hits.is_empty() {
             report
                 .coverage
                 .gaps
                 .push(zero_hit_gap(action_capabilities).to_owned());
         }
-        let status =
-            if report.coverage.gaps.is_empty() && freshness.overall == OverallFreshness::Fresh {
-                ToolStatus::Ok
-            } else {
-                ToolStatus::Degraded
-            };
+        let status = if !search_incomplete && freshness.overall == OverallFreshness::Fresh {
+            ToolStatus::Ok
+        } else {
+            ToolStatus::Degraded
+        };
         let envelope = ToolEnvelope {
             schema_version: 2,
             status,
@@ -5878,7 +5886,7 @@ mod codex_review_regression_tests {
             query_cache_fingerprint_for_revision(&input, &policy, QueryActionCapabilities::NONE, 2)
                 .expect("legacy fingerprint");
 
-        assert_eq!(QUERY_DELIVERY_REVISION, 3);
+        assert_eq!(QUERY_DELIVERY_REVISION, 4);
         assert_ne!(current, legacy);
     }
 }

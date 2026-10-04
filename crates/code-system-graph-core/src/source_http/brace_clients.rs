@@ -117,6 +117,7 @@ pub(crate) fn collect_brace_clients(
             record_java_tests(&scopes, observations);
         }
     }
+    observations.locate_symbols(&tokens, scopes.functions());
 }
 
 /// Start line and name of each Java method, in declaration order.

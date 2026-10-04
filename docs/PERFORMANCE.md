@@ -47,7 +47,7 @@ file, performs an initial scan, changes one source file, and targets the changed
 cargo test -p code-system-graph --test scale_registry_e2e --release -- --ignored --nocapture
 ```
 
-After registry discovery optimization, the measured Linux x86_64 result was:
+Measured Linux x86_64 result:
 
 - initially discovered inputs: 600;
 - targeted incremental scan: 145 ms;
@@ -121,44 +121,6 @@ delta planned against the stored fingerprints instead of comparing every stored 
 
 `ExecutionSummary` reports `contentBytesRead` and `publishedRows` for every scan, so the same
 figures are available from `csgraph scan` output outside the test.
-
-### Comparison with 1.1.0
-
-Both releases scanned subsets of the same generated workload with the release `csgraph scan`
-binary under `/usr/bin/time`. The table lists wall time and the maximum resident set size of the
-process tree. Each subset keeps 250 files per repository.
-
-| Repositories | 1.1.0 cold | 1.2.0 cold | 1.1.0 unchanged | 1.2.0 unchanged | 1.1.0 peak RSS | 1.2.0 peak RSS |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 10 | 48.6 s | 0.34 s | 12.4 s | 0.18 s | 98,184 KiB | 60,560 KiB |
-| 20 | 188.7 s | 0.58 s | 40.5 s | 0.18 s | 171,212 KiB | 96,440 KiB |
-| 40 | 742.4 s | 1.24 s | 150.2 s | 0.29 s | 316,880 KiB | 165,992 KiB |
-| 200 | not run | 8.16 s | not run | 0.74 s | not run | 709,640 KiB |
-
-1.1.0 cold-scan time grows quadratically with the workload, so the 200-repository run was not
-attempted. At 40 repositories the 1.1.0 database occupies 275,894,272 bytes and the 1.2.0 database
-58,691,584 bytes. The peak resident memory of a 1.2.0 unchanged scan is 79,696 KiB at 40
-repositories and 309,396 KiB at 200.
-
-### Manual validation on a product workspace
-
-A private eight-repository product workspace (FastAPI backend with pytest suites, TypeScript web
-client, Rust services, deployment, infrastructure, and documentation) was scanned by both releases
-into a temporary database:
-
-- cold scan: 3.33 s with 1.1.0 and 0.35 s with 1.2.0; the 1.2.0 unchanged scan takes 0.24 s,
-  reads 0 content bytes, and peaks at 24,068 KiB;
-- graph: 1,664 nodes and 1,618 edges with 1.1.0, 851 nodes and 836 edges with 1.2.0, because
-  source files without facts no longer add per-file artifact nodes;
-- HTTP relations: `validates` grows from 0 to 36 and `calls_remote` from 5 to 17, while
-  `implemented_by` stays at 88;
-- link report: 88 linked calls, 10 calls without a provider, all from Rust integration tests posting
-  to a bare `hyper` service that declares no routes, and 1 external call to a third-party host;
-- database: 13,172,736 bytes with 1.1.0 and 6,381,568 bytes with 1.2.0;
-- cold-scan peak resident memory: 43,340 KiB with 1.1.0 and 53,072 KiB with 1.2.0 at the default
-  eight extraction workers, or 43,400 KiB with `maxExtractionWorkers: 1` at 0.59 s. On workspaces
-  this small the per-thread allocator arenas outweigh the per-artifact savings; capping glibc
-  arenas saved about 5 MB here while slowing the 40-repository workload, so the default stays.
 
 ## Interpretation and reproducibility
 

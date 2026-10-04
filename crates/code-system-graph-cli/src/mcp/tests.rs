@@ -20,6 +20,14 @@ fn call_text(result: &rmcp::model::CallToolResult) -> &str {
     }
 }
 
+fn tool_json(result: &rmcp::model::CallToolResult) -> serde_json::Value {
+    assert_eq!(result.content.len(), 1);
+    assert_eq!(result.structured_content, None);
+    let value: serde_json::Value = serde_json::from_str(call_text(result)).expect("canonical JSON");
+    assert_eq!(value["schema_version"], 6);
+    value
+}
+
 #[test]
 fn server_should_publish_read_only_tools() {
     let server = CodeSystemGraphServer::new(PathBuf::from("graph.db"), "commerce".to_owned())
@@ -102,7 +110,7 @@ async fn query_actions_should_match_mcp_codegraph_capability()
     };
 
     let hit = disabled.query(Parameters(input("orders"))).await;
-    assert!(hit.structured_content.as_ref().is_some_and(|content| {
+    assert!(tool_json(&hit).get("result").is_some_and(|content| {
         content["data"]["next_actions"]
             .as_array()
             .is_some_and(|actions| {
@@ -115,7 +123,7 @@ async fn query_actions_should_match_mcp_codegraph_capability()
     let missing = disabled
         .query(Parameters(input("api source_literal_that_does_not_exist")))
         .await;
-    assert!(!missing.structured_content.as_ref().is_some_and(|content| {
+    assert!(!tool_json(&missing).get("result").is_some_and(|content| {
         content["data"]["next_actions"]
             .as_array()
             .is_some_and(|actions| actions.iter().any(|action| action["tool"] == "explore"))
@@ -125,9 +133,8 @@ async fn query_actions_should_match_mcp_codegraph_capability()
         .query(Parameters(input("api source_literal_that_does_not_exist")))
         .await;
     assert!(
-        enabled_missing
-            .structured_content
-            .as_ref()
+        tool_json(&enabled_missing)
+            .get("result")
             .is_some_and(|content| {
                 content["data"]["next_actions"]
                     .as_array()
@@ -173,7 +180,7 @@ async fn presentation_context_should_be_cached_by_arc_and_fail_closed_across_sna
         },
     )?;
     let result = server
-        .contextual_markdown_result(
+        .contextual_result(
             mcp_support::AgentToolResult::Query(&envelope),
             Some("snapshot:replaced".to_owned()),
         )
@@ -184,7 +191,7 @@ async fn presentation_context_should_be_cached_by_arc_and_fail_closed_across_sna
         "{}",
         call_text(&result)
     );
-    assert!(result.structured_content.as_ref().is_some_and(|content| {
+    assert!(tool_json(&result).get("result").is_some_and(|content| {
         content["status"] == "degraded"
             && content["warnings"].as_array().is_some_and(|warnings| {
                 warnings.iter().any(|warning| {
@@ -253,9 +260,14 @@ async fn contract_list_should_render_direct_repository_aliases_without_full_cont
             operation: ContractsOperation::List { limit: 100 },
         }))
         .await;
-    let markdown = call_text(&result);
-
-    assert!(markdown.contains("repository `api`"), "{markdown}");
+    let response = tool_json(&result);
+    assert!(
+        response["entities"]
+            .as_object()
+            .expect("entities")
+            .values()
+            .any(|entity| entity["repository_alias"] == "api")
+    );
     assert_eq!(server.presentation_cache.lock().await.load_count, 0);
     Ok(())
 }
@@ -326,9 +338,9 @@ fn initialize_contract_should_align_instructions_with_advertised_tools() {
 
         assert_eq!(explore_advertised, codegraph_enabled);
         assert_eq!(instructions.contains("explore"), codegraph_enabled);
-        assert!(instructions.contains("semantic Markdown"));
-        assert!(instructions.contains("structuredContent"));
-        assert!(instructions.contains("schema version 5"));
+        assert!(instructions.contains("schema 6 JSON text"));
+        assert!(!instructions.contains("structuredContent"));
+        assert!(!instructions.contains("schema version 5"));
         assert!(!instructions.contains("versioned JSON"));
     }
 
@@ -481,7 +493,7 @@ fn schema_resource_should_catalog_every_tool_input_and_result()
     ] {
         assert!(catalog["schemas"].get(name).is_some(), "missing {name}");
     }
-    assert_eq!(catalog["schema_version"], 5);
+    assert_eq!(catalog["schema_version"], 6);
     assert!(catalog["application_interfaces"]["schemas"].is_array());
     assert!(serde_json::to_vec(&catalog)?.len() <= 2 * 1024 * 1024);
     Ok(())

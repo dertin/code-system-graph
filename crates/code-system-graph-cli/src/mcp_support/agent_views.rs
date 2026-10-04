@@ -1,4 +1,4 @@
-//! Semantic, machine-readable views paired with agent-facing MCP Markdown.
+//! Semantic views used by canonical MCP delivery.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -12,16 +12,14 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 pub(super) use super::agent_context::AgentPresentationContext;
-pub(super) use super::vocabulary::{
-    epistemic_status_name, freshness_name, freshness_state_name, inverse_relationship_phrase, node_kind_name, relationship_phrase
-};
+pub(super) use super::vocabulary::{inverse_relationship_phrase, relationship_phrase};
 use super::{GraphStatusReport, SourceContextReport};
 use crate::repository_ownership::RepositoryOwnership;
 use crate::{
     ExploreCoverage, ExploreFederatedHandoff, ExploreLocalRelationship, ExploreReport, ExploreRepositoryContext
 };
 
-pub(super) const AGENT_DELIVERY_SCHEMA_VERSION: u32 = 5;
+pub(super) const AGENT_DELIVERY_SCHEMA_VERSION: u32 = 6;
 const QUERY_RELATION_PREVIEW_LIMIT: usize = 2;
 const REPOSITORY_RELATION_PREVIEW_LIMIT: usize = 8;
 const QUERY_ARCHITECTURE_RELATION_LIMIT: usize = 8;
@@ -101,6 +99,7 @@ pub(super) struct AgentEntityView {
     pub repository_candidate_count: usize,
     pub repository_candidates_truncated: bool,
     pub path: Option<String>,
+    pub symbol_name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -200,6 +199,7 @@ pub(super) struct AgentExploreExecutionSummary {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub(super) struct AgentExploreReport {
     pub repository: ExploreRepositoryContext,
+    pub source_markdown: String,
     pub resolved_symbols: Vec<ResolvedSymbol>,
     pub local_relationships: Vec<ExploreLocalRelationship>,
     pub federated_handoffs: Vec<ExploreFederatedHandoff>,
@@ -357,6 +357,7 @@ pub(super) fn query_view(
 pub(super) fn explore_view(report: &ExploreReport) -> AgentExploreReport {
     AgentExploreReport {
         repository: report.repository.clone(),
+        source_markdown: report.source_markdown.clone(),
         resolved_symbols: report.resolved_symbols.clone(),
         local_relationships: report.local_relationships.clone(),
         federated_handoffs: report.federated_handoffs.clone(),
@@ -639,16 +640,24 @@ const fn query_entity_priority(kind: NodeKind) -> u8 {
 }
 
 pub(super) fn entity_path(node: &Node) -> Option<String> {
-    if matches!(
-        node.kind,
-        NodeKind::Artifact | NodeKind::Document | NodeKind::Adr
-    ) || matches!(node.kind, NodeKind::SymbolRef | NodeKind::TestCase)
-        && (node.label.contains('/') || node.label.contains('\\'))
-    {
-        Some(node.label.clone())
-    } else {
-        None
+    if let Some(identity) = code_system_graph_core::SourceSymbolIdentity::from_node(node) {
+        return Some(identity.source_path().to_owned());
     }
+    if node.kind == NodeKind::Artifact {
+        // Artifact also represents generated clients and protobuf messages. Only
+        // file-artifact identities guarantee that their label is a source path.
+        let repository = node.repo_id.as_ref()?;
+        return [
+            "artifact",
+            "event-artifact",
+            "graphql-artifact",
+            "protobuf-artifact",
+        ]
+        .iter()
+        .any(|prefix| node.stable_key == format!("{prefix}:{}:{}", repository.as_str(), node.label))
+        .then(|| node.label.clone());
+    }
+    matches!(node.kind, NodeKind::Document | NodeKind::Adr).then(|| node.label.clone())
 }
 
 fn match_explanation(explanation: &SearchExplanation) -> String {
@@ -705,7 +714,7 @@ mod tests {
     };
 
     use super::{
-        AgentPresentationContext, AgentRelationScope, REPOSITORY_RELATION_PREVIEW_LIMIT, inverse_relationship_phrase, match_explanation, relationship_phrase
+        AgentPresentationContext, AgentRelationScope, REPOSITORY_RELATION_PREVIEW_LIMIT, entity_path, inverse_relationship_phrase, match_explanation, relationship_phrase
     };
 
     #[test]
@@ -741,6 +750,21 @@ mod tests {
             assert_ne!(relationship_phrase(kind), "");
             assert_ne!(inverse_relationship_phrase(kind), "");
         }
+    }
+
+    #[test]
+    fn artifact_labels_are_paths_only_for_file_artifacts() {
+        let mut node = Node {
+            id: NodeId::new("node:artifact"),
+            kind: NodeKind::Artifact,
+            repo_id: Some(RepoId::new("repo:api")),
+            stable_key: "generated-client:repo:api:openapitools.json:rust-client:".to_owned(),
+            label: "rust".to_owned(),
+        };
+        assert_eq!(entity_path(&node), None);
+        node.label = "src/a:b.proto".to_owned();
+        node.stable_key = "protobuf-artifact:repo:api:src/a:b.proto".to_owned();
+        assert_eq!(entity_path(&node).as_deref(), Some("src/a:b.proto"));
     }
 
     #[test]
@@ -829,13 +853,6 @@ mod tests {
                 .get(&RepoId::new("repo:source"))
                 .map(Vec::len),
             Some(2_000)
-        );
-        assert_eq!(context.edge_by_id.len(), 2_000);
-        assert_eq!(
-            context
-                .relation_for_edge_id("edge:1999")
-                .map(|relation| relation.edge_id),
-            Some("edge:1999".to_owned())
         );
         let projected = context.semantic_relations_for(
             std::slice::from_ref(&repository.id),

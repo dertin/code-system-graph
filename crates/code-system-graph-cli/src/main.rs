@@ -11,7 +11,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use anyhow::Context;
 use clap::{ArgAction, CommandFactory, Parser, Subcommand, ValueEnum};
 use code_system_graph::http_server::{BearerToken, HttpServerConfig, serve_http};
-use code_system_graph::mcp::CodeSystemGraphServer;
+use code_system_graph::mcp::{CodeSystemGraphServer, ResponseFormat};
 use code_system_graph::{
     AgentPluginCreateRequest, AgentPluginCreateTarget, AgentPluginError, AgentPluginUninstallRequest, ApplicationError, ChangesInput, CommunityInput, PullRequestInput, PullRequestListInput, ScanOverrides, SearchInput, TraceInput, add_repository_to_manifest, add_workspace_to_registry, agent_plugin_exit_code, analyze_workspace_changes_with_cancellation, application_exit_code, backup_database, communities_workspace, contracts_workspace, create_agent_plugin, create_diagnostic_bundle, doctor_workspace, export_workspace, impact_workspace, impact_workspace_with_codegraph, initialize_workspace, inspect_pull_request_with_cancellation, list_pull_requests, list_repository_registry, list_workspace_registry, load_agent_plugin_mcp_binding, load_server_execution_policy, remove_repository_from_manifest, remove_workspace_from_registry, restore_database, run_worker_from_stdio, scan_workspace_with_overrides, search_workspace_with_policy, show_extended_config, status_workspace, sync_workspace_with_overrides, trace_workspace, traverse_workspace, uninstall_composed_integration
 };
@@ -503,6 +503,9 @@ enum Command {
     },
     /// Run the read-only MCP server over stdio.
     Mcp {
+        /// Canonical response representation; each result uses one content channel.
+        #[arg(long, value_enum, default_value = "json")]
+        response_format: ResponseFormat,
         /// Trusted global workspace manifest; required in direct mode.
         #[arg(long, required_unless_present = "binding", conflicts_with = "binding")]
         config: Option<PathBuf>,
@@ -1968,6 +1971,7 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             }
         }
         Command::Mcp {
+            response_format,
             config,
             database,
             workspace,
@@ -2004,6 +2008,7 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                 codegraph_server_policy(codegraph, codegraph_binary);
             let execution_policy = load_server_execution_policy(&config, &workspace)?;
             let service = CodeSystemGraphServer::new(database, workspace)
+                .with_response_format(response_format)
                 .with_execution_policy(execution_policy)
                 .with_pull_request_providers(
                     enable_github_pull_requests,
